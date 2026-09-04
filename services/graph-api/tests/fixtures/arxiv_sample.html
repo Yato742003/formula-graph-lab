@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta name="citation_title" content="A Small Attention Paper">
+    <meta name="citation_author" content="Ada Researcher">
+    <meta name="citation_author" content="Emmy Scientist">
+    <title>Fallback title</title>
+  </head>
+  <body>
+    <h2 id="S3">3 Attention</h2>
+    <p>We define scaled dot-product attention as follows.</p>
+    <div id="S3.E1" class="ltx_equation">
+      <math alttext="fallback">
+        <semantics>
+          <mrow><mi>A</mi><mo>=</mo><mi>Q</mi></mrow>
+          <annotation encoding="application/x-tex">
+            A(Q,K,V)=\operatorname{softmax}(QK^T/\sqrt{d_k})V
+          </annotation>
+        </semantics>
+      </math>
+      <span class="ltx_tag_equation">(1)</span>
+    </div>
+    <p>The scale controls the magnitude of the logits.</p>
+    <div id="S3.E2" class="ltx_equation">
+      <math alttext="head_i = Attention(QW_i^Q, KW_i^K, VW_i^V)">
+        <mrow><mi>head</mi></mrow>
+      </math>
+      <span class="ltx_tag_equation">(2)</span>
+    </div>
+  </body>
+</html>
