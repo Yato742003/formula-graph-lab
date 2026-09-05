@@ -1,0 +1,19 @@
+# Dedicated ephemeral integration database. Never use the development data volume.
+services:
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: neo4j/${TEST_NEO4J_PASSWORD:?set a temporary test password}
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+    ports:
+      - "127.0.0.1::7687"
+    tmpfs:
+      - /data
+      - /logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:7474 >/dev/null 2>&1 || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40

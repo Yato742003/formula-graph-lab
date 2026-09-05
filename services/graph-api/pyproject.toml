@@ -8,6 +8,7 @@ dependencies = [
   "graphiti-core==0.30.1",
   "httpx>=0.28,<1",
   "lxml>=6,<7",
+  "neo4j>=6.3,<7",
   "pydantic>=2.11,<3",
   "sympy>=1.14,<2",
   "uvicorn[standard]>=0.35,<1",
@@ -22,7 +23,11 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -m 'not live and not integration'"
+markers = [
+  "live: opt-in checks against public arXiv HTML pages",
+  "integration: opt-in isolated Neo4j tests",
+]
 
 [tool.ruff]
 line-length = 100

@@ -1,0 +1,201 @@
+[
+  {
+    "paper_id": "1706.03762",
+    "source_url": "https://arxiv.org/html/1706.03762",
+    "equations": [
+      {
+        "anchor": "S3.E1",
+        "equation_number": "(1)",
+        "source_fragments": [
+          "\\mathrm{Attention}(Q,K,V)=\\mathrm{softmax}(\\frac{QK^{T}}{\\sqrt{d_{k}}})V"
+        ]
+      }
+    ]
+  },
+  {
+    "paper_id": "1810.04805",
+    "source_url": "https://arxiv.org/html/1810.04805",
+    "equations": [
+      {
+        "anchor": "A1.Ex1",
+        "equation_number": null,
+        "source_fragments": [
+          "\\displaystyle=\\text{\\tt{[CLS] the man went to [MASK] store [SEP]}}"
+        ]
+      },
+      {
+        "anchor": "A1.Ex3",
+        "equation_number": null,
+        "source_fragments": [
+          "\\displaystyle=\\text{\\tt{IsNext}}"
+        ]
+      },
+      {
+        "anchor": "A1.Ex5",
+        "equation_number": null,
+        "source_fragments": [
+          "\\displaystyle=\\text{\\tt{[CLS] the man [MASK] to the store [SEP]}}"
+        ]
+      },
+      {
+        "anchor": "A1.Ex7",
+        "equation_number": null,
+        "source_fragments": [
+          "\\displaystyle=\\text{\\tt{NotNext}}"
+        ]
+      }
+    ]
+  },
+  {
+    "paper_id": "2005.14165",
+    "source_url": "https://arxiv.org/html/2005.14165",
+    "equations": [
+      {
+        "anchor": "A1.Ex1",
+        "equation_number": null,
+        "source_fragments": [
+          "\\verb|np.random.pareto|(\\alpha)>1-\\verb|document_score|"
+        ]
+      }
+    ]
+  },
+  {
+    "paper_id": "2010.11929",
+    "source_url": "https://arxiv.org/html/2010.11929",
+    "equations": [
+      {
+        "anchor": "S3.E1",
+        "equation_number": "(1)",
+        "source_fragments": [
+          "\\displaystyle\\mathbf{z}_{0}",
+          "\\displaystyle=[\\mathbf{x}_{\\text{class}};\\,\\mathbf{x}^{1}_{p}\\mathbf{E};\\,\\mathbf{x}^{2}_{p}\\mathbf{E};\\cdots;\\,\\mathbf{x}^{N}_{p}\\mathbf{E}]+\\mathbf{E}_{pos},",
+          "\\displaystyle\\mathbf{E}\\in\\mathbb{R}^{(P^{2}\\cdot C)\\times D},\\,\\mathbf{E}_{pos}\\in\\mathbb{R}^{(N+1)\\times D}"
+        ]
+      },
+      {
+        "anchor": "S3.E2",
+        "equation_number": "(2)",
+        "source_fragments": [
+          "\\displaystyle\\mathbf{z^{\\prime}}_{\\ell}",
+          "\\displaystyle=\\operatorname{MSA}(\\operatorname{LN}(\\mathbf{z}_{\\ell-1}))+\\mathbf{z}_{\\ell-1},",
+          "\\displaystyle\\ell=1\\ldots L"
+        ]
+      },
+      {
+        "anchor": "S3.E3",
+        "equation_number": "(3)",
+        "source_fragments": [
+          "\\displaystyle\\mathbf{z}_{\\ell}",
+          "\\displaystyle=\\operatorname{MLP}(\\operatorname{LN}(\\mathbf{z^{\\prime}}_{\\ell}))+\\mathbf{z^{\\prime}}_{\\ell},",
+          "\\displaystyle\\ell=1\\ldots L"
+        ]
+      },
+      {
+        "anchor": "S3.E4",
+        "equation_number": "(4)",
+        "source_fragments": [
+          "\\displaystyle\\mathbf{y}",
+          "\\displaystyle=\\operatorname{LN}(\\mathbf{z}_{L}^{0})"
+        ]
+      }
+    ]
+  },
+  {
+    "paper_id": "2103.00020",
+    "source_url": "https://arxiv.org/html/2103.00020",
+    "equations": []
+  },
+  {
+    "paper_id": "2205.14135",
+    "source_url": "https://arxiv.org/html/2205.14135",
+    "equations": [
+      {
+        "anchor": "S2.Ex1",
+        "equation_number": null,
+        "source_fragments": [
+          "\\mathbf{S}=\\mathbf{Q}\\mathbf{K}^{\\top}\\in\\mathbb{R}^{N\\times N},\\quad\\mathbf{P}=\\mathrm{softmax}(\\mathbf{S})\\in\\mathbb{R}^{N\\times N},\\quad\\mathbf{O}=\\mathbf{P}\\mathbf{V}\\in\\mathbb{R}^{N\\times d},"
+        ]
+      }
+    ]
+  },
+  {
+    "paper_id": "2302.13971",
+    "source_url": "https://arxiv.org/html/2302.13971",
+    "equations": [
+      {
+        "anchor": "S6.Ex1",
+        "equation_number": null,
+        "source_fragments": [
+          "\\textrm{Wh}=\\textrm{GPU-h}\\times(\\textrm{GPU power consumption})\\times\\textrm{PUE},"
+        ]
+      }
+    ]
+  },
+  {
+    "paper_id": "2307.09288",
+    "source_url": "https://arxiv.org/html/2307.09288",
+    "equations": [
+      {
+        "anchor": "S3.E1",
+        "equation_number": "(1)",
+        "source_fragments": [
+          "\\mathcal{L}_{\\text{ranking}}=-\\text{log}(\\sigma(r_{\\theta}(x,y_{c})-r_{\\theta}(x,y_{r})))"
+        ]
+      }
+    ]
+  },
+  {
+    "paper_id": "2210.02747",
+    "source_url": "https://arxiv.org/html/2210.02747",
+    "equations": [
+      {
+        "anchor": "S2.E1",
+        "equation_number": "(1)",
+        "source_fragments": [
+          "\\displaystyle\\frac{d}{dt}\\phi_{t}(x)",
+          "\\displaystyle=v_{t}(\\phi_{t}(x))"
+        ]
+      },
+      {
+        "anchor": "S2.E2",
+        "equation_number": "(2)",
+        "source_fragments": [
+          "\\displaystyle\\phi_{0}(x)",
+          "\\displaystyle=x"
+        ]
+      }
+    ]
+  },
+  {
+    "paper_id": "2006.11239",
+    "source_url": "https://arxiv.org/html/2006.11239",
+    "equations": [
+      {
+        "anchor": "S2.E1",
+        "equation_number": "(1)",
+        "source_fragments": [
+          "\\displaystyle p_{\\theta}(\\mathbf{x}_{0:T})",
+          "\\displaystyle\\coloneqq p(\\mathbf{x}_{T})\\prod_{t=1}^{T}p_{\\theta}(\\mathbf{x}_{t-1}|\\mathbf{x}_{t}),\\qquad p_{\\theta}(\\mathbf{x}_{t-1}|\\mathbf{x}_{t})\\coloneqq\\mathcal{N}(\\mathbf{x}_{t-1};{\\boldsymbol{\\mu}}_{\\theta}(\\mathbf{x}_{t},t),{\\boldsymbol{\\Sigma}}_{\\theta}(\\mathbf{x}_{t},t))"
+        ]
+      }
+    ]
+  },
+  {
+    "paper_id": "2106.09685",
+    "source_url": "https://arxiv.org/html/2106.09685",
+    "equations": [
+      {
+        "anchor": "S2.E1",
+        "equation_number": "(1)",
+        "source_fragments": [
+          "\\displaystyle\\max_{\\Phi}\\sum_{(x,y)\\in\\mathcal{Z}}\\sum_{t=1}^{|y|}\\text{log}\\left(P_{\\Phi}(y_{t}|x,y_{<t})\\right)"
+        ]
+      }
+    ]
+  },
+  {
+    "paper_id": "2402.08954",
+    "source_url": "https://arxiv.org/html/2402.08954",
+    "equations": []
+  }
+]

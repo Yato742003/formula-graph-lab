@@ -1,0 +1,14 @@
+[
+  {"paper_id":"1706.03762","title_contains":"Attention Is All You Need","min_display_equations":5},
+  {"paper_id":"1810.04805","title_contains":"BERT","min_display_equations":1},
+  {"paper_id":"2005.14165","title_contains":"Few-Shot Learners","min_display_equations":1},
+  {"paper_id":"2010.11929","title_contains":"16x16 Words","min_display_equations":1},
+  {"paper_id":"2103.00020","title_contains":"Natural Language Supervision","min_display_equations":0,"max_display_equations":0},
+  {"paper_id":"2205.14135","title_contains":"FlashAttention","min_display_equations":1},
+  {"paper_id":"2302.13971","title_contains":"LLaMA","min_display_equations":1},
+  {"paper_id":"2307.09288","title_contains":"Llama 2","min_display_equations":1},
+  {"paper_id":"2210.02747","title_contains":"Flow Matching","min_display_equations":30},
+  {"paper_id":"2006.11239","title_contains":"Denoising Diffusion Probabilistic Models","min_display_equations":20},
+  {"paper_id":"2106.09685","title_contains":"LoRA","min_display_equations":5},
+  {"paper_id":"2402.08954","title_contains":"HTML papers on arXiv","min_display_equations":0,"max_display_equations":0}
+]

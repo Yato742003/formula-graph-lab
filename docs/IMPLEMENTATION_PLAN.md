@@ -118,6 +118,11 @@ Goal: transform an arXiv HTML page into stable structured extraction output.
 - Tests: versioned and unversioned URL, missing optional metadata, deterministic
   hash for repeated imports.
 
+The watermark date is the revision date, stored without inventing a timestamp
+or first-submission date. Missing metadata produces warnings. Ingestion then
+requires an explicit timezone-aware source reference time. Generated identifiers
+must not be presented as existing source anchors.
+
 Definition of done:
 
 - A fixture corpus of at least 10 representative arXiv HTML pages passes.
@@ -147,6 +152,12 @@ Edges: `HAS_VERSION`, `CONTAINS`, `DEFINES`, `USES`, `ASSUMES`,
 - Exact equations and deterministic edges use structured JSON/direct triplets;
   prose uses LLM-assisted extraction.
 - Tests: ordering, stable episode UUID, provenance mapping, idempotent replay.
+
+Exact nodes/structural edges use atomic Evidence/EVIDENCE_RELATION writes.
+Episodes/sagas use Graphiti's Episodic/Saga schema. Optional prose enrichment
+uses the separate Entity/RELATES_TO layer, with retry receipts and revision
+guards required before release. Graphiti 0.30.1 loads an existing episode when
+passed a UUID, so persist it first. Workspace group IDs follow its ASCII policy.
 
 ### FGL-203 Revision semantics
 

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from fastapi import Depends, FastAPI, HTTPException
 
 from app.auth import require_service_token
-from app.extractor import extract_paper
+from app.extractor import PaperExtractionError, extract_paper
 from app.fetcher import PaperFetchError, fetch_paper_html
 from app.models import ExtractedPaper, HealthResponse, PaperImportRequest
 from app.security import UnsafePaperUrl, normalize_arxiv_html_url
@@ -46,4 +46,7 @@ async def preview_extraction(
     except PaperFetchError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    return extract_paper(html_text, final_url)
+    try:
+        return extract_paper(html_text, final_url)
+    except PaperExtractionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

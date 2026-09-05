@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import urljoin
 
 import httpx
@@ -13,9 +14,22 @@ class PaperFetchError(RuntimeError):
 
 MAX_HTML_BYTES = 5 * 1024 * 1024
 MAX_REDIRECTS = 2
+FETCH_TIMEOUT_SECONDS = 10
 
 
 async def fetch_paper_html(
+    paper_url: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> tuple[str, str]:
+    try:
+        async with asyncio.timeout(FETCH_TIMEOUT_SECONDS):
+            return await _fetch_paper_html(paper_url, client=client)
+    except TimeoutError as exc:
+        raise PaperFetchError("Paper source timed out.") from exc
+
+
+async def _fetch_paper_html(
     paper_url: str,
     *,
     client: httpx.AsyncClient | None = None,
@@ -52,16 +66,16 @@ async def fetch_paper_html(
                             f"Paper source returned HTTP {response.status_code}."
                         ) from exc
 
-                    content_type = response.headers.get("content-type", "").lower()
-                    if not (
-                        content_type.startswith("text/html")
-                        or content_type.startswith("application/xhtml+xml")
-                    ):
+                    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                    if content_type not in {"text/html", "application/xhtml+xml"}:
                         raise PaperFetchError("Paper source did not return HTML.")
 
                     declared_size = response.headers.get("content-length")
-                    if declared_size and int(declared_size) > MAX_HTML_BYTES:
-                        raise PaperFetchError("Paper HTML exceeds the 5 MiB limit.")
+                    if declared_size:
+                        if not declared_size.isascii() or not declared_size.isdigit():
+                            raise PaperFetchError("Paper source returned an invalid content length.")
+                        if int(declared_size) > MAX_HTML_BYTES:
+                            raise PaperFetchError("Paper HTML exceeds the 5 MiB limit.")
 
                     chunks: list[bytes] = []
                     size = 0

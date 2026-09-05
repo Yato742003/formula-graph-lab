@@ -14,7 +14,10 @@ This is a new project. It does not import from or modify
 - Safe bounded HTML fetcher with validated redirects and MIME/size limits.
 - MathML extraction that keeps display equations, TeX annotations, section
   context, source anchors, and deterministic IDs.
-- Graphiti 0.30.1 ontology and structured episode adapter.
+- Aligned MathML assembly with original fragments and review warnings.
+- Revision dates, pinned source URLs, ordered sections and twelve frozen/live fixtures.
+- Graphiti 0.30.1 ontology and ordered metadata/section episode adapter.
+- Atomic exact-evidence writer with isolated Neo4j tests (database verification pending).
 - D1 schema for workspaces, paper imports, and hypothesis metadata.
 - Neo4j + Graph API Docker Compose definition.
 - WebMCP `stage_paper_import` progressive-enhancement tool.
@@ -22,7 +25,18 @@ This is a new project. It does not import from or modify
 
 The graph viewport currently uses a curated Attention graph while the extraction
 response is shown in the import status. Persisting extracted results to a live
-Neo4j instance is the next planned slice.
+Neo4j instance through the authenticated UI is the next planned slice. The graph
+writer is implemented as a service component; the API exposes preview only.
+
+Exact evidence uses Neo4j Evidence/EVIDENCE_RELATION, apart from Graphiti's
+mutable Entity/RELATES_TO semantic layer. Episodes/sagas use Graphiti's schema.
+Model output cannot overwrite exact formulas.
+
+Default Python tests run offline. Add -m live -s to the pytest command to check
+whole current arXiv pages. Run ./test-integration.ps1 with Docker Desktop ready
+for the database tests. That runner creates a uniquely named temporary Compose
+project with a random password, loopback port and memory-backed storage, then
+removes only its own containers.
 
 ## Architecture
 
