@@ -25,6 +25,7 @@ class EvidenceGraph:
     paper_id: str
     version: int | None
     source_sha256: str
+    paper_version_uuid: str
     episodes: list[ResearchEpisode]
     nodes: list[dict]
     edges: list[dict]
@@ -45,6 +46,8 @@ def build_evidence_graph(
         nodes.append({
             "uuid": node_uuid, "kind": kind, "logical_id": logical_id,
             "payload": _json(payload), "episode_uuid": episode_uuid,
+            "paper_id": paper.paper_id,
+            "paper_version": paper.version if kind != "Paper" else None,
         })
         return node_uuid
 
@@ -80,7 +83,15 @@ def build_evidence_graph(
         section_uuid = section_nodes[section.section_id]
         episode_uuid = section_episodes[section.section_id]
         anchor = section.anchor if section.anchor_is_source else ""
-        edge(version_uuid, section_uuid, "PaperVersion", "Section", "contains", episode_uuid, anchor)
+        edge(
+            version_uuid,
+            section_uuid,
+            "PaperVersion",
+            "Section",
+            "contains",
+            episode_uuid,
+            anchor,
+        )
         if section.parent_section_id:
             if section.parent_section_id not in section_nodes:
                 raise ValueError("A section references an unknown parent.")
@@ -101,5 +112,69 @@ def build_evidence_graph(
     return EvidenceGraph(
         import_uuid=root.uuid, group_id=root.group_id, paper_id=paper.paper_id,
         version=paper.version, source_sha256=paper.source_sha256,
-        episodes=episodes, nodes=nodes, edges=edges,
+        paper_version_uuid=version_uuid, episodes=episodes, nodes=nodes, edges=edges,
+    )
+
+
+@dataclass(frozen=True)
+class ReportedClaim:
+    uuid: str
+    group_id: str
+    paper_id: str
+    paper_version: int | None
+    paper_version_uuid: str
+    episode_uuid: str
+    logical_id: str
+    statement: str
+    source_anchor: str
+    payload: str
+
+
+def build_reported_claim(
+    graph: EvidenceGraph,
+    *,
+    logical_id: str,
+    statement: str,
+    source_anchor: str,
+) -> ReportedClaim:
+    logical_id = logical_id.strip()
+    statement = statement.strip()
+    source_anchor = source_anchor.strip()
+    if not logical_id or len(logical_id) > 200:
+        raise ValueError("A bounded claim ID is required.")
+    if not statement or len(statement) > 20_000:
+        raise ValueError("A bounded claim statement is required.")
+    anchored_nodes = []
+    for item in graph.nodes:
+        if item["kind"] not in {"Section", "Equation"}:
+            continue
+        payload = json.loads(item["payload"])
+        if payload.get("anchor_is_source") and payload.get("anchor") == source_anchor:
+            anchored_nodes.append(item)
+    if not anchored_nodes:
+        raise ValueError("A claim must resolve to a source section or equation anchor.")
+    episode_ids = {item["episode_uuid"] for item in anchored_nodes}
+    if len(episode_ids) != 1:
+        raise ValueError("A claim anchor resolves ambiguously across source episodes.")
+    episode_uuid = next(iter(episode_ids))
+    claim_uuid = _uuid(graph.import_uuid, "Claim", logical_id)
+    payload = _json({
+        "claim_id": logical_id,
+        "statement": statement,
+        "scope_paper_id": graph.paper_id,
+        "paper_version": graph.version,
+        "status": "reported",
+        "source_anchor": source_anchor,
+    })
+    return ReportedClaim(
+        uuid=claim_uuid,
+        group_id=graph.group_id,
+        paper_id=graph.paper_id,
+        paper_version=graph.version,
+        paper_version_uuid=graph.paper_version_uuid,
+        episode_uuid=episode_uuid,
+        logical_id=logical_id,
+        statement=statement,
+        source_anchor=source_anchor,
+        payload=payload,
     )

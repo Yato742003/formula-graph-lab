@@ -683,6 +683,33 @@ button {
   color: #9298a5;
 }
 
+.graph-empty {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  z-index: 2;
+  display: grid;
+  width: min(280px, calc(100% - 40px));
+  justify-items: center;
+  gap: 6px;
+  color: #7a8499;
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+
+.graph-empty svg {
+  color: #526fc2;
+}
+
+.graph-empty strong {
+  color: #2a385e;
+  font-size: 14px;
+}
+
+.graph-empty span {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .pulse-dot {
   width: 6px;
   height: 6px;
@@ -870,10 +897,14 @@ button {
 }
 
 .symbol-table b {
+  max-width: 145px;
+  overflow: hidden;
   color: #424c61;
   font-family: var(--font-geist-mono);
   font-size: 9px;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .check-list {
@@ -911,12 +942,38 @@ button {
   color: #526077;
   background: white;
   text-align: left;
+  text-decoration: none;
   font-size: 10px;
 }
 
 .source-link:hover {
   border-color: #bcc9e6;
   color: #3453a5;
+}
+
+.inspector-empty {
+  display: grid;
+  min-height: 260px;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  color: #7b8497;
+  text-align: center;
+}
+
+.inspector-empty svg {
+  color: #526fc2;
+}
+
+.inspector-empty strong {
+  color: #2c395d;
+  font-size: 14px;
+}
+
+.inspector-empty span {
+  max-width: 220px;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 @media (max-width: 1180px) {

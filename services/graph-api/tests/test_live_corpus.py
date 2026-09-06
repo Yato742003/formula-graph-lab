@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-import asyncio
 from pathlib import Path
 
 import pytest
@@ -10,7 +10,6 @@ from lxml import html
 
 from app.extractor import extract_paper
 from app.fetcher import fetch_paper_html
-
 
 CORPUS_PATH = Path(__file__).with_name("live_corpus.json")
 ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}$")

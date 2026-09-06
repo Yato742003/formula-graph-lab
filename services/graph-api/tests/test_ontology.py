@@ -3,7 +3,11 @@ from graphiti_core.utils.ontology_utils.entity_types_utils import validate_entit
 from pydantic import ValidationError
 
 from app.ontology import (
-    ALLOWED_RELATION_PAIRS, EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES, RelationContract,
+    ALLOWED_RELATION_PAIRS,
+    EDGE_TYPE_MAP,
+    EDGE_TYPES,
+    ENTITY_TYPES,
+    RelationContract,
 )
 
 
@@ -46,3 +50,11 @@ def test_equivalence_needs_conditions():
         source_anchor="S1.E1", confidence=0.9, conditions=["x is positive"],
     )
     assert relation.conditions == ["x is positive"]
+
+
+def test_disagreement_keeps_claims_as_separate_endpoints():
+    relation = RelationContract(
+        source_type="Claim", target_type="Claim", relation="disagrees_with",
+        source_anchor="S1", confidence=1,
+    )
+    assert relation.relation == "disagrees_with"

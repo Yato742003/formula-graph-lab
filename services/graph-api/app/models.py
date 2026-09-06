@@ -10,6 +10,10 @@ class PaperImportRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
 
 
+class EvidenceImportRequest(PaperImportRequest):
+    workspace_id: str = Field(min_length=1, max_length=200, pattern=r".*\S.*")
+
+
 class ExtractedEquation(BaseModel):
     equation_id: str
     anchor: str
@@ -54,3 +58,16 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
     graph_backend: Literal["not_configured", "configured"]
     checked_at: datetime
+
+
+class EvidenceImportReceipt(BaseModel):
+    import_uuid: str
+    node_count: int = Field(ge=0)
+    edge_count: int = Field(ge=0)
+    episode_count: int = Field(ge=1)
+    replayed: bool
+
+
+class EvidenceImportResponse(BaseModel):
+    paper: ExtractedPaper
+    receipt: EvidenceImportReceipt

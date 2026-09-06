@@ -6,7 +6,6 @@ import pytest
 from app.episodes import build_paper_episode, paper_episode_uuid
 from app.extractor import extract_paper
 
-
 FIXTURE = Path(__file__).parent / "fixtures" / "arxiv_sample.html"
 
 

@@ -20,6 +20,10 @@ import { SyntheticEvent, useEffect, useMemo, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import type {
+  ImportedPaper,
+  WorkspaceImportResponse,
+} from '@/lib/import-types';
 import { normalizeArxivHtmlUrl, PaperUrlError } from '@/lib/paper-url';
 
 type FormulaNode = {
@@ -41,7 +45,7 @@ type ResearchWorkspaceProps = {
   };
 };
 
-const nodes: FormulaNode[] = [
+const demoNodes: FormulaNode[] = [
   {
     id: 'dot-product',
     label: 'Dot-product attention',
@@ -99,7 +103,7 @@ const nodes: FormulaNode[] = [
   },
 ];
 
-const connections = [
+const demoConnections = [
   ['dot-product', 'scaled'],
   ['scaled', 'multi-head'],
   ['dot-product', 'kernel'],
@@ -107,13 +111,68 @@ const connections = [
   ['multi-head', 'mashup'],
 ];
 
-const paperSections = [
+const demoPaperSections = [
   { label: '3.2.1 Scaled Dot-Product', count: 1, active: true },
   { label: '3.2 Multi-Head Attention', count: 4, active: false },
   { label: '3.3 Feed-Forward Networks', count: 1, active: false },
   { label: '3.5 Positional Encoding', count: 2, active: false },
   { label: '5.3 Optimizer', count: 1, active: false },
 ];
+
+const importedNodePositions = [
+  [7, 12],
+  [55, 12],
+  [7, 34],
+  [55, 34],
+  [7, 56],
+  [55, 56],
+  [7, 78],
+  [55, 78],
+] as const;
+
+function importedFormulaNodes(paper: ImportedPaper): FormulaNode[] {
+  return paper.equations.slice(0, importedNodePositions.length).map((equation, index) => {
+    const [x, y] = importedNodePositions[index];
+    return {
+      id: equation.equation_id,
+      label: equation.equation_number
+        ? `Equation ${equation.equation_number}`
+        : `Formula ${index + 1}`,
+      formula: equation.latex,
+      type: 'evidence',
+      x,
+      y,
+      confidence: equation.confidence,
+      source: `${equation.section ?? 'Unsectioned'} · #${equation.anchor}`,
+      relation: 'source-bound',
+    };
+  });
+}
+
+function authorsLabel(authors: string[]): string {
+  if (authors.length === 0) return 'Authors unavailable';
+  if (authors.length === 1) return authors[0];
+  return `${authors[0]} et al.`;
+}
+
+function importErrorMessage(code?: string): string {
+  switch (code) {
+    case 'AUTH_REQUIRED':
+      return 'Your sign-in expired · reload to continue';
+    case 'DATABASE_UNAVAILABLE':
+      return 'Workspace storage is temporarily unavailable';
+    case 'EXTRACTION_FAILED':
+      return 'This paper could not be extracted safely';
+    case 'GRAPH_API_NOT_CONFIGURED':
+      return 'The graph service is not connected in this environment';
+    case 'GRAPH_API_RESPONSE_TOO_LARGE':
+      return 'The extracted paper exceeds the current import limit';
+    case 'GRAPH_API_UNAVAILABLE':
+      return 'The graph service is temporarily unavailable';
+    default:
+      return `Import stopped · ${code ?? 'unknown error'}`;
+  }
+}
 
 function nodeTone(type: FormulaNode['type']) {
   if (type === 'hypothesis') return 'hypothesis-node';
@@ -124,16 +183,54 @@ function nodeTone(type: FormulaNode['type']) {
 export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   const [selectedId, setSelectedId] = useState('scaled');
   const [isImporting, setIsImporting] = useState(false);
+  const [imported, setImported] = useState<WorkspaceImportResponse | null>(null);
   const [paperUrl, setPaperUrl] = useState(
     'https://arxiv.org/html/1706.03762',
   );
   const [notice, setNotice] = useState(
-    'Demo graph loaded · source extraction service is next',
+    'Curated demo · import an arXiv HTML paper to replace it',
+  );
+  const graphNodes = useMemo(
+    () => (imported ? importedFormulaNodes(imported.paper) : demoNodes),
+    [imported],
   );
   const selected = useMemo(
-    () => nodes.find((node) => node.id === selectedId) ?? nodes[1],
-    [selectedId],
+    () =>
+      graphNodes.find((node) => node.id === selectedId) ??
+      graphNodes[0] ??
+      null,
+    [graphNodes, selectedId],
   );
+  const selectedEquation = useMemo(
+    () =>
+      imported?.paper.equations.find(
+        (equation) => equation.equation_id === selected?.id,
+      ) ?? null,
+    [imported, selected],
+  );
+  const paperSections = useMemo(
+    () =>
+      imported
+        ? imported.paper.sections.map((section) => ({
+            id: section.section_id,
+            label: section.title,
+            count: section.equation_ids.length,
+            active: selectedEquation?.section_id === section.section_id,
+          }))
+        : demoPaperSections.map((section, index) => ({
+            ...section,
+            id: `demo-${index}`,
+          })),
+    [imported, selectedEquation],
+  );
+  const graphConnections = imported ? [] : demoConnections;
+  const sourceHref = imported
+    ? `${imported.paper.source_url}${
+        selectedEquation?.anchor_is_source
+          ? `#${encodeURIComponent(selectedEquation.anchor)}`
+          : ''
+      }`
+    : 'https://arxiv.org/html/1706.03762v7';
 
   useEffect(() => {
     const context = document.modelContext;
@@ -191,27 +288,30 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
       const canonicalUrl = normalizeArxivHtmlUrl(paperUrl);
       setPaperUrl(canonicalUrl);
       setIsImporting(true);
-      setNotice('Extracting MathML and source anchors…');
-      const response = await fetch('/api/imports/preview', {
+      setNotice('Extracting and persisting source-bound evidence…');
+      const response = await fetch('/api/imports', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ url: canonicalUrl }),
       });
-      const result = (await response.json()) as {
+      const result = (await response.json()) as Partial<WorkspaceImportResponse> & {
         code?: string;
-        equations?: unknown[];
-        title?: string;
       };
       if (!response.ok) {
-        setNotice(
-          result.code === 'GRAPH_API_UNAVAILABLE'
-            ? 'Extractor service is offline · the curated demo graph remains available'
-            : `Import stopped · ${result.code ?? 'unknown error'}`,
-        );
+        setNotice(importErrorMessage(result.code));
         return;
       }
+      if (!result.paper || !result.receipt || !result.job_id) {
+        setNotice('Import stopped · invalid server response');
+        return;
+      }
+      const completed = result as WorkspaceImportResponse;
+      setImported(completed);
+      setSelectedId(completed.paper.equations[0]?.equation_id ?? '');
       setNotice(
-        `${result.equations?.length ?? 0} equations extracted from ${result.title ?? 'paper'}`,
+        `${completed.paper.equations.length} equations ${
+          completed.receipt.replayed ? 'already synchronized' : 'persisted'
+        } · ${completed.paper.title}`,
       );
     } catch (error) {
       setNotice(
@@ -270,7 +370,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
           />
           <Button className="import-button" type="submit" disabled={isImporting}>
             <Plus size={16} />
-            {isImporting ? 'Extracting…' : 'Import paper'}
+            {isImporting ? 'Importing…' : 'Import paper'}
           </Button>
         </form>
         <p className="import-notice" aria-live="polite">
@@ -280,7 +380,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
       </section>
 
       <div className="research-grid">
-        <aside className="source-panel">
+        <aside className="source-panel" aria-label="Paper sources">
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Evidence</p>
@@ -293,15 +393,27 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
 
           <article className="paper-card">
             <div className="paper-index">P–01</div>
-            <Badge className="version-badge">v7 · current</Badge>
-            <h3>Attention Is All You Need</h3>
-            <p>Vaswani et al. · arXiv:1706.03762</p>
+            <Badge className="version-badge">
+              {imported
+                ? `v${imported.paper.version} · persisted`
+                : 'v7 · curated demo'}
+            </Badge>
+            <h3>{imported?.paper.title ?? 'Attention Is All You Need'}</h3>
+            <p>
+              {imported
+                ? `${authorsLabel(imported.paper.authors)} · arXiv:${imported.paper.paper_id}`
+                : 'Vaswani et al. · arXiv:1706.03762'}
+            </p>
             <div className="paper-meta">
               <span>
-                <Braces size={14} />9 equations
+                <Braces size={14} />
+                {imported?.paper.equations.length ?? 7} equations
               </span>
               <span>
-                <History size={14} />6 versions
+                <History size={14} />
+                {imported
+                  ? `${imported.receipt.node_count} evidence nodes`
+                  : '6 versions'}
               </span>
             </div>
           </article>
@@ -311,7 +423,15 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
             {paperSections.map((section) => (
               <button
                 className={`section-row ${section.active ? 'section-row-active' : ''}`}
-                key={section.label}
+                key={section.id}
+                type="button"
+                onClick={() => {
+                  if (!imported) return;
+                  const firstEquation = imported.paper.equations.find(
+                    (equation) => equation.section_id === section.id,
+                  );
+                  if (firstEquation) setSelectedId(firstEquation.equation_id);
+                }}
               >
                 <span>{section.label}</span>
                 <span>{section.count}</span>
@@ -332,7 +452,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
           <div className="graph-header">
             <div>
               <p className="eyebrow">Temporal formula graph</p>
-              <h1>Attention lineage</h1>
+              <h1>{imported ? 'Exact evidence snapshot' : 'Attention lineage'}</h1>
             </div>
             <div className="legend" aria-label="Graph legend">
               <span><i className="legend-dot evidence-dot" />Evidence</span>
@@ -349,9 +469,9 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               preserveAspectRatio="none"
               aria-hidden="true"
             >
-              {connections.map(([fromId, toId]) => {
-                const from = nodes.find((node) => node.id === fromId)!;
-                const to = nodes.find((node) => node.id === toId)!;
+              {graphConnections.map(([fromId, toId]) => {
+                const from = graphNodes.find((node) => node.id === fromId)!;
+                const to = graphNodes.find((node) => node.id === toId)!;
                 return (
                   <line
                     key={`${fromId}-${toId}`}
@@ -364,16 +484,16 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               })}
             </svg>
 
-            {nodes.map((node) => (
+            {graphNodes.map((node) => (
               <button
                 key={node.id}
                 type="button"
                 className={`formula-node ${nodeTone(node.type)} ${
-                  selected.id === node.id ? 'formula-node-selected' : ''
+                  selected?.id === node.id ? 'formula-node-selected' : ''
                 }`}
                 style={{ left: `${node.x}%`, top: `${node.y}%` }}
                 onClick={() => setSelectedId(node.id)}
-                aria-pressed={selected.id === node.id}
+                aria-pressed={selected?.id === node.id}
               >
                 <span className="node-kicker">
                   {node.type === 'hypothesis' ? 'HYPOTHESIS' : node.relation}
@@ -383,10 +503,22 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               </button>
             ))}
 
+            {graphNodes.length === 0 ? (
+              <div className="graph-empty">
+                <Braces size={24} />
+                <strong>No display equations found</strong>
+                <span>The paper snapshot is saved, but there is nothing to plot yet.</span>
+              </div>
+            ) : null}
+
             <div className="graph-status">
               <span className="pulse-dot" />
-              Graph is version-aware
-              <span>14 relationships</span>
+              {imported ? 'Exact graph persisted' : 'Version-aware demo'}
+              <span>
+                {imported
+                  ? `${Math.min(graphNodes.length, 8)} of ${imported.paper.equations.length} formulas`
+                  : '14 curated relationships'}
+              </span>
             </div>
           </div>
 
@@ -398,73 +530,109 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               <p>Research move</p>
               <strong>Combine selected formulas under typed constraints</strong>
             </div>
-            <Button variant="outline" className="mashup-button">
+            <Button
+              variant="outline"
+              className="mashup-button"
+              disabled
+              title="Formula typing and mashup arrive after retrieval"
+            >
               <FlaskConical size={16} />
-              Open mashup
+              Mashup next
             </Button>
           </div>
         </section>
 
-        <aside className="inspector-panel">
-          <div className="panel-heading inspector-heading">
-            <div>
-              <p className="eyebrow">Inspector</p>
-              <h2>{selected.label}</h2>
-            </div>
-            <span className={`type-token type-${selected.type}`}>
-              {selected.type}
-            </span>
-          </div>
-
-          <div className="formula-display">
-            <p>Canonical expression</p>
-            <code>{selected.formula}</code>
-          </div>
-
-          <section className="inspector-section">
-            <div className="section-title">
-              <h3>Relation</h3>
-              <span>{Math.round(selected.confidence * 100)}% confidence</span>
-            </div>
-            <div className="relation-card">
-              <GitBranch size={17} />
-              <div>
-                <p>{selected.relation}</p>
-                <strong>{selected.source}</strong>
+        <aside className="inspector-panel" aria-label="Formula inspector">
+          {selected ? (
+            <>
+              <div className="panel-heading inspector-heading">
+                <div>
+                  <p className="eyebrow">Inspector</p>
+                  <h2>{selected.label}</h2>
+                </div>
+                <span className={`type-token type-${selected.type}`}>
+                  {selected.type}
+                </span>
               </div>
-            </div>
-          </section>
 
-          <section className="inspector-section">
-            <div className="section-title">
-              <h3>Symbol contract</h3>
-              <span>4 symbols</span>
-            </div>
-            <div className="symbol-table">
-              <div><code>Q</code><span>query tensor</span><b>n × dₖ</b></div>
-              <div><code>K</code><span>key tensor</span><b>m × dₖ</b></div>
-              <div><code>V</code><span>value tensor</span><b>m × dᵥ</b></div>
-              <div><code>dₖ</code><span>key dimension</span><b>ℕ⁺</b></div>
-            </div>
-          </section>
+              <div className="formula-display">
+                <p>{imported ? 'Extracted expression' : 'Canonical expression'}</p>
+                <code>{selected.formula}</code>
+              </div>
 
-          <section className="inspector-section">
-            <div className="section-title">
-              <h3>Validation</h3>
-              <span>latest run</span>
-            </div>
-            <ul className="check-list">
-              <li><Check size={14} />Tensor shapes align</li>
-              <li><Check size={14} />Normalization domain valid</li>
-              <li><Check size={14} />Source anchor resolved</li>
-            </ul>
-          </section>
+              <section className="inspector-section">
+                <div className="section-title">
+                  <h3>Relation</h3>
+                  <span>{Math.round(selected.confidence * 100)}% confidence</span>
+                </div>
+                <div className="relation-card">
+                  <GitBranch size={17} />
+                  <div>
+                    <p>{selected.relation}</p>
+                    <strong>{selected.source}</strong>
+                  </div>
+                </div>
+              </section>
 
-          <button className="source-link">
-            <BookOpenText size={16} />
-            Open equation in source
-            <span>↗</span>
-          </button>
+              <section className="inspector-section">
+                <div className="section-title">
+                  <h3>{imported ? 'Source context' : 'Symbol contract'}</h3>
+                  <span>{imported ? 'immutable snapshot' : '4 symbols'}</span>
+                </div>
+                <div className="symbol-table">
+                  {selectedEquation ? (
+                    <>
+                      <div><code>#</code><span>anchor</span><b>{selectedEquation.anchor}</b></div>
+                      <div><code>§</code><span>section</span><b>{selectedEquation.section ?? '—'}</b></div>
+                      <div><code>↳</code><span>extractor</span><b>{selectedEquation.extraction_method.replaceAll('_', ' ')}</b></div>
+                      <div><code>!</code><span>review flags</span><b>{selectedEquation.warnings.length}</b></div>
+                    </>
+                  ) : (
+                    <>
+                      <div><code>Q</code><span>query tensor</span><b>n × dₖ</b></div>
+                      <div><code>K</code><span>key tensor</span><b>m × dₖ</b></div>
+                      <div><code>V</code><span>value tensor</span><b>m × dᵥ</b></div>
+                      <div><code>dₖ</code><span>key dimension</span><b>ℕ⁺</b></div>
+                    </>
+                  )}
+                </div>
+              </section>
+
+              <section className="inspector-section">
+                <div className="section-title">
+                  <h3>Validation</h3>
+                  <span>{imported ? `job ${imported.job_id.slice(-8)}` : 'demo state'}</span>
+                </div>
+                <ul className="check-list">
+                  <li><Check size={14} />Exact source snapshot retained</li>
+                  <li><Check size={14} />Paper revision pinned</li>
+                  <li>
+                    <Check size={14} />
+                    {selectedEquation?.anchor_is_source === false
+                      ? 'Generated anchor marked for review'
+                      : 'Source anchor resolved'}
+                  </li>
+                </ul>
+              </section>
+
+              <a
+                className="source-link"
+                href={sourceHref}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <BookOpenText size={16} />
+                Open equation in source
+                <span>↗</span>
+              </a>
+            </>
+          ) : (
+            <div className="inspector-empty">
+              <Braces size={22} />
+              <strong>No formula selected</strong>
+              <span>Import a paper containing display equations to inspect one.</span>
+            </div>
+          )}
         </aside>
       </div>
     </main>

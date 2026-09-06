@@ -17,16 +17,21 @@ This is a new project. It does not import from or modify
 - Aligned MathML assembly with original fragments and review warnings.
 - Revision dates, pinned source URLs, ordered sections and twelve frozen/live fixtures.
 - Graphiti 0.30.1 ontology and ordered metadata/section episode adapter.
-- Atomic exact-evidence writer with isolated Neo4j tests (database verification pending).
+- Atomic exact-evidence writer verified against isolated Neo4j 5.26 instances.
+- Revision history, cross-paper disagreement claims, and semantic-enrichment retry receipts.
 - D1 schema for workspaces, paper imports, and hypothesis metadata.
+- Authenticated `/api/imports` workflow with server-derived tenants, bounded payloads,
+  D1 job receipts, and a signed web-to-Graph-API boundary.
 - Neo4j + Graph API Docker Compose definition.
 - WebMCP `stage_paper_import` progressive-enhancement tool.
-- Frontend, backend, lint, migration, and production-build checks.
+- Frontend, backend, Python/TypeScript lint, migration, production-build, and
+  local Worker end-to-end checks.
 
-The graph viewport currently uses a curated Attention graph while the extraction
-response is shown in the import status. Persisting extracted results to a live
-Neo4j instance through the authenticated UI is the next planned slice. The graph
-writer is implemented as a service component; the API exposes preview only.
+The graph viewport starts with a curated Attention example and replaces it with
+the source-bound paper, section, and equation graph after a successful import.
+The hosted Sites build still needs a separately reachable HTTPS Graph API and
+runtime secrets before hosted imports can run; local Worker → D1 → Graph API →
+Neo4j has been exercised end to end.
 
 Exact evidence uses Neo4j Evidence/EVIDENCE_RELATION, apart from Graphiti's
 mutable Entity/RELATES_TO semantic layer. Episodes/sagas use Graphiti's schema.
@@ -108,6 +113,7 @@ docker compose up --build
 npm test
 npm run lint
 npm run build
+.\.venv\Scripts\python.exe -m ruff check services\graph-api
 .\.venv\Scripts\python.exe -m pytest services\graph-api
 npm audit --omit=dev
 ```
@@ -137,4 +143,6 @@ applied migration.
 
 The sprint plan, task IDs, test expectations, and AI handoff procedure are in
 [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md). Current evidence
-and remaining risks are tracked in [`docs/STATUS.md`](docs/STATUS.md).
+and remaining risks are tracked in [`docs/STATUS.md`](docs/STATUS.md). The
+database and local Worker evidence is recorded in
+[`docs/e2e-validation.md`](docs/e2e-validation.md).

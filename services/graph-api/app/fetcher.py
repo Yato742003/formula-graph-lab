@@ -66,14 +66,21 @@ async def _fetch_paper_html(
                             f"Paper source returned HTTP {response.status_code}."
                         ) from exc
 
-                    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                    content_type = (
+                        response.headers.get("content-type", "")
+                        .split(";")[0]
+                        .strip()
+                        .lower()
+                    )
                     if content_type not in {"text/html", "application/xhtml+xml"}:
                         raise PaperFetchError("Paper source did not return HTML.")
 
                     declared_size = response.headers.get("content-length")
                     if declared_size:
                         if not declared_size.isascii() or not declared_size.isdigit():
-                            raise PaperFetchError("Paper source returned an invalid content length.")
+                            raise PaperFetchError(
+                                "Paper source returned an invalid content length."
+                            )
                         if int(declared_size) > MAX_HTML_BYTES:
                             raise PaperFetchError("Paper HTML exceeds the 5 MiB limit.")
 

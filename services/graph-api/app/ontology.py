@@ -95,6 +95,7 @@ class TypedRelation(OntologyModel):
         "approximates",
         "generalizes",
         "equivalent_under",
+        "disagrees_with",
         "supersedes",
     ]
     source_anchor: str
@@ -117,6 +118,7 @@ ALLOWED_RELATION_PAIRS = {
     "approximates": {("Equation", "Equation")},
     "generalizes": {("Equation", "Equation"), ("Method", "Method")},
     "equivalent_under": {("Equation", "Equation")},
+    "disagrees_with": {("Claim", "Claim")},
     "supersedes": {("PaperVersion", "PaperVersion")},
 }
 
@@ -127,7 +129,7 @@ class RelationContract(TypedRelation):
     conditions: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_endpoints(self) -> "RelationContract":
+    def validate_endpoints(self) -> RelationContract:
         if (self.source_type, self.target_type) not in ALLOWED_RELATION_PAIRS[self.relation]:
             raise ValueError("The relation does not allow this source/target entity pair.")
         if self.relation == "equivalent_under" and not self.conditions:

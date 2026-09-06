@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from contextlib import suppress
 from datetime import date
 
 from lxml import etree, html
@@ -77,10 +78,9 @@ def _watermark_metadata(
     published_at = None
     if match.group("date"):
         day, month, year = match.group("date").split()
-        try:
+        # Missing/invalid optional metadata is explicit in metadata_warnings.
+        with suppress(KeyError, ValueError):
             published_at = date(int(year), _MONTHS[month.lower()], int(day))
-        except (KeyError, ValueError):
-            pass  # Missing/invalid optional metadata is explicit in metadata_warnings.
     return version, published_at
 
 
@@ -224,9 +224,12 @@ def extract_paper(html_text: str, source_url: str) -> ExtractedPaper:
     except (etree.ParserError, ValueError) as exc:
         raise PaperExtractionError("The source does not contain parseable HTML.") from exc
     watermark_version, published_at = _watermark_metadata(document, paper_id)
-    if requested_version is not None and watermark_version is not None:
-        if requested_version != watermark_version:
-            raise PaperExtractionError("The arXiv HTML version does not match the requested URL.")
+    if (
+        requested_version is not None
+        and watermark_version is not None
+        and requested_version != watermark_version
+    ):
+        raise PaperExtractionError("The arXiv HTML version does not match the requested URL.")
     version = watermark_version if watermark_version is not None else requested_version
     if version is not None:
         canonical_url = canonical_url.rsplit("/", 1)[0] + f"/{paper_id}v{version}"

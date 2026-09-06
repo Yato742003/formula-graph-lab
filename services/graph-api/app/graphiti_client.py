@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from graphiti_core import Graphiti
 from graphiti_core.errors import NodeNotFoundError
-from graphiti_core.nodes import EpisodicNode, EpisodeType
+from graphiti_core.nodes import EpisodeType, EpisodicNode
 
 from app.episodes import ResearchEpisode
 

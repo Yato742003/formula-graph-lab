@@ -9,9 +9,10 @@ import pytest
 from graphiti_core import Graphiti
 from graphiti_core.errors import NodeNotFoundError
 from graphiti_core.helpers import validate_group_id
-from graphiti_core.nodes import EpisodicNode, EpisodeType
+from graphiti_core.nodes import EpisodeType, EpisodicNode
 from graphiti_core.utils.ontology_utils.entity_types_utils import validate_entity_types
 
+from app.enrichment import EnrichmentAttempt, EnrichmentNeedsReconciliation
 from app.episodes import build_paper_episodes, workspace_group_id
 from app.extractor import extract_paper
 from app.graph_store import GraphitiResearchStore
@@ -49,12 +50,43 @@ class ContractGraphiti:
         self.closed = True
 
 
+class MemoryReceipts:
+    def __init__(self):
+        self.states = {}
+        self.uncertain = []
+
+    async def begin_enrichment(
+        self, *, group_id, import_uuid, episode_uuid, attempt_uuid,
+    ):
+        state = self.states.get(episode_uuid)
+        if state == "completed":
+            return EnrichmentAttempt("completed", episode_uuid, attempt_uuid, state)
+        if state == "needs_reconciliation":
+            return EnrichmentAttempt(
+                "needs_reconciliation", episode_uuid, attempt_uuid, state,
+            )
+        self.states[episode_uuid] = "running"
+        return EnrichmentAttempt("run", episode_uuid, attempt_uuid, "running")
+
+    async def complete_enrichment(self, *, receipt_uuid, attempt_uuid):
+        self.states[receipt_uuid] = "completed"
+
+    async def mark_enrichment_uncertain(
+        self, *, receipt_uuid, attempt_uuid, error_type,
+    ):
+        self.states[receipt_uuid] = "needs_reconciliation"
+        self.uncertain.append((receipt_uuid, error_type))
+
+
 @pytest.mark.asyncio
 async def test_ingests_ordered_source_episodes_with_sdk_compatible_contract():
     client = ContractGraphiti()
+    receipts = MemoryReceipts()
     store = GraphitiResearchStore(client)
     await store.initialize()
-    results = await store.ingest_paper_version(workspace_id="lab-1", paper=sample())
+    results = await store.ingest_paper_version(
+        workspace_id="lab-1", paper=sample(), receipts=receipts,
+    )
     await store.close()
 
     assert len(results) == len(client.calls) == 2
@@ -74,12 +106,50 @@ async def test_ingests_ordered_source_episodes_with_sdk_compatible_contract():
 @pytest.mark.asyncio
 async def test_stable_identity_does_not_collide_between_workspaces():
     client = ContractGraphiti()
+    receipts = MemoryReceipts()
     store = GraphitiResearchStore(client)
-    await store.ingest_paper_version(workspace_id="a", paper=sample())
-    await store.ingest_paper_version(workspace_id="b", paper=sample())
+    await store.ingest_paper_version(workspace_id="a", paper=sample(), receipts=receipts)
+    receipts = MemoryReceipts()
+    await store.ingest_paper_version(workspace_id="b", paper=sample(), receipts=receipts)
     assert {c["uuid"] for c in client.calls[:2]}.isdisjoint(
         {c["uuid"] for c in client.calls[2:]}
     )
+
+
+@pytest.mark.asyncio
+async def test_completed_enrichment_replays_without_calling_model():
+    client = ContractGraphiti()
+    receipts = MemoryReceipts()
+    store = GraphitiResearchStore(client)
+    first = await store.ingest_paper_version(
+        workspace_id="a", paper=sample(), receipts=receipts,
+    )
+    second = await store.ingest_paper_version(
+        workspace_id="a", paper=sample(), receipts=receipts,
+    )
+    assert len(first) == 2
+    assert [item["status"] for item in second] == ["replayed", "replayed"]
+    assert len(client.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_semantic_write_requires_reconciliation_before_retry():
+    class FailingGraphiti(ContractGraphiti):
+        async def add_episode(self, **kwargs):
+            raise RuntimeError("model output may have partially committed")
+
+    client = FailingGraphiti()
+    receipts = MemoryReceipts()
+    store = GraphitiResearchStore(client)
+    with pytest.raises(RuntimeError):
+        await store.ingest_paper_version(
+            workspace_id="a", paper=sample(), receipts=receipts,
+        )
+    assert receipts.uncertain[0][1] == "RuntimeError"
+    with pytest.raises(EnrichmentNeedsReconciliation):
+        await store.ingest_paper_version(
+            workspace_id="a", paper=sample(), receipts=receipts,
+        )
 
 
 @pytest.mark.asyncio
@@ -88,7 +158,11 @@ async def test_native_adapter_seeds_missing_uuid_before_sdk_ingestion(monkeypatc
     sdk = SimpleNamespace(driver=driver, add_episode=AsyncMock(return_value="ok"))
     adapter = NativeGraphitiClient(sdk)
     episode = build_paper_episodes(sample(), workspace_id="a")[0]
-    monkeypatch.setattr(EpisodicNode, "get_by_uuid", AsyncMock(side_effect=NodeNotFoundError(episode.uuid)))
+    monkeypatch.setattr(
+        EpisodicNode,
+        "get_by_uuid",
+        AsyncMock(side_effect=NodeNotFoundError(episode.uuid)),
+    )
     saved = []
 
     async def save(node, target_driver):

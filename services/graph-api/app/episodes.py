@@ -63,9 +63,11 @@ def build_paper_episodes(
         reference_time = datetime.combine(paper.version_published_at, time.min, tzinfo=UTC)
     if reference_time.tzinfo is None or reference_time.utcoffset() is None:
         raise ValueError("The source reference time must be timezone-aware.")
-    if paper.version_published_at is not None:
-        if reference_time.astimezone(UTC).date() != paper.version_published_at:
-            raise ValueError("The reference time must match the source version publication date.")
+    if (
+        paper.version_published_at is not None
+        and reference_time.astimezone(UTC).date() != paper.version_published_at
+    ):
+        raise ValueError("The reference time must match the source version publication date.")
     group_id = workspace_group_id(workspace_id)
     root_uuid = paper_episode_uuid(paper, workspace_id=workspace_id)
     version_key = paper.version if paper.version is not None else paper.source_sha256
@@ -98,7 +100,10 @@ def build_paper_episodes(
     for section in sections:
         bodies.append(("section", {
             **base, "kind": "section", "section": section.model_dump(mode="json"),
-            "equations": [equation_map[eid].model_dump(mode="json") for eid in section.equation_ids],
+            "equations": [
+                equation_map[eid].model_dump(mode="json")
+                for eid in section.equation_ids
+            ],
         }))
     episodes = []
     previous_uuid = None
