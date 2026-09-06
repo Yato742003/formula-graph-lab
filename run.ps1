@@ -226,6 +226,7 @@ if ($envNeedsInit) {
     Write-Step "ENV" "Phat hien file .env chua ton tai hoac chua duoc cau hinh day du."
     Write-Step "ENV" "Dang tu dong tao token bao mat ngau nhien va dong bo .env..."
     $randomToken = "fg_token_" + (New-SecureHex -ByteCount 32)
+    $cursorSecret = "fg_cursor_" + (New-SecureHex -ByteCount 32)
     $neo4jPassword = "fg_neo4j_" + (New-SecureHex -ByteCount 24)
     $devEnvContent = @"
 # Web application
@@ -239,6 +240,7 @@ NEO4J_USER=neo4j
 NEO4J_PASSWORD=$neo4jPassword
 OPENAI_API_KEY=
 SERVICE_TOKEN=$randomToken
+SEARCH_CURSOR_SECRET=$cursorSecret
 "@
     Set-Content -Path $EnvFile -Value $devEnvContent -Encoding UTF8
     Write-Success "Da tu dong thiet lap va dong bo token trong .env."

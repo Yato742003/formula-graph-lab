@@ -13,6 +13,12 @@ authenticated Worker request
   -> bounded arXiv HTML extraction
   -> atomic Neo4j exact-evidence import
   -> D1 paper/job completion
+
+authenticated Worker search
+  -> D1 workspace ownership check
+  -> bearer-authenticated Graph API
+  -> tenant-scoped BM25 + graph traversal
+  -> signed keyset cursor
 ```
 
 The test used `https://arxiv.org/html/1706.03762`. The Graph API pinned the
@@ -46,6 +52,14 @@ job for each authenticated request. Integration tests additionally verify that
 every `EVIDENCE_RELATION.episode_uuids` value resolves to an `Episodic` node in
 the same workspace group.
 
+Search of the persisted Attention graph returned three ranked hits. The first
+hit was the exact Attention equation, its match source was lexical, and the
+response included a next-page cursor. `semantic_available=false` was expected
+because the smoke environment intentionally had no model API key. Neo4j
+integration separately covers exact-symbol search, paper/version/entity/status
+and time filters, tenant isolation, graph-neighbor distance, and signed
+pagination. The real semantic provider still needs a live-key smoke test.
+
 ## Repeatable checks
 
 Use temporary local-only secrets; never commit them or paste them into logs.
@@ -78,6 +92,6 @@ container/network and close ports 18000, 18100, and the randomized Bolt port.
 ## Hosted limit
 
 This is local end-to-end evidence. The private Sites deployment cannot perform
-real imports until the Python Graph API is deployed at public HTTPS and the two
-Graph API runtime values are configured in the hosted Worker. The web runtime
-must never connect directly to Neo4j over Bolt.
+real imports or searches until the Python Graph API is deployed at public HTTPS
+and the two Graph API runtime values are configured in the hosted Worker. The
+web runtime must never connect directly to Neo4j over Bolt.

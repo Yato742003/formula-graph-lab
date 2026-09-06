@@ -55,3 +55,63 @@ export type WorkspaceImportResponse = {
   paper: ImportedPaper;
   receipt: EvidenceImportReceipt;
 };
+
+export type EvidenceEntityType =
+  | 'Paper'
+  | 'PaperVersion'
+  | 'Section'
+  | 'Equation'
+  | 'Symbol'
+  | 'Assumption'
+  | 'Claim'
+  | 'Concept'
+  | 'Method'
+  | 'Experiment'
+  | 'Hypothesis';
+
+export type VerificationStatus =
+  | 'reported'
+  | 'draft'
+  | 'invalid'
+  | 'well_typed'
+  | 'numerically_plausible'
+  | 'symbolically_verified'
+  | 'human_reviewed';
+
+export type EvidenceSearchInput = {
+  query: string;
+  paper_id?: string;
+  version?: number;
+  entity_types?: EvidenceEntityType[];
+  verification_statuses?: VerificationStatus[];
+  as_of?: string;
+  center_node_uuid?: string;
+  limit?: number;
+  cursor?: string;
+};
+
+export type EvidenceSearchHit = {
+  uuid: string;
+  kind: EvidenceEntityType;
+  logical_id: string;
+  paper_id: string;
+  version: number | null;
+  valid_at: string | null;
+  verification_status: VerificationStatus;
+  payload: Record<string, unknown>;
+  episode_uuids: string[];
+  score: number;
+  match_sources: Array<'lexical' | 'semantic' | 'graph'>;
+  score_components: {
+    lexical_rank: number | null;
+    semantic_rank: number | null;
+    graph_rank: number | null;
+    graph_distance: number | null;
+  };
+};
+
+export type EvidenceSearchResponse = {
+  hits: EvidenceSearchHit[];
+  next_cursor: string | null;
+  semantic_available: boolean;
+};

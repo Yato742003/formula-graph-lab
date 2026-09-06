@@ -9,6 +9,11 @@ from neo4j import AsyncGraphDatabase
 from app.enrichment import EnrichmentAttempt
 from app.episodes import workspace_group_id
 from app.evidence import EvidenceGraph, ReportedClaim
+from app.search import (
+    EvidenceCandidate,
+    EvidenceSearchFilters,
+    build_lucene_query,
+)
 
 
 @dataclass(frozen=True)
@@ -59,6 +64,15 @@ class Neo4jEvidenceStore:
                 f"FOR (n:{label}) REQUIRE n.uuid IS UNIQUE",
                 database_=self.database,
             )
+        await self.driver.execute_query(
+            "CREATE FULLTEXT INDEX fgl_evidence_search IF NOT EXISTS "
+            "FOR (n:Evidence) ON EACH [n.group_id, n.logical_id, n.payload]",
+            database_=self.database,
+        )
+        await self.driver.execute_query(
+            "CALL db.awaitIndex('fgl_evidence_search', 30)",
+            database_=self.database,
+        )
 
     async def close(self) -> None:
         await self.driver.close()
@@ -88,6 +102,161 @@ class Neo4jEvidenceStore:
         if not records:
             return None
         return PaperVersionSnapshot(**dict(records[0]))
+
+    async def lexical_search(
+        self,
+        query: str,
+        filters: EvidenceSearchFilters,
+        limit: int,
+    ) -> list[EvidenceCandidate]:
+        records, _, _ = await self.driver.execute_query(
+            """
+            CALL db.index.fulltext.queryNodes(
+                'fgl_evidence_search', $query, {limit:$limit}
+            ) YIELD node, score
+            WHERE node.group_id=$group
+              AND ($paper_id IS NULL OR node.paper_id=$paper_id)
+              AND ($version IS NULL OR node.paper_version=$version)
+              AND (size($entity_types)=0 OR node.kind IN $entity_types)
+              AND (
+                size($verification_statuses)=0
+                OR node.verification_status IN $verification_statuses
+              )
+              AND ($as_of IS NULL OR node.valid_at <= $as_of)
+            OPTIONAL MATCH (node)-[:EXTRACTED_IN]->
+                           (episode:Episodic {group_id:$group})
+            WITH node, score,
+                 [uuid IN collect(DISTINCT episode.uuid) WHERE uuid IS NOT NULL]
+                 AS episode_uuids
+            RETURN node.uuid AS uuid, node.kind AS kind,
+                   node.logical_id AS logical_id, node.payload AS payload,
+                   node.paper_id AS paper_id, node.paper_version AS paper_version,
+                   node.valid_at AS valid_at,
+                   node.verification_status AS verification_status,
+                   episode_uuids, score AS lexical_score,
+                   NULL AS graph_distance
+            ORDER BY lexical_score DESC, uuid ASC
+            LIMIT $limit
+            """,
+            query=build_lucene_query(filters.group_id, query),
+            limit=limit,
+            **self._search_parameters(filters),
+            database_=self.database,
+        )
+        return [self._search_candidate(record) for record in records]
+
+    async def evidence_for_episodes(
+        self,
+        episode_uuids: list[str],
+        filters: EvidenceSearchFilters,
+        limit: int,
+    ) -> list[EvidenceCandidate]:
+        if not episode_uuids:
+            return []
+        records, _, _ = await self.driver.execute_query(
+            """
+            MATCH (node:Evidence {group_id:$group})-[:EXTRACTED_IN]->
+                  (episode:Episodic {group_id:$group})
+            WHERE episode.uuid IN $episode_uuids
+              AND ($paper_id IS NULL OR node.paper_id=$paper_id)
+              AND ($version IS NULL OR node.paper_version=$version)
+              AND (size($entity_types)=0 OR node.kind IN $entity_types)
+              AND (
+                size($verification_statuses)=0
+                OR node.verification_status IN $verification_statuses
+              )
+              AND ($as_of IS NULL OR node.valid_at <= $as_of)
+            WITH node,
+                 [uuid IN collect(DISTINCT episode.uuid) WHERE uuid IS NOT NULL]
+                 AS episode_uuids
+            RETURN node.uuid AS uuid, node.kind AS kind,
+                   node.logical_id AS logical_id, node.payload AS payload,
+                   node.paper_id AS paper_id, node.paper_version AS paper_version,
+                   node.valid_at AS valid_at,
+                   node.verification_status AS verification_status,
+                   episode_uuids, NULL AS lexical_score,
+                   NULL AS graph_distance
+            ORDER BY uuid ASC
+            LIMIT $limit
+            """,
+            episode_uuids=episode_uuids,
+            limit=limit,
+            **self._search_parameters(filters),
+            database_=self.database,
+        )
+        return [self._search_candidate(record) for record in records]
+
+    async def graph_neighbors(
+        self,
+        center_node_uuid: str,
+        filters: EvidenceSearchFilters,
+        limit: int,
+    ) -> list[EvidenceCandidate]:
+        records, _, _ = await self.driver.execute_query(
+            """
+            MATCH (origin:Evidence {uuid:$center_uuid, group_id:$group})
+            MATCH path=(origin)-[:EVIDENCE_RELATION*1..2]-(node:Evidence)
+            WHERE node.group_id=$group
+              AND all(relation IN relationships(path) WHERE relation.group_id=$group)
+              AND ($paper_id IS NULL OR node.paper_id=$paper_id)
+              AND ($version IS NULL OR node.paper_version=$version)
+              AND (size($entity_types)=0 OR node.kind IN $entity_types)
+              AND (
+                size($verification_statuses)=0
+                OR node.verification_status IN $verification_statuses
+              )
+              AND ($as_of IS NULL OR node.valid_at <= $as_of)
+            WITH node, min(length(path)) AS graph_distance
+            OPTIONAL MATCH (node)-[:EXTRACTED_IN]->
+                           (episode:Episodic {group_id:$group})
+            WITH node, graph_distance,
+                 [uuid IN collect(DISTINCT episode.uuid) WHERE uuid IS NOT NULL]
+                 AS episode_uuids
+            RETURN node.uuid AS uuid, node.kind AS kind,
+                   node.logical_id AS logical_id, node.payload AS payload,
+                   node.paper_id AS paper_id, node.paper_version AS paper_version,
+                   node.valid_at AS valid_at,
+                   node.verification_status AS verification_status,
+                   episode_uuids, NULL AS lexical_score, graph_distance
+            ORDER BY graph_distance ASC, uuid ASC
+            LIMIT $limit
+            """,
+            center_uuid=center_node_uuid,
+            limit=limit,
+            **self._search_parameters(filters),
+            database_=self.database,
+        )
+        return [self._search_candidate(record) for record in records]
+
+    @staticmethod
+    def _search_parameters(filters: EvidenceSearchFilters) -> dict[str, object]:
+        return {
+            "group": filters.group_id,
+            "paper_id": filters.paper_id,
+            "version": filters.version,
+            "entity_types": list(filters.entity_types),
+            "verification_statuses": list(filters.verification_statuses),
+            "as_of": filters.as_of.astimezone(UTC) if filters.as_of else None,
+        }
+
+    @staticmethod
+    def _search_candidate(record) -> EvidenceCandidate:
+        valid_at = record["valid_at"]
+        if hasattr(valid_at, "to_native"):
+            valid_at = valid_at.to_native()
+        return EvidenceCandidate(
+            uuid=record["uuid"],
+            kind=record["kind"],
+            logical_id=record["logical_id"],
+            payload=record["payload"],
+            paper_id=record["paper_id"],
+            paper_version=record["paper_version"],
+            valid_at=valid_at,
+            verification_status=record["verification_status"],
+            episode_uuids=tuple(record["episode_uuids"]),
+            lexical_score=record["lexical_score"],
+            graph_distance=record["graph_distance"],
+        )
 
     async def record_claim(
         self, claim: ReportedClaim, *, disagrees_with_uuid: str | None = None,
@@ -217,7 +386,8 @@ class Neo4jEvidenceStore:
             MERGE (c:Evidence {uuid:$uuid})
             ON CREATE SET c.group_id=$group, c.kind='Claim', c.logical_id=$logical_id,
                 c.payload=$payload, c.paper_id=$paper_id, c.paper_version=$version,
-                c.valid_at=$valid_at, c.created_at=$now
+                c.valid_at=$valid_at, c.verification_status='reported',
+                c.created_at=$now
             RETURN c.group_id AS group_id, c.payload AS payload
             """,
             uuid=claim.uuid, group=claim.group_id, logical_id=claim.logical_id,
@@ -317,9 +487,15 @@ class Neo4jEvidenceStore:
             UNWIND $nodes AS item
             MERGE (n:Evidence {uuid:item.uuid})
             ON CREATE SET n.group_id=$group, n.kind=item.kind, n.logical_id=item.logical_id,
-                n.payload=item.payload, n.created_at=$now
+                n.payload=item.payload, n.paper_id=item.paper_id,
+                n.paper_version=item.paper_version,
+                n.verification_status='reported', n.created_at=$now
             WITH n, item
             MATCH (e:Episodic {uuid:item.episode_uuid, group_id:$group})
+            SET n.paper_id=coalesce(n.paper_id, item.paper_id),
+                n.paper_version=coalesce(n.paper_version, item.paper_version),
+                n.verification_status=coalesce(n.verification_status, 'reported'),
+                n.valid_at=coalesce(n.valid_at, e.valid_at)
             MERGE (n)-[:EXTRACTED_IN]->(e)
             """,
             nodes=graph.nodes, group=graph.group_id, now=now,
@@ -330,6 +506,8 @@ class Neo4jEvidenceStore:
             MATCH (n:Evidence {uuid:item.uuid})
             WHERE n.group_id <> $group OR n.kind <> item.kind
                OR n.logical_id <> item.logical_id OR n.payload <> item.payload
+               OR n.paper_id <> item.paper_id
+               OR coalesce(n.paper_version, -1) <> coalesce(item.paper_version, -1)
             RETURN count(n) AS conflicts
             """,
             nodes=graph.nodes, group=graph.group_id,

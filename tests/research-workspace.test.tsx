@@ -10,7 +10,10 @@ import {
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ResearchWorkspace from '../app/research-workspace';
-import type { WorkspaceImportResponse } from '../lib/import-types';
+import type {
+  EvidenceSearchResponse,
+  WorkspaceImportResponse,
+} from '../lib/import-types';
 
 const completedImport: WorkspaceImportResponse = {
   job_id: 'job_12345678',
@@ -75,6 +78,32 @@ const completedImport: WorkspaceImportResponse = {
     episode_count: 2,
     replayed: false,
   },
+};
+
+const completedSearch: EvidenceSearchResponse = {
+  hits: [
+    {
+      uuid: '11111111-1111-4111-8111-111111111111',
+      kind: 'Equation',
+      logical_id: 'S1.E1',
+      paper_id: '2402.08954',
+      version: 1,
+      valid_at: '2024-02-14T00:00:00Z',
+      verification_status: 'reported',
+      payload: { equation_id: 'S1.E1', latex: 'x=1', section: '1 Method' },
+      episode_uuids: ['episode-1'],
+      score: 16393,
+      match_sources: ['lexical'],
+      score_components: {
+        lexical_rank: 1,
+        semantic_rank: null,
+        graph_rank: null,
+        graph_distance: null,
+      },
+    },
+  ],
+  next_cursor: null,
+  semantic_available: false,
 };
 
 afterEach(() => {
@@ -154,5 +183,39 @@ describe('ResearchWorkspace import interaction', () => {
       await screen.findByText('Workspace storage is temporarily unavailable'),
     ).toBeTruthy();
     expect(screen.getByText('Attention Is All You Need')).toBeTruthy();
+  });
+
+  it('opens hybrid search and renders source-bound ranked evidence', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => completedSearch,
+    })) as unknown as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(
+      <ResearchWorkspace
+        user={{ displayName: 'Researcher', email: 'researcher@example.com' }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Search graph' }));
+    const input = screen.getByRole('textbox', {
+      name: 'Formula or research concept',
+    });
+    await user.type(input, 'scaled attention');
+    await user.click(screen.getByRole('button', { name: 'Search evidence' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/search',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ query: 'scaled attention', limit: 8 }),
+      }),
+    );
+    const results = await screen.findByLabelText('Evidence search results');
+    expect(within(results).getByText('x=1')).toBeTruthy();
+    expect(within(results).getByText('lexical')).toBeTruthy();
+    expect(screen.getByText(/lexical \+ graph ranking/)).toBeTruthy();
   });
 });

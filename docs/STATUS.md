@@ -14,24 +14,30 @@ Last updated: 2026-09-06
 | FGL-201 | Complete at schema/contract layer | Planned entities, relation endpoint/condition constraints, installed SDK validation |
 | FGL-202 | Complete | Ordered episodes, atomic evidence writes, episode-resolving provenance, idempotent replay and enrichment retry receipts pass Neo4j integration tests |
 | FGL-203 | Complete | Out-of-order v1/v2/v3 imports, `SUPERSEDES`, historical lookup and independent cross-paper disagreement pass against Neo4j |
-| FGL-301+ | Not started | Search/retrieval is the next planned product slice; formula typing, hypotheses, verification and beta remain later gates |
+| FGL-301 | Implemented; live semantic-provider validation pending | Tenant-scoped BM25, Graphiti semantic adapter, two-hop graph traversal, filters, RRF ranking and signed keyset pagination pass unit and Neo4j integration tests |
+| FGL-302 | Partial UI shell | Search results and an in-memory graph are visible; persisted graph reads, pan/zoom, relation filters and keyboard graph navigation remain |
+| FGL-303+ | Not started | Provenance history, formula typing, hypotheses, verification and beta remain later gates |
 
 ## Latest validation
 
-- Backend offline: 80 passed, 17 opt-in tests deselected, two upstream deprecation warnings.
+- Backend offline: 89 passed, 18 opt-in tests deselected, two upstream deprecation warnings.
 - Live arXiv corpus: 12 passed; see ingestion-validation.md.
-- Neo4j integration: 5 passed, 92 deselected; the isolated container and network
+- Neo4j integration: 6 passed, 101 deselected; the isolated container and network
   were removed by the runner.
-- Frontend: 5 files and 23 tests passed; product lint and production build passed.
+- Frontend: 6 files and 29 tests passed; product lint and production build passed.
 - Local Worker end-to-end: two authenticated imports of arXiv `1706.03762v7`
   produced 7 equations, 39 nodes, 58 edges and 31 episodes. The replay returned
   `replayed=true`; D1 held 1 workspace, 1 paper, 2 successful jobs and 0 failed jobs.
+- Local Worker search smoke: the persisted Attention graph returned three ranked
+  hits; the first was the exact Attention equation through lexical retrieval and
+  a signed next-page cursor was present. Semantic retrieval reported unavailable
+  because no model API key was configured.
 - Production dependency audit: 0 vulnerabilities. Four moderate advisories remain
   in dev-only Drizzle tooling and are not force-upgraded.
-- Docker Desktop 4.74.0 / Engine 29.4.3 is working after stale runtime sockets
-  were quarantined. All temporary E2E ports and containers were closed afterward.
-- Production build exposes `/` and `/api/imports`. The latest source is not yet
-  connected to a publicly reachable HTTPS Graph API in the hosted environment.
+- Docker Desktop 4.74.0 / Engine 29.4.3 is working after a clean WSL backend
+  restart. The latest isolated integration container and network were removed.
+- Production build exposes `/`, `/api/imports`, and `/api/search`. The source is
+  not yet connected to a publicly reachable HTTPS Graph API in the hosted environment.
 
 ## Findings and limits
 
@@ -44,7 +50,12 @@ Last updated: 2026-09-06
 - Exact graph imports have atomic receipts; semantic enrichment has explicit
   pending/succeeded/reconciliation states and cannot ambiguously replay.
 - The viewport uses the curated demo before import and real source-bound nodes
-  afterward. Persisted graph retrieval on reload belongs to FGL-301/FGL-302.
+  afterward. Persisted graph retrieval on reload belongs to FGL-302.
+- Search never accepts a browser-supplied workspace. The Worker derives the
+  workspace from the authenticated user, verifies D1 ownership, and the Graph API
+  maps semantic episode IDs back to immutable exact-evidence nodes.
+- The real Graphiti semantic-provider path has a contract test but has not been
+  smoke-tested with a live model API key; lexical and graph retrieval degrade cleanly.
 - Cloudflare Workers does not implement `redirect: "error"`; the Graph API client
   uses `manual` and never forwards its bearer token through a redirect.
 - Hosted Sites still needs a separately reachable HTTPS Graph API service plus
@@ -54,9 +65,10 @@ Last updated: 2026-09-06
 
 ## Next actions
 
-1. Implement FGL-301 hybrid search with tenant/version/time filters and stable pagination.
-2. Implement FGL-302 persisted graph retrieval so imports survive page reload and
+1. Implement FGL-302 persisted graph retrieval so imports survive page reload and
    the viewport no longer depends on an in-memory response.
+2. Implement pan/zoom, relation filters and keyboard navigation on the persisted
+   graph, then connect search selection to the shared inspector.
 3. Deploy the Python Graph API/Neo4j boundary behind public HTTPS, configure hosted
    secrets, and rerun the authenticated import smoke test in the private site.
 4. Continue through formula typing, hypotheses, verification, remaining security

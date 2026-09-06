@@ -3,7 +3,9 @@ from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
 from app.evidence_store import ImportReceipt
-from app.main import app, require_evidence_store
+from app.main import app, require_evidence_store, require_search_service
+from app.models import EvidenceSearchResponse
+from app.search import InvalidSearchCursor
 
 
 def clear_graph_configuration(monkeypatch) -> None:
@@ -144,3 +146,71 @@ def test_exact_import_rejects_blank_workspace_before_fetch(monkeypatch) -> None:
         app.dependency_overrides.clear()
     assert response.status_code == 422
     fetch.assert_not_awaited()
+
+
+def test_search_requires_configured_service(monkeypatch) -> None:
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.delenv("SERVICE_TOKEN", raising=False)
+    clear_graph_configuration(monkeypatch)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/search",
+            json={"query": "attention", "workspace_id": "lab"},
+        )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Evidence search is not configured."
+
+
+def test_search_endpoint_uses_bounded_contract(monkeypatch) -> None:
+    class FakeSearch:
+        async def search(self, request):
+            assert request.workspace_id == "site-workspace"
+            return EvidenceSearchResponse(
+                hits=[],
+                next_cursor=None,
+                semantic_available=False,
+            )
+
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.delenv("SERVICE_TOKEN", raising=False)
+    clear_graph_configuration(monkeypatch)
+    app.dependency_overrides[require_search_service] = lambda: FakeSearch()
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/search",
+                json={"query": "attention", "workspace_id": "site-workspace"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json() == {
+        "hits": [],
+        "next_cursor": None,
+        "semantic_available": False,
+    }
+
+
+def test_search_endpoint_hides_cursor_validation_details(monkeypatch) -> None:
+    class InvalidCursorSearch:
+        async def search(self, request):
+            raise InvalidSearchCursor("forged-signature-detail")
+
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.delenv("SERVICE_TOKEN", raising=False)
+    clear_graph_configuration(monkeypatch)
+    app.dependency_overrides[require_search_service] = lambda: InvalidCursorSearch()
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/search",
+                json={
+                    "query": "attention",
+                    "workspace_id": "site-workspace",
+                    "cursor": "forged",
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid search cursor."

@@ -22,6 +22,9 @@ This is a new project. It does not import from or modify
 - D1 schema for workspaces, paper imports, and hypothesis metadata.
 - Authenticated `/api/imports` workflow with server-derived tenants, bounded payloads,
   D1 job receipts, and a signed web-to-Graph-API boundary.
+- Authenticated `/api/search` workflow with D1 ownership checks, BM25 exact-evidence
+  retrieval, optional Graphiti semantic retrieval, two-hop graph ranking, temporal
+  filters, and signed keyset pagination.
 - Neo4j + Graph API Docker Compose definition.
 - WebMCP `stage_paper_import` progressive-enhancement tool.
 - Frontend, backend, Python/TypeScript lint, migration, production-build, and
@@ -29,6 +32,9 @@ This is a new project. It does not import from or modify
 
 The graph viewport starts with a curated Attention example and replaces it with
 the source-bound paper, section, and equation graph after a successful import.
+The search drawer queries persisted evidence across the signed-in workspace.
+Persisted graph reload, pan/zoom, relation filters, and shared search/graph
+inspection are the next FGL-302 slice.
 The hosted Sites build still needs a separately reachable HTTPS Graph API and
 runtime secrets before hosted imports can run; local Worker → D1 → Graph API →
 Neo4j has been exercised end to end.
@@ -54,7 +60,8 @@ Browser
             └─ Python Graph API
                  ├─ URL security gate
                  ├─ HTML/MathML extractor
-                 ├─ Graphiti episode adapter
+                 ├─ BM25 + graph traversal search
+                 ├─ Graphiti episode/semantic adapter
                  └─ Neo4j
 ```
 
@@ -99,7 +106,8 @@ python -m venv .venv
 ```
 
 Copy `.env.example` to a local environment file and replace every placeholder.
-Never commit that file.
+Never commit that file. `OPENAI_API_KEY` is optional: without it, exact BM25 and
+graph-neighbor retrieval remain available while semantic retrieval reports unavailable.
 
 Run Neo4j and the Graph API:
 
@@ -136,6 +144,8 @@ applied migration.
 - Browser writes require a signed-in user; Graph API writes use a separate
   service token.
 - Raw HTML is parsed server-side and is never rendered in the browser.
+- Search tenants are derived server-side; signed cursors are bound to the query,
+  filters, time, and workspace.
 - LLM output is unverified hypothesis data. It cannot promote itself to
   `symbolically_verified` or `human_reviewed`.
 

@@ -5,6 +5,15 @@ from datetime import UTC, datetime
 from graphiti_core import Graphiti
 from graphiti_core.errors import NodeNotFoundError
 from graphiti_core.nodes import EpisodeType, EpisodicNode
+from graphiti_core.search.search_config import (
+    EdgeReranker,
+    EdgeSearchConfig,
+    EdgeSearchMethod,
+    EpisodeReranker,
+    EpisodeSearchConfig,
+    EpisodeSearchMethod,
+    SearchConfig,
+)
 
 from app.episodes import ResearchEpisode
 
@@ -34,6 +43,37 @@ class NativeGraphitiClient:
 
     async def build_indices_and_constraints(self) -> object:
         return await self.client.build_indices_and_constraints()
+
+    async def search_episode_uuids(
+        self,
+        query: str,
+        group_id: str,
+        limit: int,
+    ) -> list[str]:
+        config = SearchConfig(
+            edge_config=EdgeSearchConfig(
+                search_methods=[
+                    EdgeSearchMethod.bm25,
+                    EdgeSearchMethod.cosine_similarity,
+                ],
+                reranker=EdgeReranker.rrf,
+            ),
+            episode_config=EpisodeSearchConfig(
+                search_methods=[EpisodeSearchMethod.bm25],
+                reranker=EpisodeReranker.rrf,
+            ),
+            limit=limit,
+        )
+        result = await self.client.search_(
+            query,
+            config,
+            group_ids=[group_id],
+        )
+        episode_uuids = []
+        for edge in result.edges:
+            episode_uuids.extend(edge.episodes)
+        episode_uuids.extend(episode.uuid for episode in result.episodes)
+        return list(dict.fromkeys(episode_uuids))[:limit]
 
     async def close(self) -> object:
         return await self.client.close()

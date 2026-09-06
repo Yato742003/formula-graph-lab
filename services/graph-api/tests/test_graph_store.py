@@ -46,6 +46,9 @@ class ContractGraphiti:
     async def build_indices_and_constraints(self):
         self.initialized = True
 
+    async def search_episode_uuids(self, query, group_id, limit):
+        return ["episode-search-result"]
+
     async def close(self):
         self.closed = True
 
@@ -186,3 +189,24 @@ async def test_native_adapter_rejects_existing_cross_workspace_episode(monkeypat
     )))
     with pytest.raises(ValueError, match="conflicts"):
         await NativeGraphitiClient(sdk).prepare_episode(episode)
+
+
+@pytest.mark.asyncio
+async def test_native_adapter_searches_semantic_edges_and_bm25_episodes():
+    search_result = SimpleNamespace(
+        edges=[SimpleNamespace(episodes=["ep-edge", "ep-shared"])],
+        episodes=[SimpleNamespace(uuid="ep-shared"), SimpleNamespace(uuid="ep-bm25")],
+    )
+    sdk = SimpleNamespace(search_=AsyncMock(return_value=search_result))
+    adapter = NativeGraphitiClient(sdk)
+
+    result = await adapter.search_episode_uuids("scaled similarity", "workspace_hash", 10)
+
+    assert result == ["ep-edge", "ep-shared", "ep-bm25"]
+    _, config = sdk.search_.await_args.args[:2]
+    assert {method.value for method in config.edge_config.search_methods} == {
+        "bm25",
+        "cosine_similarity",
+    }
+    assert [method.value for method in config.episode_config.search_methods] == ["bm25"]
+    assert sdk.search_.await_args.kwargs["group_ids"] == ["workspace_hash"]

@@ -19,6 +19,12 @@ class EpisodeClient(Protocol):
     async def prepare_episode(self, episode: ResearchEpisode) -> None: ...
     async def add_episode(self, **kwargs: object) -> object: ...
     async def build_indices_and_constraints(self) -> object: ...
+    async def search_episode_uuids(
+        self,
+        query: str,
+        group_id: str,
+        limit: int,
+    ) -> list[str]: ...
     async def close(self) -> object: ...
 
 
@@ -48,6 +54,14 @@ class GraphitiResearchStore:
 
     async def close(self) -> None:
         await self._client.close()
+
+    async def search_episode_uuids(
+        self,
+        query: str,
+        group_id: str,
+        limit: int,
+    ) -> list[str]:
+        return await self._client.search_episode_uuids(query, group_id, limit)
 
     async def ingest_paper_version(
         self,

@@ -15,12 +15,15 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  X,
 } from 'lucide-react';
 import { SyntheticEvent, useEffect, useMemo, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type {
+  EvidenceSearchHit,
+  EvidenceSearchResponse,
   ImportedPaper,
   WorkspaceImportResponse,
 } from '@/lib/import-types';
@@ -174,6 +177,41 @@ function importErrorMessage(code?: string): string {
   }
 }
 
+function searchErrorMessage(code?: string): string {
+  switch (code) {
+    case 'AUTH_REQUIRED':
+      return 'Your sign-in expired · reload to continue';
+    case 'DATABASE_UNAVAILABLE':
+      return 'Workspace search is temporarily unavailable';
+    case 'GRAPH_API_NOT_CONFIGURED':
+      return 'The graph service is not connected in this environment';
+    case 'GRAPH_API_RESPONSE_TOO_LARGE':
+      return 'Search returned more evidence than this view can safely display';
+    case 'GRAPH_API_UNAVAILABLE':
+      return 'The graph service is temporarily unavailable';
+    case 'SEARCH_REJECTED':
+      return 'The search request was rejected by the evidence service';
+    default:
+      return `Search stopped · ${code ?? 'unknown error'}`;
+  }
+}
+
+function searchHitTitle(hit: EvidenceSearchHit): string {
+  const title = hit.payload.title;
+  if (typeof title === 'string' && title.trim()) return title;
+  const section = hit.payload.section;
+  if (typeof section === 'string' && section.trim()) return section;
+  return `${hit.kind} · ${hit.logical_id}`;
+}
+
+function searchHitExcerpt(hit: EvidenceSearchHit): string {
+  for (const field of ['latex', 'statement', 'text', 'arxiv_id']) {
+    const value = hit.payload[field];
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  return `${hit.paper_id}${hit.version ? `v${hit.version}` : ''}`;
+}
+
 function nodeTone(type: FormulaNode['type']) {
   if (type === 'hypothesis') return 'hypothesis-node';
   if (type === 'concept') return 'concept-node';
@@ -189,6 +227,14 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   );
   const [notice, setNotice] = useState(
     'Curated demo · import an arXiv HTML paper to replace it',
+  );
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResult, setSearchResult] =
+    useState<EvidenceSearchResponse | null>(null);
+  const [searchNotice, setSearchNotice] = useState(
+    'Search exact symbols, concepts, claims, and neighboring evidence',
   );
   const graphNodes = useMemo(
     () => (imported ? importedFormulaNodes(imported.paper) : demoNodes),
@@ -324,6 +370,81 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
     }
   }
 
+  async function runSearch(cursor?: string) {
+    const query = searchQuery.replaceAll(/\s+/g, ' ').trim();
+    if (!query) {
+      setSearchNotice('Enter a formula symbol or a research concept');
+      return;
+    }
+    setIsSearching(true);
+    setSearchNotice(cursor ? 'Loading the next evidence page…' : 'Ranking evidence…');
+    try {
+      const response = await fetch('/api/search', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          query,
+          limit: 8,
+          ...(cursor ? { cursor } : {}),
+        }),
+      });
+      const result = (await response.json()) as Partial<EvidenceSearchResponse> & {
+        code?: string;
+      };
+      if (!response.ok) {
+        setSearchNotice(searchErrorMessage(result.code));
+        return;
+      }
+      if (
+        !Array.isArray(result.hits) ||
+        typeof result.semantic_available !== 'boolean'
+      ) {
+        setSearchNotice('Search stopped · invalid server response');
+        return;
+      }
+      const completed = result as EvidenceSearchResponse;
+      setSearchResult((current) =>
+        cursor && current
+          ? { ...completed, hits: [...current.hits, ...completed.hits] }
+          : completed,
+      );
+      setSearchNotice(
+        `${completed.hits.length} evidence matches · ${
+          completed.semantic_available
+            ? 'semantic + lexical + graph ranking'
+            : 'lexical + graph ranking'
+        }`,
+      );
+    } catch {
+      setSearchNotice('Workspace search is temporarily unavailable');
+    } finally {
+      setIsSearching(false);
+    }
+  }
+
+  function handleSearch(event: SyntheticEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void runSearch();
+  }
+
+  function selectSearchHit(hit: EvidenceSearchHit) {
+    const equationId =
+      typeof hit.payload.equation_id === 'string'
+        ? hit.payload.equation_id
+        : hit.logical_id;
+    if (
+      hit.kind === 'Equation' &&
+      imported?.paper.equations.some(
+        (equation) => equation.equation_id === equationId,
+      )
+    ) {
+      setSelectedId(equationId);
+    }
+    setNotice(
+      `Search evidence · ${hit.paper_id}${hit.version ? `v${hit.version}` : ''} · ${hit.kind}`,
+    );
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -344,7 +465,13 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
         </nav>
 
         <div className="top-actions">
-          <button className="icon-button" aria-label="Search graph">
+          <button
+            className={`icon-button ${isSearchOpen ? 'icon-button-active' : ''}`}
+            aria-label={isSearchOpen ? 'Close graph search' : 'Search graph'}
+            aria-expanded={isSearchOpen}
+            aria-controls="graph-search-panel"
+            onClick={() => setIsSearchOpen((open) => !open)}
+          >
             <Search size={18} />
           </button>
           <div className="workspace-pill">
@@ -354,6 +481,107 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
           </div>
         </div>
       </header>
+
+      {isSearchOpen ? (
+        <section
+          className="search-command"
+          id="graph-search-panel"
+          aria-label="Search evidence graph"
+        >
+          <div className="search-command-heading">
+            <div className="search-command-icon" aria-hidden="true">
+              <Search size={17} />
+            </div>
+            <div>
+              <p className="eyebrow">Hybrid retrieval</p>
+              <h2>Find evidence across papers</h2>
+            </div>
+            <button
+              className="search-close"
+              type="button"
+              aria-label="Close graph search"
+              onClick={() => setIsSearchOpen(false)}
+            >
+              <X size={17} />
+            </button>
+          </div>
+          <div className="search-command-body">
+            <form className="search-form" onSubmit={handleSearch}>
+              <Input
+                aria-label="Formula or research concept"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Try d_model, scaled similarity, or convergence…"
+                maxLength={500}
+              />
+              <Button type="submit" disabled={isSearching}>
+                <Search size={15} />
+                {isSearching ? 'Searching…' : 'Search evidence'}
+              </Button>
+            </form>
+            <p className="search-notice" aria-live="polite">
+              <CircleDot size={12} />
+              {searchNotice}
+            </p>
+            {searchResult ? (
+              <div className="search-results" aria-label="Evidence search results">
+                {searchResult.hits.map((hit) => (
+                  <button
+                    className="search-result"
+                    key={hit.uuid}
+                    type="button"
+                    onClick={() => selectSearchHit(hit)}
+                  >
+                    <span className="search-result-topline">
+                      <b>{hit.kind}</b>
+                      <span>
+                        {hit.paper_id}{hit.version ? `v${hit.version}` : ''}
+                      </span>
+                    </span>
+                    <strong>{searchHitTitle(hit)}</strong>
+                    <code>{searchHitExcerpt(hit)}</code>
+                    <span className="search-result-signals">
+                      {hit.match_sources.map((source) => (
+                        <i key={source}>{source}</i>
+                      ))}
+                      <small>score {hit.score}</small>
+                    </span>
+                  </button>
+                ))}
+                {searchResult.hits.length === 0 ? (
+                  <div className="search-empty">
+                    <Braces size={19} />
+                    <span>No evidence matched this workspace yet.</span>
+                  </div>
+                ) : null}
+                {searchResult.next_cursor ? (
+                  <Button
+                    variant="outline"
+                    className="search-more"
+                    type="button"
+                    disabled={isSearching}
+                    onClick={() => void runSearch(searchResult.next_cursor ?? undefined)}
+                  >
+                    Load more evidence
+                  </Button>
+                ) : null}
+              </div>
+            ) : (
+              <div className="search-suggestions" aria-label="Search suggestions">
+                {['scaled attention', 'd_model', 'convergence'].map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    type="button"
+                    onClick={() => setSearchQuery(suggestion)}
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      ) : null}
 
       <section className="import-strip" aria-label="Import a paper">
         <div className="import-label">

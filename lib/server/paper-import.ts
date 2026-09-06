@@ -406,6 +406,10 @@ export async function runPaperImport(input: {
   }
 }
 
+export async function workspaceIdentifierForUser(userId: string): Promise<string> {
+  return stableIdentifier('ws', userId);
+}
+
 function parseGraphImportResponse(value: unknown): {
   paper: ImportedPaper;
   receipt: EvidenceImportReceipt;
