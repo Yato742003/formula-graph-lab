@@ -10,11 +10,13 @@ from neo4j.exceptions import Neo4jError, ServiceUnavailable
 from app.auth import require_service_token
 from app.enrichment import EnrichmentNeedsReconciliation
 from app.evidence import build_evidence_graph
-from app.evidence_store import Neo4jEvidenceStore
+from app.evidence_store import EvidenceSnapshotDataError, Neo4jEvidenceStore
 from app.extractor import PaperExtractionError, extract_paper
 from app.fetcher import PaperFetchError, fetch_paper_html
 from app.graph_store import GraphitiResearchStore
 from app.models import (
+    EvidenceGraphSnapshotRequest,
+    EvidenceGraphSnapshotResponse,
     EvidenceImportReceipt,
     EvidenceImportRequest,
     EvidenceImportResponse,
@@ -192,3 +194,15 @@ async def search_evidence(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (SearchDataError, Neo4jError, ServiceUnavailable, OSError) as exc:
         raise HTTPException(status_code=503, detail="Evidence search failed.") from exc
+
+
+@app.post("/v1/graphs/snapshot", response_model=EvidenceGraphSnapshotResponse)
+async def graph_snapshot(
+    body: EvidenceGraphSnapshotRequest,
+    _: None = Depends(require_service_token),
+    store: Neo4jEvidenceStore = Depends(require_evidence_store),  # noqa: B008
+) -> EvidenceGraphSnapshotResponse:
+    try:
+        return await store.graph_snapshot(body)
+    except (EvidenceSnapshotDataError, Neo4jError, ServiceUnavailable, OSError) as exc:
+        raise HTTPException(status_code=503, detail="Evidence graph failed.") from exc

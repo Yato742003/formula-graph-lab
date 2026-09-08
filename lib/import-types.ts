@@ -78,6 +78,22 @@ export type VerificationStatus =
   | 'symbolically_verified'
   | 'human_reviewed';
 
+export type EvidenceRelationType =
+  | 'has_version'
+  | 'contains'
+  | 'defines'
+  | 'uses'
+  | 'assumes'
+  | 'cites'
+  | 'makes_claim'
+  | 'about'
+  | 'derived_from'
+  | 'approximates'
+  | 'generalizes'
+  | 'equivalent_under'
+  | 'disagrees_with'
+  | 'supersedes';
+
 export type EvidenceSearchInput = {
   query: string;
   paper_id?: string;
@@ -114,4 +130,42 @@ export type EvidenceSearchResponse = {
   hits: EvidenceSearchHit[];
   next_cursor: string | null;
   semantic_available: boolean;
+};
+
+export type PersistedPaperSummary = {
+  paper_id: string;
+  version: number;
+  title: string;
+  source_url: string;
+  source_sha256: string;
+  updated_at: number;
+};
+
+export type EvidenceGraphNode = {
+  uuid: string;
+  kind: EvidenceEntityType;
+  logical_id: string;
+  paper_id: string;
+  version: number | null;
+  valid_at: string | null;
+  verification_status: VerificationStatus;
+  payload: Record<string, unknown>;
+  episode_uuids: string[];
+};
+
+export type EvidenceGraphEdge = {
+  uuid: string;
+  source_uuid: string;
+  target_uuid: string;
+  relation: EvidenceRelationType;
+  source_anchor: string;
+  episode_uuids: string[];
+  valid_at: string | null;
+};
+
+export type EvidenceGraphSnapshotResponse = {
+  paper: PersistedPaperSummary | null;
+  nodes: EvidenceGraphNode[];
+  edges: EvidenceGraphEdge[];
+  truncated: boolean;
 };

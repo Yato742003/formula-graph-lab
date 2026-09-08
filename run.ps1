@@ -1,17 +1,17 @@
-﻿<#
+<#
 .SYNOPSIS
     FormulaGraph Lab - Service Runner and Orchestrator
 .DESCRIPTION
-    Khởi chạy toàn bộ hệ sinh thái FormulaGraph Lab bao gồm:
+    Khoi chay toan bo he sinh thai FormulaGraph Lab bao gom:
       - Database: Neo4j (Docker Compose)
-      - Backend:  Python FastAPI / Graph API (Uvicorn với Hot-reload)
-      - Frontend: Vinext / React 19 RSC (Vite với HMR)
+      - Backend:  Python FastAPI / Graph API (Uvicorn voi Hot-reload)
+      - Frontend: Vinext / React 19 RSC (Vite voi HMR)
 .PARAMETER Stop
-    Dừng toàn bộ các tiến trình Frontend, Backend và Neo4j container.
+    Dung toan bo cac tien trinh Frontend, Backend va Neo4j container.
 .PARAMETER NoDocker
-    Bỏ qua khởi động Docker/Neo4j (chỉ chạy FE và BE ở chế độ Demo/Mock graph).
+    Bo qua khoi dong Docker/Neo4j (chay FE va BE o che do Offline/Demo ma khong bi crash).
 .PARAMETER Restart
-    Khởi động lại toàn bộ các dịch vụ từ đầu.
+    Khoi dong lai toan bo cac dich vu tu dau.
 .EXAMPLE
     .\run.ps1
 .EXAMPLE
@@ -27,13 +27,14 @@ param(
     [switch]$Restart
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $ProjectRoot = $PSScriptRoot
 if (-not $ProjectRoot) { $ProjectRoot = (Get-Location).Path }
 $PidFile = Join-Path $ProjectRoot ".services.pids.json"
 $EnvFile = Join-Path $ProjectRoot ".env"
 $VinextLock = Join-Path $ProjectRoot ".vinext\dev\lock.json"
 $LogDir = Join-Path $ProjectRoot ".logs"
+$VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 
 function New-SecureHex {
     param([int]$ByteCount = 32)
@@ -42,7 +43,7 @@ function New-SecureHex {
     return [Convert]::ToHexString($bytes).ToLowerInvariant()
 }
 
-# --- HELPER FUNCTIONS FOR CONSOLE OUTPUT ---
+# --- CONSOLE OUTPUT HELPERS ---
 function Write-Header {
     param([string]$Text)
     Write-Host "`n========================================================" -ForegroundColor DarkCyan
@@ -71,10 +72,10 @@ function Write-ErrorMsg {
     Write-Host "  [X] $Message" -ForegroundColor Red
 }
 
-# --- PROCESS & TREE KILL HELPER ---
+# --- PROCESS MANAGEMENT HELPERS ---
 function Kill-ProcessTree {
     param([int]$TargetPid)
-    if ($TargetPid -gt 0) {
+    if ($TargetPid -gt 4) {
         try {
             taskkill /PID $TargetPid /T /F 2>&1 | Out-Null
         } catch {
@@ -83,11 +84,45 @@ function Kill-ProcessTree {
     }
 }
 
-# --- PORT & HEALTH HELPERS ---
-function Test-PortListening {
+function Free-PortProcesses {
     param([int]$Port)
-    $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-    return ($null -ne $conn)
+    $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    foreach ($conn in $conns) {
+        $processId = $conn.OwningProcess
+        if ($processId -gt 4 -and $processId -ne $PID) {
+            Write-Step "KILL" "Giai phong port $Port (PID: $processId)..."
+            Kill-ProcessTree -TargetPid $processId
+        }
+    }
+}
+
+# --- RELIABLE PORT & HEALTH CHECK HELPERS (IPv4 + IPv6 Dual-stack) ---
+function Test-PortListening {
+    param([int]$Port, [int]$TimeoutMs = 700)
+    # 1. Kiem tra qua NetTCPConnection (nhanh va ho tro ca IPv4/IPv6 listen sockets)
+    $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    if ($conns) {
+        return $true
+    }
+
+    # 2. Thu ket noi truc tiep qua ca IPv4 loopback va IPv6 loopback
+    $endpoints = @(
+        [System.Net.IPAddress]::Loopback,
+        [System.Net.IPAddress]::IPv6Loopback
+    )
+    foreach ($addr in $endpoints) {
+        try {
+            $client = [System.Net.Sockets.TcpClient]::new($addr.AddressFamily)
+            $asyncResult = $client.BeginConnect($addr, $Port, $null, $null)
+            if ($asyncResult.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+                $client.EndConnect($asyncResult)
+                $client.Close()
+                return $true
+            }
+            $client.Close()
+        } catch { }
+    }
+    return $false
 }
 
 function Wait-ForPort {
@@ -112,20 +147,22 @@ function Wait-ForPort {
 
 function Wait-ForHttp {
     param(
-        [string]$Url,
-        [int]$TimeoutSeconds = 30,
+        [string[]]$Urls,
+        [int]$TimeoutSeconds = 25,
         [string]$ServiceName = "Service"
     )
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    Write-Host -NoNewline "  Kiem tra HTTP health check $ServiceName ($Url)"
+    Write-Host -NoNewline "  Kiem tra HTTP health check $ServiceName"
     while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-        try {
-            $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-            if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 400) {
-                Write-Host " [San sang!]" -ForegroundColor Green
-                return $true
-            }
-        } catch { }
+        foreach ($url in $Urls) {
+            try {
+                $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+                if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 400) {
+                    Write-Host " [San sang!]" -ForegroundColor Green
+                    return $true
+                }
+            } catch { }
+        }
         Write-Host -NoNewline "."
         Start-Sleep -Milliseconds 800
     }
@@ -133,7 +170,18 @@ function Wait-ForHttp {
     return $false
 }
 
-# --- STOP SERVICES ---
+function Show-RecentLog {
+    param([string]$FilePath, [int]$LineCount = 12)
+    if (Test-Path $FilePath) {
+        Write-Host "`n  --- Chi tiet log gan nhat ($FilePath) ---" -ForegroundColor DarkGray
+        Get-Content $FilePath -Tail $LineCount -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "    $_" -ForegroundColor Gray
+        }
+        Write-Host "  --------------------------------------------------`n" -ForegroundColor DarkGray
+    }
+}
+
+# --- STOP ALL SERVICES ---
 function Stop-AllServices {
     Write-Header "DANG DUNG CAC DICH VU FORMULAGRAPH LAB"
 
@@ -142,40 +190,33 @@ function Stop-AllServices {
         try {
             $pids = Get-Content $PidFile -Raw | ConvertFrom-Json
             if ($pids.BackendPid) {
-                Write-Step "BE" "Dung cay tien trinh Backend (PID: $($pids.BackendPid))..."
+                Write-Step "BE" "Dung tien trinh Backend (PID: $($pids.BackendPid))..."
                 Kill-ProcessTree -TargetPid $pids.BackendPid
             }
             if ($pids.FrontendPid) {
-                Write-Step "FE" "Dung cay tien trinh Frontend (PID: $($pids.FrontendPid))..."
+                Write-Step "FE" "Dung tien trinh Frontend (PID: $($pids.FrontendPid))..."
                 Kill-ProcessTree -TargetPid $pids.FrontendPid
             }
         } catch { }
         Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     }
 
-    # 2. Quet them cac tien trinh dang chiem port 8000 va 3000
-    @(8000, 3000) | ForEach-Object {
-        $port = $_
-        $connections = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-        foreach ($conn in $connections) {
-            $processId = $conn.OwningProcess
-            if ($processId -gt 0 -and $processId -ne $PID) {
-                Write-Step "KILL" "Giai phong port $port (PID: $processId)..."
-                Kill-ProcessTree -TargetPid $processId
-            }
-        }
-    }
+    # 2. Giai phong port 8000 va 3000
+    Free-PortProcesses -Port 8000
+    Free-PortProcesses -Port 3000
 
-    # 3. Don dep file khoa cu cua Vinext (.vinext/dev/lock.json)
+    # 3. Don dep file khoa Vinext
     if (Test-Path $VinextLock) {
         Remove-Item $VinextLock -Force -ErrorAction SilentlyContinue
         Write-Step "CLEAN" "Da xoa file khoa Vinext stale lock."
     }
 
-    # 4. Dung Docker Neo4j
+    # 4. Dung Docker Neo4j neu duoc yeu cau
     Write-Step "DB" "Dung container Neo4j..."
     try {
+        Push-Location $ProjectRoot
         docker compose stop neo4j 2>&1 | Out-Null
+        Pop-Location
         Write-Success "Neo4j container da duoc tam dung an toan."
     } catch {
         Write-WarningMsg "Khong the goi docker compose hoac container chua chay."
@@ -189,14 +230,12 @@ if ($Stop) {
     exit 0
 }
 
-# --- RESTART FLAG ---
 if ($Restart) {
     Stop-AllServices
     Start-Sleep -Seconds 2
 }
 
 # --- BANNER ---
-Clear-Host
 Write-Host @"
   ======================================================
      ____                           _       ____                 _
@@ -209,7 +248,7 @@ Write-Host @"
   ======================================================
 "@ -ForegroundColor Cyan
 
-# --- 1. KIEM TRA VA KHOI TAO FILE .ENV ---
+# --- 1. KIEM TRA VA KHOI TAO CAU HINH .ENV ---
 Write-Header "1. Kiem tra cau hinh moi truong (.env)"
 
 $envNeedsInit = $false
@@ -223,8 +262,7 @@ if (-not (Test-Path $EnvFile)) {
 }
 
 if ($envNeedsInit) {
-    Write-Step "ENV" "Phat hien file .env chua ton tai hoac chua duoc cau hinh day du."
-    Write-Step "ENV" "Dang tu dong tao token bao mat ngau nhien va dong bo .env..."
+    Write-Step "ENV" "Khoi tao file .env moi voi cac token bao mat ngau nhien..."
     $randomToken = "fg_token_" + (New-SecureHex -ByteCount 32)
     $cursorSecret = "fg_cursor_" + (New-SecureHex -ByteCount 32)
     $neo4jPassword = "fg_neo4j_" + (New-SecureHex -ByteCount 24)
@@ -243,9 +281,16 @@ SERVICE_TOKEN=$randomToken
 SEARCH_CURSOR_SECRET=$cursorSecret
 "@
     Set-Content -Path $EnvFile -Value $devEnvContent -Encoding UTF8
-    Write-Success "Da tu dong thiet lap va dong bo token trong .env."
+    Write-Success "Da tao file .env hoan chinh."
 } else {
-    Write-Success "File .env hop le va da duoc cau hinh."
+    # Kiem tra bo sung cac bien con thieu
+    $envContent = Get-Content $EnvFile -Raw -ErrorAction SilentlyContinue
+    if ($envContent -and -not ($envContent -match "SEARCH_CURSOR_SECRET")) {
+        $cursorSecret = "fg_cursor_" + (New-SecureHex -ByteCount 32)
+        Add-Content -Path $EnvFile -Value "`nSEARCH_CURSOR_SECRET=$cursorSecret" -Encoding UTF8
+        Write-Step "ENV" "Bo sung SEARCH_CURSOR_SECRET vao file .env."
+    }
+    Write-Success "File .env da san sang."
 }
 
 # Doc bien moi truong tu file .env vao session hien tai
@@ -264,8 +309,8 @@ Write-Header "2. Kiem tra cac cong cu phan mem (Prerequisites)"
 
 # Kiem tra Node & npm
 try {
-    $nodeVersion = node --version
-    $npmVersion = npm --version
+    $nodeVersion = node --version 2>&1
+    $npmVersion = npm --version 2>&1
     Write-Success "Node.js $nodeVersion | npm $npmVersion"
 } catch {
     Write-ErrorMsg "Node.js hoac npm chua duoc cai dat tren he thong!"
@@ -284,12 +329,11 @@ if (-not (Test-Path (Join-Path $ProjectRoot "node_modules"))) {
 }
 
 # Kiem tra Python va .venv
-$venvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path $venvPython)) {
+if (-not (Test-Path $VenvPython)) {
     Write-Step "PYTHON" "Chua tim thay .venv. Dang tao virtual environment..."
     python -m venv (Join-Path $ProjectRoot ".venv")
     Write-Step "PYTHON" "Cai dat Backend dependencies (FastAPI, Graphiti, lxml)..."
-    & $venvPython -m pip install -e "$ProjectRoot\services\graph-api[dev]"
+    & $VenvPython -m pip install -e "$ProjectRoot\services\graph-api[dev]"
     Write-Success ".venv duoc tao va cai dat thanh cong."
 } else {
     Write-Success "Python Backend Virtualenv (.venv) da san sang."
@@ -299,6 +343,8 @@ if (-not (Test-Path $venvPython)) {
 Write-Header "3. Khoi dong Database (Neo4j Community 5.26)"
 
 $dockerRunning = $false
+$neo4jReady = $false
+
 if (-not $NoDocker) {
     # Kiem tra Docker Daemon
     try {
@@ -338,20 +384,20 @@ if (-not $NoDocker) {
     }
 
     if ($dockerRunning) {
-        Write-Step "DOCKER" "Chay Neo4j qua Docker Compose..."
+        Write-Step "DOCKER" "Kiem tra container Neo4j qua Docker Compose..."
         Push-Location $ProjectRoot
-        docker compose up -d neo4j
+        docker compose up -d neo4j 2>&1 | Out-Null
         Pop-Location
 
         $neo4jReady = Wait-ForPort -Port 7687 -TimeoutSeconds 35 -ServiceName "Neo4j Bolt (7687)"
-        $neo4jHttpReady = Wait-ForPort -Port 7474 -TimeoutSeconds 15 -ServiceName "Neo4j Browser (7474)"
+        $null = Wait-ForPort -Port 7474 -TimeoutSeconds 10 -ServiceName "Neo4j Browser (7474)"
         if ($neo4jReady) {
             Write-Success "Neo4j Database da san sang phuc vu!"
         } else {
-            Write-WarningMsg "Neo4j chua phan hoi kip thoi. Backend se van khoi dong va thu ket noi."
+            Write-WarningMsg "Neo4j chua phan hoi port 7687 kip thoi. Backend se khoi dong o che do phu hop."
         }
     } else {
-        Write-WarningMsg "Khong the ket noi Docker daemon. Chuyen sang che do NoDocker (chi chay FE va BE demo)."
+        Write-WarningMsg "Khong ket noi duoc Docker. Chuyen sang che do Mock/Offline Graph (khong gay crash Backend)."
     }
 } else {
     Write-WarningMsg "Che do -NoDocker duoc bat: Bo qua khoi dong Neo4j."
@@ -360,53 +406,50 @@ if (-not $NoDocker) {
 # --- 4. KHOI DONG BACKEND (FASTAPI) ---
 Write-Header "4. Khoi dong Backend (FastAPI / Graph API)"
 
-# Kiem tra xem co process cu dang chiem port 8000 khong
-if (Test-PortListening -Port 8000) {
-    Write-WarningMsg "Port 8000 dang duoc su dung. Dang giai phong de khoi dong Backend moi..."
-    $conns = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
-    foreach ($c in $conns) {
-        if ($c.OwningProcess -gt 0 -and $c.OwningProcess -ne $PID) {
-            Kill-ProcessTree -TargetPid $c.OwningProcess
-        }
-    }
-    Start-Sleep -Milliseconds 800
+# Giai phong port 8000 neu bi chiem
+Free-PortProcesses -Port 8000
+Start-Sleep -Milliseconds 600
+
+# Neu Neo4j khong chay, tat bien NEO4J_URI de FastAPI khong bi crash luc startup
+$neo4jEnvOverride = ""
+if (-not $neo4jReady) {
+    Write-Step "CONFIG" "Neo4j chua san sang. Thiet lap Backend chay offline (tranh loi ket noi gay tat app)..."
+    $neo4jEnvOverride = "`$env:NEO4J_URI = ''"
 }
 
 $beWindowCmd = @"
 Set-Location '$ProjectRoot'
-& '.\.venv\Scripts\python.exe' -m uvicorn app.main:app --app-dir services\graph-api --reload --port 8000 --env-file .env
+$neo4jEnvOverride
+& '$VenvPython' -m uvicorn app.main:app --app-dir "$ProjectRoot\services\graph-api" --reload --host 127.0.0.1 --port 8000 --env-file "$ProjectRoot\.env"
 "@
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $beOutLog = Join-Path $LogDir "backend.stdout.log"
 $beErrLog = Join-Path $LogDir "backend.stderr.log"
+
 $beProc = Start-Process powershell.exe -ArgumentList "-NoProfile", "-NonInteractive", "-Command", $beWindowCmd -PassThru -WindowStyle Hidden -RedirectStandardOutput $beOutLog -RedirectStandardError $beErrLog
 Write-Success "Backend chay an (PID: $($beProc.Id)); log: .logs\backend.*.log"
 
-$beReady = Wait-ForHttp -Url "http://localhost:8000/health" -TimeoutSeconds 20 -ServiceName "Backend API"
+$beHealthUrls = @("http://127.0.0.1:8000/health", "http://localhost:8000/health")
+$beReady = Wait-ForHttp -Urls $beHealthUrls -TimeoutSeconds 25 -ServiceName "Backend API"
 if (-not $beReady) {
-    Write-WarningMsg "Backend API chua kip phan hoi tren port 8000. Vui long kiem tra cua so log Backend."
+    Write-ErrorMsg "Backend API chua phan hoi tren port 8000."
+    Show-RecentLog -FilePath $beErrLog -LineCount 15
+} else {
+    Write-Success "Backend API da san sang phuc vu tai http://127.0.0.1:8000"
 }
 
-# --- 5. KHOI DONG FRONTEND (VINEXT / NEXT.JS) ---
+# --- 5. KHOI DONG FRONTEND (VINEXT / REACT 19) ---
 Write-Header "5. Khoi dong Frontend (Vinext / React 19 RSC)"
 
-# 5.1. Giai phong port 3000 neu dang bi chiem
-if (Test-PortListening -Port 3000) {
-    Write-WarningMsg "Port 3000 dang duoc su dung. Dang giai phong de chay Frontend moi nhat..."
-    $feConns = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
-    foreach ($c in $feConns) {
-        if ($c.OwningProcess -gt 0 -and $c.OwningProcess -ne $PID) {
-            Kill-ProcessTree -TargetPid $c.OwningProcess
-        }
-    }
-    Start-Sleep -Milliseconds 800
-}
+# Giai phong port 3000 neu dang bi chiem
+Free-PortProcesses -Port 3000
+Start-Sleep -Milliseconds 600
 
-# 5.2. Tu dong xoa stale lock file cua Vinext de tranh loi trung PID voi tien trinh he thong Windows (svchost)
+# Xoa stale lock file cua Vinext de tranh loi trung PID
 if (Test-Path $VinextLock) {
     Remove-Item $VinextLock -Force -ErrorAction SilentlyContinue
-    Write-Step "LOCK" "Da xoa file khoa cu .vinext/dev/lock.json de khoi dong moi."
+    Write-Step "LOCK" "Da xoa file khoa cu .vinext/dev/lock.json."
 }
 
 $feWindowCmd = @"
@@ -417,12 +460,20 @@ npm run dev
 
 $feOutLog = Join-Path $LogDir "frontend.stdout.log"
 $feErrLog = Join-Path $LogDir "frontend.stderr.log"
+
 $feProc = Start-Process powershell.exe -ArgumentList "-NoProfile", "-NonInteractive", "-Command", $feWindowCmd -PassThru -WindowStyle Hidden -RedirectStandardOutput $feOutLog -RedirectStandardError $feErrLog
 Write-Success "Frontend chay an (PID: $($feProc.Id)); log: .logs\frontend.*.log"
 
 $feReady = Wait-ForPort -Port 3000 -TimeoutSeconds 45 -ServiceName "Frontend UI (Port 3000)"
+if (-not $feReady) {
+    Write-ErrorMsg "Frontend UI chua mo port 3000."
+    Show-RecentLog -FilePath $feErrLog -LineCount 10
+    Show-RecentLog -FilePath $feOutLog -LineCount 10
+} else {
+    Write-Success "Frontend UI da san sang tai http://localhost:3000"
+}
 
-# Luu thong tin PID de de dang stop
+# Luu thong tin PID de Stop
 $pidData = @{
     BackendPid = $beProc.Id
     FrontendPid = $feProc.Id
@@ -436,14 +487,22 @@ Write-Header "TONG HOP CAC DICH VU FORMULAGRAPH LAB"
 Write-Host "  +-------------------------------------------------------------------------+" -ForegroundColor DarkGreen
 Write-Host "  | SERVICE            | URL / DIA CHI                   | TRANG THAI       |" -ForegroundColor DarkGreen
 Write-Host "  +-------------------------------------------------------------------------+" -ForegroundColor DarkGreen
+if ($feReady) {
 Write-Host "  | Frontend UI        | http://localhost:3000           | [Running]        |" -ForegroundColor Green
+} else {
+Write-Host "  | Frontend UI        | http://localhost:3000           | [Failed/Starting]|" -ForegroundColor Red
+}
+if ($beReady) {
 Write-Host "  | Backend API        | http://localhost:8000           | [Running]        |" -ForegroundColor Cyan
 Write-Host "  | API Swagger Docs   | http://localhost:8000/docs      | [Running]        |" -ForegroundColor Cyan
-if ($dockerRunning -and -not $NoDocker) {
+} else {
+Write-Host "  | Backend API        | http://localhost:8000           | [Failed/Starting]|" -ForegroundColor Red
+}
+if ($neo4jReady) {
 Write-Host "  | Neo4j Web Browser  | http://localhost:7474           | [Running]        |" -ForegroundColor Yellow
 Write-Host "  | Neo4j Bolt Port    | bolt://localhost:7687           | [Running]        |" -ForegroundColor Yellow
 } else {
-Write-Host "  | Neo4j Graph DB     | (Chua bat / Che do Demo Graph)  | [Skipped]        |" -ForegroundColor DarkGray
+Write-Host "  | Neo4j Graph DB     | (Chua bat / Che do Offline FE)  | [Skipped]        |" -ForegroundColor DarkGray
 }
 Write-Host "  +-------------------------------------------------------------------------+" -ForegroundColor DarkGreen
 Write-Host ""
@@ -451,9 +510,9 @@ Write-Host "  [TIP] Thong tin nhay cam duoc tao ngau nhien trong file .env (khon
 Write-Host "  [TIP] Frontend va Backend chay nen; xem log trong thu muc .logs." -ForegroundColor Gray
 Write-Host ""
 
-# --- 7. INTERACTIVE MONITOR LOOP ---
+# --- 7. RESILIENT MONITOR LOOP ---
 Write-Host "==========================================================================" -ForegroundColor DarkCyan
-Write-Host "  Lenh dieu khien truc tiep:" -ForegroundColor White
+Write-Host "  He thong dang giam sat cac tien trinh nen (Nhan Ctrl+C de dung):" -ForegroundColor White
 Write-Host "    [O] : Mo Frontend tren trinh duyet" -ForegroundColor Yellow
 Write-Host "    [D] : Mo API Documentation (Swagger Docs)" -ForegroundColor Cyan
 Write-Host "    [N] : Mo Neo4j Browser" -ForegroundColor Magenta
@@ -461,28 +520,59 @@ Write-Host "    [Q] : DUNG TOAN BO cac dich vu (FE, BE, DB) va thoat" -Foregroun
 Write-Host "==========================================================================" -ForegroundColor DarkCyan
 Write-Host ""
 
+# Kiem tra xem console co ho tro doc phim tu ban phim khong (tranh crash trong IDE/Non-interactive shell)
+$canReadKey = $false
+try {
+    $canReadKey = [System.Console]::KeyAvailable -ne $null
+} catch {
+    $canReadKey = $false
+}
+
+$lastHealthCheck = [System.Diagnostics.Stopwatch]::StartNew()
+
 while ($true) {
-    if ([System.Console]::KeyAvailable) {
-        $key = [System.Console]::ReadKey($true).Key
-        switch ($key) {
-            "O" {
-                Write-Host "Dang mo Frontend tren trinh duyet..." -ForegroundColor Green
-                Start-Process "http://localhost:3000"
+    # 1. Xu ly ban phim neu co ho tro console tuong tac
+    if ($canReadKey) {
+        try {
+            if ([System.Console]::KeyAvailable) {
+                $key = [System.Console]::ReadKey($true).Key
+                switch ($key) {
+                    "O" {
+                        Write-Host "Dang mo Frontend tren trinh duyet..." -ForegroundColor Green
+                        Start-Process "http://localhost:3000"
+                    }
+                    "D" {
+                        Write-Host "Dang mo Swagger API Docs..." -ForegroundColor Cyan
+                        Start-Process "http://localhost:8000/docs"
+                    }
+                    "N" {
+                        Write-Host "Dang mo Neo4j Browser..." -ForegroundColor Yellow
+                        Start-Process "http://localhost:7474"
+                    }
+                    "Q" {
+                        Write-Host "`nBan da yeu cau dung tat ca dich vu..." -ForegroundColor Red
+                        Stop-AllServices
+                        exit 0
+                    }
+                }
             }
-            "D" {
-                Write-Host "Dang mo Swagger API Docs..." -ForegroundColor Cyan
-                Start-Process "http://localhost:8000/docs"
-            }
-            "N" {
-                Write-Host "Dang mo Neo4j Browser..." -ForegroundColor Yellow
-                Start-Process "http://localhost:7474"
-            }
-            "Q" {
-                Write-Host "`nBan da yeu cau dung tat ca dich vu..." -ForegroundColor Red
-                Stop-AllServices
-                exit 0
-            }
+        } catch {
+            $canReadKey = $false
         }
     }
-    Start-Sleep -Milliseconds 300
+
+    # 2. Dinh ky kiem tra xem process Backend va Frontend co bi crash bat thuong khong
+    if ($lastHealthCheck.Elapsed.TotalSeconds -gt 5) {
+        $lastHealthCheck.Restart()
+        if ($beProc -and $beProc.HasExited) {
+            Write-ErrorMsg "Backend API dot ngot dung! (ExitCode: $($beProc.ExitCode))"
+            Show-RecentLog -FilePath $beErrLog -LineCount 10
+        }
+        if ($feProc -and $feProc.HasExited) {
+            Write-ErrorMsg "Frontend UI dot ngot dung! (ExitCode: $($feProc.ExitCode))"
+            Show-RecentLog -FilePath $feErrLog -LineCount 10
+        }
+    }
+
+    Start-Sleep -Milliseconds 400
 }

@@ -17,14 +17,26 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
-import { SyntheticEvent, useEffect, useMemo, useState } from 'react';
+import {
+  SyntheticEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
+import EvidenceGraphViewport, {
+  type GraphViewportEdge,
+  type GraphViewportNode,
+} from '@/app/evidence-graph-viewport';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type {
+  EvidenceGraphEdge,
+  EvidenceGraphNode,
+  EvidenceGraphSnapshotResponse,
   EvidenceSearchHit,
   EvidenceSearchResponse,
-  ImportedPaper,
   WorkspaceImportResponse,
 } from '@/lib/import-types';
 import { normalizeArxivHtmlUrl, PaperUrlError } from '@/lib/paper-url';
@@ -46,6 +58,37 @@ type ResearchWorkspaceProps = {
     displayName: string;
     email: string;
   };
+};
+
+type InspectorRecord = {
+  id: string;
+  label: string;
+  expression: string;
+  tone: FormulaNode['type'];
+  kind: string;
+  confidence: number;
+  source: string;
+  relation: string;
+  paperLabel: string;
+  verificationStatus: string;
+  episodeCount: number;
+  anchor: string;
+  anchorIsSource: boolean;
+  section: string;
+  extractionMethod: string;
+  sourceHref: string;
+  sourceText: string;
+  validAt: string;
+  episodeIds: string[];
+  relations: Array<{
+    id: string;
+    direction: 'incoming' | 'outgoing';
+    relation: string;
+    neighbor: string;
+    episodeCount: number;
+    validAt: string;
+  }>;
+  superseded: boolean;
 };
 
 const demoNodes: FormulaNode[] = [
@@ -106,12 +149,12 @@ const demoNodes: FormulaNode[] = [
   },
 ];
 
-const demoConnections = [
-  ['dot-product', 'scaled'],
-  ['scaled', 'multi-head'],
-  ['dot-product', 'kernel'],
-  ['kernel', 'mashup'],
-  ['multi-head', 'mashup'],
+const demoConnections: GraphViewportEdge[] = [
+  { id: 'demo-scaled', source: 'dot-product', target: 'scaled', relation: 'derived_from' },
+  { id: 'demo-heads', source: 'scaled', target: 'multi-head', relation: 'generalizes' },
+  { id: 'demo-kernel', source: 'dot-product', target: 'kernel', relation: 'approximates' },
+  { id: 'demo-mashup-kernel', source: 'kernel', target: 'mashup', relation: 'derived_from' },
+  { id: 'demo-mashup-heads', source: 'multi-head', target: 'mashup', relation: 'derived_from' },
 ];
 
 const demoPaperSections = [
@@ -122,40 +165,155 @@ const demoPaperSections = [
   { label: '5.3 Optimizer', count: 1, active: false },
 ];
 
-const importedNodePositions = [
-  [7, 12],
-  [55, 12],
-  [7, 34],
-  [55, 34],
-  [7, 56],
-  [55, 56],
-  [7, 78],
-  [55, 78],
-] as const;
-
-function importedFormulaNodes(paper: ImportedPaper): FormulaNode[] {
-  return paper.equations.slice(0, importedNodePositions.length).map((equation, index) => {
-    const [x, y] = importedNodePositions[index];
-    return {
-      id: equation.equation_id,
-      label: equation.equation_number
-        ? `Equation ${equation.equation_number}`
-        : `Formula ${index + 1}`,
-      formula: equation.latex,
-      type: 'evidence',
-      x,
-      y,
-      confidence: equation.confidence,
-      source: `${equation.section ?? 'Unsectioned'} · #${equation.anchor}`,
-      relation: 'source-bound',
-    };
-  });
-}
-
 function authorsLabel(authors: string[]): string {
   if (authors.length === 0) return 'Authors unavailable';
   if (authors.length === 1) return authors[0];
   return `${authors[0]} et al.`;
+}
+
+function payloadString(
+  payload: Record<string, unknown>,
+  fields: string[],
+  fallback: string,
+): string {
+  for (const field of fields) {
+    const value = payload[field];
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  return fallback;
+}
+
+function graphNodeLabel(node: EvidenceGraphNode): string {
+  if (node.kind === 'Equation') {
+    const number = node.payload.equation_number;
+    if (typeof number === 'string' && number.trim()) return `Equation ${number}`;
+  }
+  return payloadString(
+    node.payload,
+    ['title', 'section', 'statement', 'semantic_name', 'description'],
+    `${node.kind} · ${node.logical_id}`,
+  );
+}
+
+function graphNodeExpression(node: EvidenceGraphNode): string {
+  return payloadString(
+    node.payload,
+    ['latex', 'statement', 'notation', 'description', 'arxiv_id'],
+    node.logical_id,
+  );
+}
+
+function graphNodeMeta(node: EvidenceGraphNode): string {
+  const anchor = node.payload.anchor;
+  if (typeof anchor === 'string' && anchor.trim()) return `#${anchor}`;
+  return node.version ? `${node.paper_id}v${node.version}` : node.paper_id;
+}
+
+function graphTone(kind: EvidenceGraphNode['kind']): FormulaNode['type'] {
+  if (kind === 'Hypothesis') return 'hypothesis';
+  if (kind === 'Concept') return 'concept';
+  return 'evidence';
+}
+
+export function buildEvidenceInspector(
+  node: EvidenceGraphNode | EvidenceSearchHit,
+  sourceUrl: string,
+  nodes: EvidenceGraphNode[],
+  edges: EvidenceGraphEdge[],
+): InspectorRecord {
+  const anchor = payloadString(node.payload, ['anchor', 'source_anchor'], '');
+  const section = payloadString(node.payload, ['section', 'title'], '—');
+  const confidenceValue = node.payload.confidence;
+  const confidence =
+    typeof confidenceValue === 'number' && Number.isFinite(confidenceValue)
+      ? Math.min(1, Math.max(0, confidenceValue))
+      : 1;
+  const matchingEdges = edges.filter(
+    (edge) => edge.source_uuid === node.uuid || edge.target_uuid === node.uuid,
+  );
+  const relation =
+    'match_sources' in node
+      ? node.match_sources.join(' + ')
+      : (matchingEdges[0]?.relation.replaceAll('_', ' ') ?? 'source-bound');
+  const pinnedSource = sourceUrl ||
+    `https://arxiv.org/html/${node.paper_id}${node.version ? `v${node.version}` : ''}`;
+  const anchorIsSource = node.payload.anchor_is_source === true;
+  return {
+    id: node.uuid,
+    label: graphNodeLabel(node),
+    expression: graphNodeExpression(node),
+    tone: graphTone(node.kind),
+    kind: node.kind,
+    confidence,
+    source: `${section}${anchor ? ` · #${anchor}` : ''}`,
+    relation,
+    paperLabel: `${node.paper_id}${node.version ? `v${node.version}` : ''}`,
+    verificationStatus: node.verification_status.replaceAll('_', ' '),
+    episodeCount: node.episode_uuids.length,
+    anchor: anchor || '—',
+    anchorIsSource,
+    section,
+    extractionMethod: payloadString(
+      node.payload,
+      ['extraction_method'],
+      'exact evidence',
+    ).replaceAll('_', ' '),
+    sourceHref: `${pinnedSource}${anchorIsSource && anchor ? `#${encodeURIComponent(anchor)}` : ''}`,
+    sourceText:
+      [node.payload.preceding_text, node.payload.following_text]
+        .filter(
+          (value): value is string =>
+            typeof value === 'string' && Boolean(value.trim()),
+        )
+        .join(' ') ||
+      payloadString(node.payload, ['text', 'statement'], 'Source text unavailable'),
+    validAt: node.valid_at ?? 'Unknown source time',
+    episodeIds: node.episode_uuids,
+    relations: matchingEdges.map((edge) => {
+      const direction = edge.source_uuid === node.uuid ? 'outgoing' : 'incoming';
+      const neighborId =
+        direction === 'outgoing' ? edge.target_uuid : edge.source_uuid;
+      const neighbor = nodes.find((candidate) => candidate.uuid === neighborId);
+      return {
+        id: edge.uuid,
+        direction,
+        relation: edge.relation.replaceAll('_', ' '),
+        neighbor: neighbor ? graphNodeLabel(neighbor) : neighborId,
+        episodeCount: edge.episode_uuids.length,
+        validAt: edge.valid_at ?? 'Unknown relation time',
+      };
+    }),
+    superseded: matchingEdges.some(
+      (edge) => edge.relation === 'supersedes' && edge.target_uuid === node.uuid,
+    ),
+  };
+}
+
+function demoInspector(node: FormulaNode): InspectorRecord {
+  return {
+    id: node.id,
+    label: node.label,
+    expression: node.formula,
+    tone: node.type,
+    kind: node.type,
+    confidence: node.confidence,
+    source: node.source,
+    relation: node.relation,
+    paperLabel: '1706.03762v7',
+    verificationStatus: 'curated demo',
+    episodeCount: 1,
+    anchor: 'S3.SS2',
+    anchorIsSource: true,
+    section: '3.2 Scaled Dot-Product Attention',
+    extractionMethod: 'curated demo',
+    sourceHref: 'https://arxiv.org/html/1706.03762v7',
+    sourceText:
+      'The attention output is a weighted sum of values, with weights derived from query–key compatibility.',
+    validAt: 'Curated demonstration',
+    episodeIds: ['demo-attention-episode'],
+    relations: [],
+    superseded: false,
+  };
 }
 
 function importErrorMessage(code?: string): string {
@@ -196,6 +354,26 @@ function searchErrorMessage(code?: string): string {
   }
 }
 
+function graphErrorMessage(code?: string): string {
+  switch (code) {
+    case 'AUTH_REQUIRED':
+      return 'Your sign-in expired · reload to continue';
+    case 'DATABASE_UNAVAILABLE':
+      return 'Saved graph metadata is temporarily unavailable';
+    case 'GRAPH_API_NOT_CONFIGURED':
+      return 'The graph service is not connected in this environment';
+    case 'GRAPH_API_RESPONSE_TOO_LARGE':
+      return 'The saved graph exceeds the current display limit';
+    case 'GRAPH_API_INVALID_RESPONSE':
+      return 'The graph service returned an invalid snapshot';
+    case 'GRAPH_API_UNAVAILABLE':
+    case 'GRAPH_LOAD_FAILED':
+      return 'The saved graph is temporarily unavailable';
+    default:
+      return `Graph restore stopped · ${code ?? 'unknown error'}`;
+  }
+}
+
 function searchHitTitle(hit: EvidenceSearchHit): string {
   const title = hit.payload.title;
   if (typeof title === 'string' && title.trim()) return title;
@@ -212,16 +390,16 @@ function searchHitExcerpt(hit: EvidenceSearchHit): string {
   return `${hit.paper_id}${hit.version ? `v${hit.version}` : ''}`;
 }
 
-function nodeTone(type: FormulaNode['type']) {
-  if (type === 'hypothesis') return 'hypothesis-node';
-  if (type === 'concept') return 'concept-node';
-  return 'evidence-node';
-}
-
 export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
-  const [selectedId, setSelectedId] = useState('scaled');
+  const [selectedId, setSelectedId] = useState<string | null>('scaled');
   const [isImporting, setIsImporting] = useState(false);
   const [imported, setImported] = useState<WorkspaceImportResponse | null>(null);
+  const [graphSnapshot, setGraphSnapshot] =
+    useState<EvidenceGraphSnapshotResponse | null>(null);
+  const [isGraphLoading, setIsGraphLoading] = useState(false);
+  const [graphNotice, setGraphNotice] = useState('Loading saved evidence…');
+  const [selectedSearchHit, setSelectedSearchHit] =
+    useState<EvidenceSearchHit | null>(null);
   const [paperUrl, setPaperUrl] = useState(
     'https://arxiv.org/html/1706.03762',
   );
@@ -236,47 +414,210 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   const [searchNotice, setSearchNotice] = useState(
     'Search exact symbols, concepts, claims, and neighboring evidence',
   );
-  const graphNodes = useMemo(
-    () => (imported ? importedFormulaNodes(imported.paper) : demoNodes),
-    [imported],
+  const hasPersistedGraph = Boolean(graphSnapshot?.paper);
+  const evidenceNodes = useMemo(
+    () => graphSnapshot?.nodes ?? [],
+    [graphSnapshot],
   );
-  const selected = useMemo(
-    () =>
-      graphNodes.find((node) => node.id === selectedId) ??
-      graphNodes[0] ??
-      null,
-    [graphNodes, selectedId],
+  const evidenceEdges = useMemo(
+    () => graphSnapshot?.edges ?? [],
+    [graphSnapshot],
   );
-  const selectedEquation = useMemo(
+  const graphNodes = useMemo<GraphViewportNode[]>(
     () =>
-      imported?.paper.equations.find(
-        (equation) => equation.equation_id === selected?.id,
-      ) ?? null,
-    [imported, selected],
-  );
-  const paperSections = useMemo(
-    () =>
-      imported
-        ? imported.paper.sections.map((section) => ({
-            id: section.section_id,
-            label: section.title,
-            count: section.equation_ids.length,
-            active: selectedEquation?.section_id === section.section_id,
+      hasPersistedGraph
+        ? evidenceNodes.map((node) => ({
+            id: node.uuid,
+            kind: node.kind,
+            label: graphNodeLabel(node),
+            expression: graphNodeExpression(node),
+            meta: graphNodeMeta(node),
           }))
-        : demoPaperSections.map((section, index) => ({
-            ...section,
-            id: `demo-${index}`,
+        : demoNodes.map((node) => ({
+            id: node.id,
+            kind:
+              node.type === 'hypothesis'
+                ? 'Hypothesis'
+                : node.type === 'concept'
+                  ? 'Concept'
+                  : 'Equation',
+            label: node.label,
+            expression: node.formula,
+            meta: node.source,
           })),
-    [imported, selectedEquation],
+    [evidenceNodes, hasPersistedGraph],
   );
-  const graphConnections = imported ? [] : demoConnections;
-  const sourceHref = imported
-    ? `${imported.paper.source_url}${
-        selectedEquation?.anchor_is_source
-          ? `#${encodeURIComponent(selectedEquation.anchor)}`
-          : ''
-      }`
-    : 'https://arxiv.org/html/1706.03762v7';
+  const graphConnections = useMemo<GraphViewportEdge[]>(
+    () =>
+      hasPersistedGraph
+        ? evidenceEdges.map((edge) => ({
+            id: edge.uuid,
+            source: edge.source_uuid,
+            target: edge.target_uuid,
+            relation: edge.relation,
+          }))
+        : demoConnections,
+    [evidenceEdges, hasPersistedGraph],
+  );
+  const selectedEvidence = useMemo(
+    () => evidenceNodes.find((node) => node.uuid === selectedId) ?? null,
+    [evidenceNodes, selectedId],
+  );
+  const selectedDemo = useMemo(
+    () => demoNodes.find((node) => node.id === selectedId) ?? demoNodes[0],
+    [selectedId],
+  );
+  const persistedVersionNode = useMemo(
+    () =>
+      evidenceNodes.find(
+        (node) =>
+          node.kind === 'PaperVersion' &&
+          node.version === graphSnapshot?.paper?.version,
+      ) ?? null,
+    [evidenceNodes, graphSnapshot],
+  );
+  const inspector = useMemo(() => {
+    const sourceUrl =
+      graphSnapshot?.paper?.source_url ??
+      imported?.paper.source_url ??
+      'https://arxiv.org/html/1706.03762v7';
+    if (selectedSearchHit?.uuid === selectedId) {
+      return buildEvidenceInspector(
+        selectedSearchHit,
+        sourceUrl,
+        evidenceNodes,
+        evidenceEdges,
+      );
+    }
+    if (selectedEvidence) {
+      return buildEvidenceInspector(
+        selectedEvidence,
+        sourceUrl,
+        evidenceNodes,
+        evidenceEdges,
+      );
+    }
+    return hasPersistedGraph ? null : demoInspector(selectedDemo);
+  }, [
+    evidenceEdges,
+    evidenceNodes,
+    graphSnapshot,
+    hasPersistedGraph,
+    imported,
+    selectedDemo,
+    selectedEvidence,
+    selectedId,
+    selectedSearchHit,
+  ]);
+  const paperSections = useMemo(
+    () => {
+      if (hasPersistedGraph) {
+        const selectedSectionId = selectedEvidence?.payload.section_id;
+        return evidenceNodes
+          .filter((node) => node.kind === 'Section')
+          .map((node) => ({
+            id: node.logical_id,
+            graphId: node.uuid,
+            label: graphNodeLabel(node),
+            count: Array.isArray(node.payload.equation_ids)
+              ? node.payload.equation_ids.length
+              : 0,
+            active: selectedSectionId === node.logical_id,
+          }));
+      }
+      return demoPaperSections.map((section, index) => ({
+        ...section,
+        id: `demo-${index}`,
+        graphId: null,
+      }));
+    }, [evidenceNodes, hasPersistedGraph, selectedEvidence],
+  );
+  const persistedAuthors = Array.isArray(persistedVersionNode?.payload.authors)
+    ? persistedVersionNode.payload.authors.filter(
+        (author): author is string => typeof author === 'string',
+      )
+    : [];
+  const paperTitle =
+    graphSnapshot?.paper?.title ?? imported?.paper.title ?? 'Attention Is All You Need';
+  const paperId =
+    graphSnapshot?.paper?.paper_id ?? imported?.paper.paper_id ?? '1706.03762';
+  const paperVersion =
+    graphSnapshot?.paper?.version ?? imported?.paper.version ?? 7;
+  const paperAuthors =
+    persistedAuthors.length > 0
+      ? persistedAuthors
+      : (imported?.paper.authors ?? ['Vaswani et al.']);
+  const equationCount = hasPersistedGraph
+    ? evidenceNodes.filter((node) => node.kind === 'Equation').length
+    : (imported?.paper.equations.length ?? 7);
+
+  const loadPersistedGraph = useCallback(
+    async (signal?: AbortSignal): Promise<EvidenceGraphSnapshotResponse | undefined> => {
+      await Promise.resolve();
+      setIsGraphLoading(true);
+      setGraphNotice('Loading saved evidence…');
+      try {
+        const response = await fetch('/api/graph', {
+          method: 'GET',
+          headers: { accept: 'application/json' },
+          signal,
+        });
+        const result = (await response.json()) as Partial<EvidenceGraphSnapshotResponse> & {
+          code?: string;
+        };
+        if (!response.ok) {
+          setGraphNotice(graphErrorMessage(result.code));
+          return undefined;
+        }
+        if (
+          !Array.isArray(result.nodes) ||
+          !Array.isArray(result.edges) ||
+          typeof result.truncated !== 'boolean' ||
+          !('paper' in result)
+        ) {
+          setGraphNotice('The graph service returned an invalid snapshot');
+          return undefined;
+        }
+        const completed = result as EvidenceGraphSnapshotResponse;
+        setGraphSnapshot(completed);
+        if (completed.nodes.length > 0) {
+          setSelectedSearchHit(null);
+          setSelectedId((current) =>
+            completed.nodes.some((node) => node.uuid === current)
+              ? current
+              : (completed.nodes.find((node) => node.kind === 'Equation')?.uuid ??
+                completed.nodes[0].uuid),
+          );
+        }
+        setGraphNotice(
+          completed.paper
+            ? `${completed.nodes.length} saved nodes · ${completed.edges.length} relations${completed.truncated ? ' · display limited' : ''}`
+            : 'No saved graph yet · showing the curated demo',
+        );
+        return completed;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return undefined;
+        }
+        setGraphNotice('The saved graph is temporarily unavailable');
+        return undefined;
+      } finally {
+        setIsGraphLoading(false);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const lifecycle = new AbortController();
+    const task = window.setTimeout(() => {
+      void loadPersistedGraph(lifecycle.signal);
+    }, 0);
+    return () => {
+      window.clearTimeout(task);
+      lifecycle.abort();
+    };
+  }, [loadPersistedGraph]);
 
   useEffect(() => {
     const context = document.modelContext;
@@ -353,11 +694,11 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
       }
       const completed = result as WorkspaceImportResponse;
       setImported(completed);
-      setSelectedId(completed.paper.equations[0]?.equation_id ?? '');
+      const refreshedGraph = await loadPersistedGraph();
       setNotice(
         `${completed.paper.equations.length} equations ${
           completed.receipt.replayed ? 'already synchronized' : 'persisted'
-        } · ${completed.paper.title}`,
+        } · ${completed.paper.title}${refreshedGraph ? '' : ' · graph refresh pending'}`,
       );
     } catch (error) {
       setNotice(
@@ -428,21 +769,16 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   }
 
   function selectSearchHit(hit: EvidenceSearchHit) {
-    const equationId =
-      typeof hit.payload.equation_id === 'string'
-        ? hit.payload.equation_id
-        : hit.logical_id;
-    if (
-      hit.kind === 'Equation' &&
-      imported?.paper.equations.some(
-        (equation) => equation.equation_id === equationId,
-      )
-    ) {
-      setSelectedId(equationId);
-    }
+    setSelectedSearchHit(hit);
+    setSelectedId(hit.uuid);
     setNotice(
       `Search evidence · ${hit.paper_id}${hit.version ? `v${hit.version}` : ''} · ${hit.kind}`,
     );
+  }
+
+  function selectGraphNode(nodeId: string) {
+    setSelectedSearchHit(null);
+    setSelectedId(nodeId);
   }
 
   return (
@@ -622,25 +958,27 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
           <article className="paper-card">
             <div className="paper-index">P–01</div>
             <Badge className="version-badge">
-              {imported
-                ? `v${imported.paper.version} · persisted`
+              {hasPersistedGraph
+                ? `v${paperVersion} · persisted`
                 : 'v7 · curated demo'}
             </Badge>
-            <h3>{imported?.paper.title ?? 'Attention Is All You Need'}</h3>
+            <h3>{paperTitle}</h3>
             <p>
-              {imported
-                ? `${authorsLabel(imported.paper.authors)} · arXiv:${imported.paper.paper_id}`
+              {hasPersistedGraph || imported
+                ? `${authorsLabel(paperAuthors)} · arXiv:${paperId}`
                 : 'Vaswani et al. · arXiv:1706.03762'}
             </p>
             <div className="paper-meta">
               <span>
                 <Braces size={14} />
-                {imported?.paper.equations.length ?? 7} equations
+                {equationCount} equations
               </span>
               <span>
                 <History size={14} />
-                {imported
-                  ? `${imported.receipt.node_count} evidence nodes`
+                {hasPersistedGraph
+                  ? `${evidenceNodes.length} evidence nodes`
+                  : imported
+                    ? `${imported.receipt.node_count} evidence nodes`
                   : '6 versions'}
               </span>
             </div>
@@ -654,11 +992,14 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                 key={section.id}
                 type="button"
                 onClick={() => {
-                  if (!imported) return;
-                  const firstEquation = imported.paper.equations.find(
-                    (equation) => equation.section_id === section.id,
+                  if (!hasPersistedGraph) return;
+                  const firstEquation = evidenceNodes.find(
+                    (node) =>
+                      node.kind === 'Equation' &&
+                      node.payload.section_id === section.id,
                   );
-                  if (firstEquation) setSelectedId(firstEquation.equation_id);
+                  if (firstEquation) selectGraphNode(firstEquation.uuid);
+                  else if (section.graphId) selectGraphNode(section.graphId);
                 }}
               >
                 <span>{section.label}</span>
@@ -680,7 +1021,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
           <div className="graph-header">
             <div>
               <p className="eyebrow">Temporal formula graph</p>
-              <h1>{imported ? 'Exact evidence snapshot' : 'Attention lineage'}</h1>
+              <h1>{hasPersistedGraph ? 'Exact evidence snapshot' : 'Attention lineage'}</h1>
             </div>
             <div className="legend" aria-label="Graph legend">
               <span><i className="legend-dot evidence-dot" />Evidence</span>
@@ -690,63 +1031,17 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
           </div>
 
           <div className="graph-stage">
-            <div className="graph-grid" aria-hidden="true" />
-            <svg
-              className="connection-layer"
-              viewBox="0 0 100 100"
-              preserveAspectRatio="none"
-              aria-hidden="true"
-            >
-              {graphConnections.map(([fromId, toId]) => {
-                const from = graphNodes.find((node) => node.id === fromId)!;
-                const to = graphNodes.find((node) => node.id === toId)!;
-                return (
-                  <line
-                    key={`${fromId}-${toId}`}
-                    x1={from.x + 9}
-                    y1={from.y + 5}
-                    x2={to.x + 9}
-                    y2={to.y + 5}
-                  />
-                );
-              })}
-            </svg>
-
-            {graphNodes.map((node) => (
-              <button
-                key={node.id}
-                type="button"
-                className={`formula-node ${nodeTone(node.type)} ${
-                  selected?.id === node.id ? 'formula-node-selected' : ''
-                }`}
-                style={{ left: `${node.x}%`, top: `${node.y}%` }}
-                onClick={() => setSelectedId(node.id)}
-                aria-pressed={selected?.id === node.id}
-              >
-                <span className="node-kicker">
-                  {node.type === 'hypothesis' ? 'HYPOTHESIS' : node.relation}
-                </span>
-                <strong>{node.label}</strong>
-                <code>{node.formula}</code>
-              </button>
-            ))}
-
-            {graphNodes.length === 0 ? (
-              <div className="graph-empty">
-                <Braces size={24} />
-                <strong>No display equations found</strong>
-                <span>The paper snapshot is saved, but there is nothing to plot yet.</span>
-              </div>
-            ) : null}
-
+            <EvidenceGraphViewport
+              nodes={graphNodes}
+              edges={graphConnections}
+              selectedId={selectedId}
+              onSelect={selectGraphNode}
+              loading={isGraphLoading}
+            />
             <div className="graph-status">
               <span className="pulse-dot" />
-              {imported ? 'Exact graph persisted' : 'Version-aware demo'}
-              <span>
-                {imported
-                  ? `${Math.min(graphNodes.length, 8)} of ${imported.paper.equations.length} formulas`
-                  : '14 curated relationships'}
-              </span>
+              {hasPersistedGraph ? 'Exact graph persisted' : 'Version-aware demo'}
+              <span>{graphNotice}</span>
             </div>
           </div>
 
@@ -771,49 +1066,49 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
         </section>
 
         <aside className="inspector-panel" aria-label="Formula inspector">
-          {selected ? (
+          {inspector ? (
             <>
               <div className="panel-heading inspector-heading">
                 <div>
                   <p className="eyebrow">Inspector</p>
-                  <h2>{selected.label}</h2>
+                  <h2>{inspector.label}</h2>
                 </div>
-                <span className={`type-token type-${selected.type}`}>
-                  {selected.type}
+                <span className={`type-token type-${inspector.tone}`}>
+                  {inspector.kind}
                 </span>
               </div>
 
               <div className="formula-display">
-                <p>{imported ? 'Extracted expression' : 'Canonical expression'}</p>
-                <code>{selected.formula}</code>
+                <p>{hasPersistedGraph ? 'Extracted expression' : 'Canonical expression'}</p>
+                <code>{inspector.expression}</code>
               </div>
 
               <section className="inspector-section">
                 <div className="section-title">
                   <h3>Relation</h3>
-                  <span>{Math.round(selected.confidence * 100)}% confidence</span>
+                  <span>{Math.round(inspector.confidence * 100)}% confidence</span>
                 </div>
                 <div className="relation-card">
                   <GitBranch size={17} />
                   <div>
-                    <p>{selected.relation}</p>
-                    <strong>{selected.source}</strong>
+                    <p>{inspector.relation}</p>
+                    <strong>{inspector.source}</strong>
                   </div>
                 </div>
               </section>
 
               <section className="inspector-section">
                 <div className="section-title">
-                  <h3>{imported ? 'Source context' : 'Symbol contract'}</h3>
-                  <span>{imported ? 'immutable snapshot' : '4 symbols'}</span>
+                  <h3>{hasPersistedGraph ? 'Source context' : 'Symbol contract'}</h3>
+                  <span>{hasPersistedGraph ? 'immutable snapshot' : '4 symbols'}</span>
                 </div>
                 <div className="symbol-table">
-                  {selectedEquation ? (
+                  {hasPersistedGraph || selectedSearchHit ? (
                     <>
-                      <div><code>#</code><span>anchor</span><b>{selectedEquation.anchor}</b></div>
-                      <div><code>§</code><span>section</span><b>{selectedEquation.section ?? '—'}</b></div>
-                      <div><code>↳</code><span>extractor</span><b>{selectedEquation.extraction_method.replaceAll('_', ' ')}</b></div>
-                      <div><code>!</code><span>review flags</span><b>{selectedEquation.warnings.length}</b></div>
+                      <div><code>#</code><span>anchor</span><b>{inspector.anchor}</b></div>
+                      <div><code>§</code><span>section</span><b>{inspector.section}</b></div>
+                      <div><code>↳</code><span>extractor</span><b>{inspector.extractionMethod}</b></div>
+                      <div><code>◫</code><span>episodes</span><b>{inspector.episodeCount}</b></div>
                     </>
                   ) : (
                     <>
@@ -824,33 +1119,73 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                     </>
                   )}
                 </div>
+                <p className="source-context-text">{inspector.sourceText}</p>
+              </section>
+
+              <section className="inspector-section">
+                <div className="section-title">
+                  <h3>Relation history</h3>
+                  <span>{inspector.relations.length} visible</span>
+                </div>
+                {inspector.relations.length > 0 ? (
+                  <ol className="relation-history">
+                    {inspector.relations.map((relation) => (
+                      <li key={relation.id}>
+                        <span>{relation.direction === 'incoming' ? '←' : '→'}</span>
+                        <div>
+                          <strong>{relation.relation}</strong>
+                          <small>{relation.neighbor}</small>
+                        </div>
+                        <i>{relation.episodeCount} ep.</i>
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <p className="history-empty">No visible relations for this node.</p>
+                )}
+              </section>
+
+              <section className="inspector-section">
+                <div className="section-title">
+                  <h3>Provenance episodes</h3>
+                  <span>{inspector.paperLabel}</span>
+                </div>
+                <ul className="episode-list">
+                  {inspector.episodeIds.map((episodeId) => (
+                    <li key={episodeId}><code>{episodeId}</code></li>
+                  ))}
+                </ul>
               </section>
 
               <section className="inspector-section">
                 <div className="section-title">
                   <h3>Validation</h3>
-                  <span>{imported ? `job ${imported.job_id.slice(-8)}` : 'demo state'}</span>
+                  <span>{inspector.verificationStatus}</span>
                 </div>
                 <ul className="check-list">
                   <li><Check size={14} />Exact source snapshot retained</li>
-                  <li><Check size={14} />Paper revision pinned</li>
+                  <li><Check size={14} />Paper revision pinned · {inspector.paperLabel}</li>
                   <li>
                     <Check size={14} />
-                    {selectedEquation?.anchor_is_source === false
+                    {!inspector.anchorIsSource
                       ? 'Generated anchor marked for review'
                       : 'Source anchor resolved'}
+                  </li>
+                  <li>
+                    <Check size={14} />
+                    {inspector.superseded ? 'Superseded by a newer revision' : 'No newer revision in view'}
                   </li>
                 </ul>
               </section>
 
               <a
                 className="source-link"
-                href={sourceHref}
+                href={inspector.sourceHref}
                 target="_blank"
                 rel="noopener noreferrer"
               >
                 <BookOpenText size={16} />
-                Open equation in source
+                {inspector.anchorIsSource ? 'Open evidence in source' : 'Open paper source'}
                 <span>↗</span>
               </a>
             </>

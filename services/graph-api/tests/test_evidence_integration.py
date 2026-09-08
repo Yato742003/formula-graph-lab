@@ -11,7 +11,7 @@ from graphiti_core.nodes import EpisodicNode
 from app.evidence import build_evidence_graph, build_reported_claim
 from app.evidence_store import Neo4jEvidenceStore
 from app.extractor import extract_paper
-from app.models import EvidenceSearchRequest
+from app.models import EvidenceGraphSnapshotRequest, EvidenceSearchRequest
 from app.search import EvidenceSearchService, SearchCursorCodec
 
 FIXTURE = Path(__file__).parent / "fixtures" / "arxiv_sample.html"
@@ -365,5 +365,33 @@ async def test_search_filters_neighbors_pagination_and_tenant_isolation():
         assert len(graph_page.hits) == 1
         assert graph_page.hits[0].match_sources == ["graph"]
         assert graph_page.hits[0].score_components.graph_distance == 1
+
+        snapshot = await store.graph_snapshot(EvidenceGraphSnapshotRequest(
+            workspace_id=workspace_a,
+            paper_id="2402.09101",
+            version=2,
+        ))
+        expected_node_uuids = {node["uuid"] for node in a_v2.nodes}
+        expected_node_uuids.add(a_v1.paper_version_uuid)
+        assert {node.uuid for node in snapshot.nodes} == expected_node_uuids
+        assert snapshot.truncated is False
+        assert snapshot.edges
+        assert all(
+            edge.source_uuid in expected_node_uuids
+            and edge.target_uuid in expected_node_uuids
+            for edge in snapshot.edges
+        )
+        assert all(node.paper_id == "2402.09101" for node in snapshot.nodes)
+        assert all(
+            node.version in {None, 1, 2}
+            for node in snapshot.nodes
+        )
+        assert any(
+            edge.relation == "supersedes"
+            and edge.source_uuid == a_v2.paper_version_uuid
+            and edge.target_uuid == a_v1.paper_version_uuid
+            for edge in snapshot.edges
+        )
+        assert not any("spectralneedle=999" in str(node.payload) for node in snapshot.nodes)
     finally:
         await store.close()

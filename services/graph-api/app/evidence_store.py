@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
@@ -9,11 +10,24 @@ from neo4j import AsyncGraphDatabase
 from app.enrichment import EnrichmentAttempt
 from app.episodes import workspace_group_id
 from app.evidence import EvidenceGraph, ReportedClaim
+from app.models import (
+    EvidenceGraphEdge,
+    EvidenceGraphNode,
+    EvidenceGraphSnapshotRequest,
+    EvidenceGraphSnapshotResponse,
+)
 from app.search import (
     EvidenceCandidate,
     EvidenceSearchFilters,
     build_lucene_query,
 )
+
+MAX_SNAPSHOT_NODES = 500
+MAX_SNAPSHOT_EDGES = 1_500
+
+
+class EvidenceSnapshotDataError(RuntimeError):
+    """Persisted graph evidence is not structurally valid."""
 
 
 @dataclass(frozen=True)
@@ -228,6 +242,117 @@ class Neo4jEvidenceStore:
         )
         return [self._search_candidate(record) for record in records]
 
+    async def graph_snapshot(
+        self,
+        request: EvidenceGraphSnapshotRequest,
+    ) -> EvidenceGraphSnapshotResponse:
+        group_id = workspace_group_id(request.workspace_id)
+        node_records, _, _ = await self.driver.execute_query(
+            """
+            MATCH (node:Evidence {group_id:$group, paper_id:$paper_id})
+            WHERE node.kind='Paper'
+               OR node.paper_version=$version
+               OR (node.kind='PaperVersion' AND node.paper_version <= $version)
+            OPTIONAL MATCH (node)-[:EXTRACTED_IN]->
+                           (episode:Episodic {group_id:$group})
+            WITH node,
+                 [uuid IN collect(DISTINCT episode.uuid) WHERE uuid IS NOT NULL]
+                 AS episode_uuids,
+                 CASE node.kind
+                   WHEN 'Paper' THEN 0
+                   WHEN 'PaperVersion' THEN 1
+                   WHEN 'Section' THEN 2
+                   WHEN 'Equation' THEN 3
+                   ELSE 4
+                 END AS kind_order
+            RETURN node.uuid AS uuid, node.kind AS kind,
+                   node.logical_id AS logical_id, node.payload AS payload,
+                   node.paper_id AS paper_id, node.paper_version AS version,
+                   node.valid_at AS valid_at,
+                   node.verification_status AS verification_status,
+                   episode_uuids
+            ORDER BY kind_order ASC, logical_id ASC, uuid ASC
+            LIMIT $limit
+            """,
+            group=group_id,
+            paper_id=request.paper_id,
+            version=request.version,
+            limit=MAX_SNAPSHOT_NODES + 1,
+            database_=self.database,
+        )
+        nodes_truncated = len(node_records) > MAX_SNAPSHOT_NODES
+        node_records = node_records[:MAX_SNAPSHOT_NODES]
+        nodes = [self._graph_node(record) for record in node_records]
+        node_uuids = [node.uuid for node in nodes]
+        if not node_uuids:
+            return EvidenceGraphSnapshotResponse(nodes=[], edges=[], truncated=False)
+
+        edge_records, _, _ = await self.driver.execute_query(
+            """
+            MATCH (source:Evidence {group_id:$group})
+                  -[edge:EVIDENCE_RELATION {group_id:$group}]->
+                  (target:Evidence {group_id:$group})
+            WHERE source.uuid IN $node_uuids AND target.uuid IN $node_uuids
+            RETURN edge.uuid AS uuid, source.uuid AS source_uuid,
+                   target.uuid AS target_uuid, edge.relation AS relation,
+                   coalesce(edge.source_anchor, '') AS source_anchor,
+                   coalesce(edge.episode_uuids, []) AS episode_uuids,
+                   edge.valid_at AS valid_at
+            ORDER BY relation ASC, source_uuid ASC, target_uuid ASC, uuid ASC
+            LIMIT $limit
+            """,
+            group=group_id,
+            node_uuids=node_uuids,
+            limit=MAX_SNAPSHOT_EDGES + 1,
+            database_=self.database,
+        )
+        edges_truncated = len(edge_records) > MAX_SNAPSHOT_EDGES
+        edge_records = edge_records[:MAX_SNAPSHOT_EDGES]
+        edges = [self._graph_edge(record) for record in edge_records]
+        return EvidenceGraphSnapshotResponse(
+            nodes=nodes,
+            edges=edges,
+            truncated=nodes_truncated or edges_truncated,
+        )
+
+    @staticmethod
+    def _graph_node(record) -> EvidenceGraphNode:
+        try:
+            payload = json.loads(record["payload"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise EvidenceSnapshotDataError("Evidence payload is invalid.") from exc
+        if not isinstance(payload, dict):
+            raise EvidenceSnapshotDataError("Evidence payload must be an object.")
+        return EvidenceGraphNode(
+            uuid=record["uuid"],
+            kind=record["kind"],
+            logical_id=record["logical_id"],
+            paper_id=record["paper_id"],
+            version=record["version"],
+            valid_at=Neo4jEvidenceStore._native_datetime(record["valid_at"]),
+            verification_status=record["verification_status"],
+            payload=payload,
+            episode_uuids=list(record["episode_uuids"]),
+        )
+
+    @staticmethod
+    def _graph_edge(record) -> EvidenceGraphEdge:
+        return EvidenceGraphEdge(
+            uuid=record["uuid"],
+            source_uuid=record["source_uuid"],
+            target_uuid=record["target_uuid"],
+            relation=record["relation"],
+            source_anchor=record["source_anchor"],
+            episode_uuids=list(record["episode_uuids"]),
+            valid_at=Neo4jEvidenceStore._native_datetime(record["valid_at"]),
+        )
+
+    @staticmethod
+    def _native_datetime(value):
+        if hasattr(value, "to_native"):
+            return value.to_native()
+        return value
+
     @staticmethod
     def _search_parameters(filters: EvidenceSearchFilters) -> dict[str, object]:
         return {
@@ -241,9 +366,6 @@ class Neo4jEvidenceStore:
 
     @staticmethod
     def _search_candidate(record) -> EvidenceCandidate:
-        valid_at = record["valid_at"]
-        if hasattr(valid_at, "to_native"):
-            valid_at = valid_at.to_native()
         return EvidenceCandidate(
             uuid=record["uuid"],
             kind=record["kind"],
@@ -251,7 +373,7 @@ class Neo4jEvidenceStore:
             payload=record["payload"],
             paper_id=record["paper_id"],
             paper_version=record["paper_version"],
-            valid_at=valid_at,
+            valid_at=Neo4jEvidenceStore._native_datetime(record["valid_at"]),
             verification_status=record["verification_status"],
             episode_uuids=tuple(record["episode_uuids"]),
             lexical_score=record["lexical_score"],

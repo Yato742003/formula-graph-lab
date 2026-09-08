@@ -96,6 +96,22 @@ VerificationStatus = Literal[
     "symbolically_verified",
     "human_reviewed",
 ]
+EvidenceRelationType = Literal[
+    "has_version",
+    "contains",
+    "defines",
+    "uses",
+    "assumes",
+    "cites",
+    "makes_claim",
+    "about",
+    "derived_from",
+    "approximates",
+    "generalizes",
+    "equivalent_under",
+    "disagrees_with",
+    "supersedes",
+]
 
 
 class EvidenceSearchRequest(BaseModel):
@@ -161,3 +177,37 @@ class EvidenceSearchResponse(BaseModel):
     hits: list[EvidenceSearchHit]
     next_cursor: str | None
     semantic_available: bool
+
+
+class EvidenceGraphSnapshotRequest(BaseModel):
+    workspace_id: str = Field(min_length=1, max_length=200, pattern=r".*\S.*")
+    paper_id: str = Field(pattern=r"^\d{4}\.\d{4,5}$")
+    version: int = Field(ge=1)
+
+
+class EvidenceGraphNode(BaseModel):
+    uuid: str = Field(min_length=1, max_length=200)
+    kind: EvidenceEntityType
+    logical_id: str = Field(min_length=1, max_length=500)
+    paper_id: str
+    version: int | None
+    valid_at: datetime | None
+    verification_status: VerificationStatus
+    payload: dict[str, Any]
+    episode_uuids: list[str]
+
+
+class EvidenceGraphEdge(BaseModel):
+    uuid: str = Field(min_length=1, max_length=500)
+    source_uuid: str = Field(min_length=1, max_length=200)
+    target_uuid: str = Field(min_length=1, max_length=200)
+    relation: EvidenceRelationType
+    source_anchor: str = Field(max_length=500)
+    episode_uuids: list[str]
+    valid_at: datetime | None
+
+
+class EvidenceGraphSnapshotResponse(BaseModel):
+    nodes: list[EvidenceGraphNode]
+    edges: list[EvidenceGraphEdge]
+    truncated: bool

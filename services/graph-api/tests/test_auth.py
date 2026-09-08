@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.evidence_store import ImportReceipt
 from app.main import app, require_evidence_store, require_search_service
-from app.models import EvidenceSearchResponse
+from app.models import EvidenceGraphSnapshotResponse, EvidenceSearchResponse
 from app.search import InvalidSearchCursor
 
 
@@ -214,3 +214,31 @@ def test_search_endpoint_hides_cursor_validation_details(monkeypatch) -> None:
         app.dependency_overrides.clear()
     assert response.status_code == 400
     assert response.json()["detail"] == "Invalid search cursor."
+
+
+def test_graph_snapshot_endpoint_uses_protected_bounded_contract(monkeypatch) -> None:
+    class FakeStore:
+        async def graph_snapshot(self, request):
+            assert request.workspace_id == "site-workspace"
+            assert request.paper_id == "2402.08954"
+            assert request.version == 2
+            return EvidenceGraphSnapshotResponse(nodes=[], edges=[], truncated=False)
+
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.delenv("SERVICE_TOKEN", raising=False)
+    clear_graph_configuration(monkeypatch)
+    app.dependency_overrides[require_evidence_store] = lambda: FakeStore()
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/graphs/snapshot",
+                json={
+                    "workspace_id": "site-workspace",
+                    "paper_id": "2402.08954",
+                    "version": 2,
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json() == {"nodes": [], "edges": [], "truncated": False}
