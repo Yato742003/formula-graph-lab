@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import './setup';
+
 import {
   cleanup,
   render,
@@ -167,7 +169,29 @@ const completedGraph: EvidenceGraphSnapshotResponse = {
       version: 1,
       valid_at: '2024-02-14T00:00:00Z',
       verification_status: 'reported' as const,
-      payload: { ...equation },
+      payload: {
+        ...equation,
+        ...(index === 0
+          ? {
+              formula_analysis: {
+                status: 'well_typed',
+                canonical_hash: 'b'.repeat(64),
+                requires_confirmation: false,
+                shape_errors: [],
+                domain_errors: [],
+                contracts: [
+                  {
+                    name: 'x',
+                    category: 'scalar',
+                    shape: [],
+                    confidence: 0.98,
+                    confirmed: true,
+                  },
+                ],
+              },
+            }
+          : {}),
+      },
       episode_uuids: ['episode-section'],
     })),
   ],
@@ -242,6 +266,9 @@ describe('ResearchWorkspace import interaction', () => {
     expect(await screen.findByText('Exact evidence snapshot')).toBeTruthy();
     expect(screen.getByText('4 saved nodes · 3 relations')).toBeTruthy();
     expect(screen.getByText('Formula Graph Research')).toBeTruthy();
+    expect(screen.getByText('Formula identity')).toBeTruthy();
+    expect(screen.getByText('well typed')).toBeTruthy();
+    expect(screen.getByLabelText('Inferred symbol contracts')).toBeTruthy();
   });
 
   it('submits the canonical URL and replaces demo evidence with persisted formulas', async () => {

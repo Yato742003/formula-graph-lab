@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+import hashlib
+import json as _json_mod
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from lxml import etree
@@ -89,6 +91,7 @@ class ParsedFormula:
     bound_variables: tuple[str, ...]
     symbols: tuple[ParsedSymbol, ...]
     source_format: FormulaFormat
+    canonical_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -132,18 +135,22 @@ _CONSTANTS = {"pi", "infty", "infinity"}
 def parse_formula(source: str, source_format: FormulaFormat = "latex") -> ParsedFormula:
     if not isinstance(source, str) or not source.strip():
         raise FormulaParseError("EMPTY_FORMULA", "A non-empty formula is required.")
+    if source_format not in {"latex", "mathml"}:
+        raise FormulaParseError("UNSUPPORTED_FORMAT", "Formula format must be latex or mathml.")
     if len(source) > MAX_FORMULA_CHARACTERS:
         raise FormulaParseError("FORMULA_TOO_LARGE", "The formula exceeds the parser limit.")
     latex = _mathml_to_latex(source) if source_format == "mathml" else source
     tokens = _tokenize_latex(latex)
     root = _FormulaParser(tokens).parse()
     free, bound, symbols = _analyze_symbols(root)
+    c_hash = compute_canonical_hash(root)
     return ParsedFormula(
         root=root,
         free_variables=tuple(sorted(free)),
         bound_variables=tuple(sorted(bound)),
         symbols=tuple(symbols),
         source_format=source_format,
+        canonical_hash=c_hash,
     )
 
 
@@ -212,7 +219,14 @@ def _tokenize_latex(source: str) -> list[_Token]:
             end = index + 1
             while end < len(text) and (text[end].isalnum() or ord(text[end]) > 127):
                 end += 1
-            tokens.append(_Token("identifier", text[index:end], index))
+            identifier = text[index:end]
+            if len(identifier) > 1 and identifier.isascii() and identifier.isupper():
+                tokens.extend(
+                    _Token("identifier", value, index + offset)
+                    for offset, value in enumerate(identifier)
+                )
+            else:
+                tokens.append(_Token("identifier", identifier, index))
             index = end
             continue
         if character in "{}()[]_^+-*/=,":
@@ -272,9 +286,17 @@ class _FormulaParser:
                 if self.current.value in {"_", "^"}:
                     operator = self._advance().value
                     right = self._script_argument()
+                    attributes = (
+                        (("operation", "transpose"),)
+                        if operator == "^"
+                        and right.kind == "symbol"
+                        and right.value in {"T", "top"}
+                        else ()
+                    )
                     left = self._node(
                         "subscript" if operator == "_" else "power",
                         children=(left, right),
+                        attributes=attributes,
                     )
                     continue
                 if self.current.value == "(" and left.kind in {"symbol", "style"}:
@@ -296,7 +318,7 @@ class _FormulaParser:
                     left = self._infix(explicit, left, right)
                     continue
                 if self._starts_atom(self.current):
-                    if 20 < minimum_binding:
+                    if minimum_binding > 20:
                         break
                     right = self._expression(21, stops)
                     left = self._associative("multiply", left, right)
@@ -318,7 +340,9 @@ class _FormulaParser:
             return self._group(token.value)
         if token.kind == "command":
             return self._command(token)
-        raise FormulaParseError("EXPECTED_EXPRESSION", "Expected a formula expression.", token.position)
+        raise FormulaParseError(
+            "EXPECTED_EXPRESSION", "Expected a formula expression.", token.position
+        )
 
     def _command(self, token: _Token) -> AstNode:
         command = token.value
@@ -334,7 +358,11 @@ class _FormulaParser:
             return self._binder(command)
         if command in {"operatorname", "mathrm"}:
             name = self._required_group_text()
-            role = "function" if command == "operatorname" or name in _FUNCTION_COMMANDS else "identifier"
+            role = (
+                "function"
+                if command == "operatorname" or name in _FUNCTION_COMMANDS
+                else "identifier"
+            )
             return self._node("symbol", name, attributes=(("role", role),))
         if command in {"mathbf", "boldsymbol", "vec", "mathcal"}:
             child = self._required_group()
@@ -347,7 +375,9 @@ class _FormulaParser:
             if child.kind == "symbol":
                 return replace(child, attributes=((*child.attributes, ("style", style))))
             return self._node("style", children=(child,), attributes=(("style", style),))
-        raise FormulaParseError("UNSUPPORTED_COMMAND", f"Unsupported command \\{command}.", token.position)
+        raise FormulaParseError(
+            "UNSUPPORTED_COMMAND", f"Unsupported command \\{command}.", token.position
+        )
 
     def _binder(self, command: str) -> AstNode:
         lower: AstNode | None = None
@@ -402,7 +432,9 @@ class _FormulaParser:
     def _required_group(self) -> AstNode:
         if self.current.value != "{":
             raise FormulaParseError(
-                "EXPECTED_GROUP", "This LaTeX command requires a braced group.", self.current.position
+                "EXPECTED_GROUP",
+                "This LaTeX command requires a braced group.",
+                self.current.position,
             )
         self._advance()
         return self._group("{")
@@ -410,7 +442,9 @@ class _FormulaParser:
     def _required_group_text(self) -> str:
         if self.current.value != "{":
             raise FormulaParseError(
-                "EXPECTED_GROUP", "This LaTeX command requires a braced name.", self.current.position
+                "EXPECTED_GROUP",
+                "This LaTeX command requires a braced name.",
+                self.current.position,
             )
         self._advance()
         parts: list[str] = []
@@ -447,7 +481,12 @@ class _FormulaParser:
             return self._node("divide", children=(left, right))
         return self._node("equals", children=(left, right))
 
-    def _associative(self, kind: Literal["add", "multiply"], left: AstNode, right: AstNode) -> AstNode:
+    def _associative(
+        self,
+        kind: Literal["add", "multiply"],
+        left: AstNode,
+        right: AstNode,
+    ) -> AstNode:
         children: list[AstNode] = []
         children.extend(left.children if left.kind == kind else (left,))
         children.extend(right.children if right.kind == kind else (right,))
@@ -508,13 +547,14 @@ def _analyze_symbols(
         if node.kind in {"sum", "product", "integral"}:
             binder = node.attribute("binder")
             body = node.children[-1] if node.children else None
-            for child in node.children[:-1]:
-                visit(child, scope, "bound")
+            local_scope = scope | ({binder} if binder else set())
             if binder:
                 bound.add(binder)
                 collect(ParsedSymbol(binder, "index"))
+            for child in node.children[:-1]:
+                visit(child, local_scope)
             if body is not None:
-                visit(body, scope | ({binder} if binder else set()))
+                visit(body, local_scope)
             return
         if node.kind in {"call", "distribution"} and node.children:
             function = node.children[0]
@@ -551,6 +591,10 @@ def _analyze_symbols(
             else:
                 visit(base, scope)
             visit(index, scope, "index")
+            return
+        if node.kind == "power" and node.attribute("operation") == "transpose":
+            if node.children:
+                visit(node.children[0], scope, context)
             return
         if node.kind == "symbol" and node.value:
             if node.value in _CONSTANTS:
@@ -616,7 +660,12 @@ def _mathml_to_latex(source: str) -> str:
     if "<!DOCTYPE" in source.upper() or "<!ENTITY" in source.upper():
         raise FormulaParseError("UNSAFE_MATHML", "DTD and entity declarations are not allowed.")
     try:
-        parser = etree.XMLParser(resolve_entities=False, no_network=True, recover=False, huge_tree=False)
+        parser = etree.XMLParser(
+            resolve_entities=False,
+            no_network=True,
+            recover=False,
+            huge_tree=False,
+        )
         root = etree.fromstring(source.encode("utf-8"), parser=parser)
     except (etree.XMLSyntaxError, ValueError) as exc:
         raise FormulaParseError("MALFORMED_MATHML", "MathML could not be parsed.") from exc
@@ -641,7 +690,9 @@ def _mathml_to_latex(source: str) -> str:
             value = "".join(element.itertext()).strip()
             return {"×": "*", "·": "*", "−": "-", "⁢": "*"}.get(value, value)
         if tag == "mfrac" and len(children) == 2:
-            return f"\\frac{{{convert(children[0], depth + 1)}}}{{{convert(children[1], depth + 1)}}}"
+            numerator = convert(children[0], depth + 1)
+            denominator = convert(children[1], depth + 1)
+            return f"\\frac{{{numerator}}}{{{denominator}}}"
         if tag == "msqrt" and children:
             return f"\\sqrt{{{' '.join(convert(child, depth + 1) for child in children)}}}"
         if tag == "msub" and len(children) == 2:
@@ -657,7 +708,8 @@ def _mathml_to_latex(source: str) -> str:
             opening = element.get("open", "(")
             closing = element.get("close", ")")
             separator = element.get("separators", ",")[:1] or ","
-            return opening + separator.join(convert(child, depth + 1) for child in children) + closing
+            content = separator.join(convert(child, depth + 1) for child in children)
+            return opening + content + closing
         if tag == "annotation":
             return ""
         raise FormulaParseError("UNSUPPORTED_MATHML", f"Unsupported MathML element <{tag}>.")
@@ -666,3 +718,299 @@ def _mathml_to_latex(source: str) -> str:
     if not latex:
         raise FormulaParseError("EMPTY_FORMULA", "MathML does not contain a formula.")
     return latex
+
+
+# ---------------------------------------------------------------------------
+# FGL-402  Canonical identity
+# ---------------------------------------------------------------------------
+
+
+def canonicalize(root: AstNode) -> AstNode:
+    """Alpha-rename bound variables and sort commutative children.
+
+    Returns a new tree that can be compared structurally for equivalence.
+    """
+    return _canonicalize_node(root, {}, _BoundCounter())
+
+
+class _BoundCounter:
+    """Mutable counter for generating canonical bound variable names."""
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    def next(self) -> str:
+        name = f"_b{self.n}"
+        self.n += 1
+        return name
+
+
+def _canonicalize_node(
+    node: AstNode,
+    renames: dict[str, str],
+    counter: _BoundCounter,
+) -> AstNode:
+    if node.kind in {"sum", "product", "integral"}:
+        binder = node.attribute("binder")
+        local_renames = dict(renames)
+        new_binder: str | None = None
+        if binder:
+            new_binder = counter.next()
+            local_renames[binder] = new_binder
+
+        new_children: list[AstNode] = []
+        for child in node.children:
+            new_children.append(_canonicalize_node(child, local_renames, counter))
+
+        new_attrs = tuple(
+            ("binder", new_binder) if k == "binder" and new_binder else (k, v)
+            for k, v in node.attributes
+        )
+        return AstNode(node.kind, node.value, tuple(new_children), new_attrs)
+
+    if node.kind == "symbol" and node.value:
+        renamed = renames.get(node.value, node.value)
+        return AstNode(node.kind, renamed, node.children, node.attributes)
+
+    new_children = [_canonicalize_node(c, renames, counter) for c in node.children]
+
+    # Addition is commutative for supported numeric/tensor values. Multiplication
+    # is reordered only when every operand is provably scalar; matrix/tensor order
+    # must remain significant.
+    if node.kind == "add" or (
+        node.kind == "multiply" and all(_is_provably_scalar(child) for child in new_children)
+    ):
+        new_children.sort(key=_ast_to_json)
+
+    return AstNode(node.kind, node.value, tuple(new_children), node.attributes)
+
+
+def _ast_to_json(node: AstNode) -> str:
+    """Deterministic JSON representation used for sorting and hashing."""
+    return _json_mod.dumps(
+        node.to_dict(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _is_provably_scalar(node: AstNode) -> bool:
+    if node.kind == "number":
+        return True
+    if node.kind == "symbol":
+        return (
+            node.attribute("style") is None
+            and node.attribute("role") != "function"
+            and bool(node.value)
+            and node.value[:1].islower()
+        )
+    if node.kind in {"negate", "add", "multiply", "divide", "power"}:
+        return bool(node.children) and all(_is_provably_scalar(child) for child in node.children)
+    return False
+
+
+def ast_node_count(root: AstNode) -> int:
+    """Return the number of nodes without recursion-dependent global state."""
+    return 1 + sum(ast_node_count(child) for child in root.children)
+
+
+def compute_canonical_hash(root: AstNode) -> str:
+    """Canonical SHA-256 hash of the alpha-renamed, commutative-sorted tree."""
+    canonical = canonicalize(root)
+    json_bytes = _ast_to_json(canonical).encode("utf-8")
+    return hashlib.sha256(json_bytes).hexdigest()
+
+
+def ast_to_sympy(node: AstNode):  # noqa: ANN201 — returns sympy.Expr
+    """Convert an ``AstNode`` tree to a SymPy expression.
+
+    Raises ``FormulaParseError`` with code ``SYMPY_UNSUPPORTED`` for node kinds
+    that cannot be represented in SymPy.
+    """
+    import sympy
+
+    if node.kind == "number":
+        return sympy.Number(node.value)
+
+    if node.kind == "symbol":
+        if node.value in _CONSTANTS:
+            mapping = {"pi": sympy.pi, "infty": sympy.oo, "infinity": sympy.oo}
+            return mapping.get(node.value, sympy.Symbol(node.value))
+        return sympy.Symbol(node.value, commutative=_is_provably_scalar(node))
+
+    if node.kind == "add":
+        return sympy.Add(*(ast_to_sympy(c) for c in node.children))
+
+    if node.kind == "multiply":
+        return sympy.Mul(*(ast_to_sympy(c) for c in node.children))
+
+    if node.kind == "divide":
+        if len(node.children) != 2:
+            raise FormulaParseError("SYMPY_UNSUPPORTED", "Division requires two operands.")
+        return ast_to_sympy(node.children[0]) / ast_to_sympy(node.children[1])
+
+    if node.kind == "power":
+        if len(node.children) != 2:
+            raise FormulaParseError("SYMPY_UNSUPPORTED", "Power requires two operands.")
+        if node.attribute("operation") == "transpose":
+            raise FormulaParseError(
+                "SYMPY_UNSUPPORTED",
+                "Symbolic transpose requires confirmed matrix contracts.",
+            )
+        return sympy.Pow(ast_to_sympy(node.children[0]), ast_to_sympy(node.children[1]))
+
+    if node.kind == "negate":
+        return -ast_to_sympy(node.children[0])
+
+    if node.kind == "equals":
+        if len(node.children) != 2:
+            raise FormulaParseError("SYMPY_UNSUPPORTED", "Equality requires two sides.")
+        lhs = ast_to_sympy(node.children[0])
+        rhs = ast_to_sympy(node.children[1])
+        return sympy.Eq(lhs, rhs)
+
+    if node.kind == "call":
+        if not node.children:
+            raise FormulaParseError("SYMPY_UNSUPPORTED", "Function call with no children.")
+        func_node = node.children[0]
+        args = [ast_to_sympy(c) for c in node.children[1:]]
+        name = func_node.value or "f"
+        builtin = {
+            "sin": sympy.sin,
+            "cos": sympy.cos,
+            "tan": sympy.tan,
+            "exp": sympy.exp,
+            "log": sympy.log,
+            "ln": sympy.ln,
+            "sqrt": sympy.sqrt,
+            "det": sympy.Function("det"),
+            "tr": sympy.Function("tr"),
+        }
+        fn = builtin.get(name)
+        if fn is not None:
+            if callable(fn) and not isinstance(fn, sympy.Function):
+                return fn(*args)
+            return fn(*args)
+        return sympy.Function(name)(*args)
+
+    if node.kind == "sum":
+        binder = node.attribute("binder")
+        if binder and len(node.children) >= 3:
+            var = sympy.Symbol(binder)
+            lower = ast_to_sympy(node.children[0])
+            upper = ast_to_sympy(node.children[1])
+            body = ast_to_sympy(node.children[2])
+            # Extract the starting value from an equality like `i=1`.
+            if isinstance(lower, sympy.Eq):
+                lower = lower.rhs
+            return sympy.Sum(body, (var, lower, upper))
+        raise FormulaParseError(
+            "SYMPY_UNSUPPORTED", "Sum binder requires lower, upper, and body.",
+        )
+
+    if node.kind == "product":
+        binder = node.attribute("binder")
+        if binder and len(node.children) >= 3:
+            var = sympy.Symbol(binder)
+            lower = ast_to_sympy(node.children[0])
+            upper = ast_to_sympy(node.children[1])
+            body = ast_to_sympy(node.children[2])
+            if isinstance(lower, sympy.Eq):
+                lower = lower.rhs
+            return sympy.Product(body, (var, lower, upper))
+        raise FormulaParseError(
+            "SYMPY_UNSUPPORTED", "Product binder requires lower, upper, and body.",
+        )
+
+    if node.kind == "subscript":
+        # Represent subscripted symbols as indexed SymPy Symbols.
+        base = node.children[0] if node.children else node
+        name = base.value or "x"
+        idx_parts: list[str] = []
+        if len(node.children) >= 2:
+            _collect_index_names(node.children[1], idx_parts)
+        indexed_name = f"{name}_{'_'.join(idx_parts)}" if idx_parts else name
+        return sympy.Symbol(indexed_name)
+
+    if node.kind == "sequence":
+        # Return a tuple of converted children.
+        return sympy.Tuple(*(ast_to_sympy(c) for c in node.children))
+
+    if node.kind == "style":
+        if node.children:
+            return ast_to_sympy(node.children[0])
+        raise FormulaParseError("SYMPY_UNSUPPORTED", "Empty style node.")
+
+    if node.kind == "distribution":
+        # Treat distributions as named functions.
+        if node.children:
+            name = node.children[0].value or "D"
+            args = [ast_to_sympy(c) for c in node.children[1:]]
+            return sympy.Function(name)(*args)
+        raise FormulaParseError("SYMPY_UNSUPPORTED", "Empty distribution node.")
+
+    if node.kind == "integral":
+        binder = node.attribute("binder")
+        if binder and len(node.children) >= 3:
+            var = sympy.Symbol(binder)
+            lower = ast_to_sympy(node.children[0])
+            upper = ast_to_sympy(node.children[1])
+            body = ast_to_sympy(node.children[2])
+            return sympy.Integral(body, (var, lower, upper))
+        raise FormulaParseError(
+            "SYMPY_UNSUPPORTED", "Integral binder requires lower, upper, and body.",
+        )
+
+    raise FormulaParseError(
+        "SYMPY_UNSUPPORTED", f"Cannot convert {node.kind!r} to SymPy.",
+    )
+
+
+def _collect_index_names(node: AstNode, out: list[str]) -> None:
+    """Gather index symbol names from a subscript index node."""
+    if node.kind == "symbol" and node.value:
+        out.append(node.value)
+    elif node.kind == "sequence":
+        for child in node.children:
+            _collect_index_names(child, out)
+    elif node.kind == "number" and node.value:
+        out.append(node.value)
+    else:
+        for child in node.children:
+            _collect_index_names(child, out)
+
+
+def sympy_equivalent(a: AstNode, b: AstNode) -> bool | None:
+    """Check algebraic equivalence of two ASTs using SymPy.
+
+    Returns ``True`` if equivalent, ``False`` if not, or ``None`` when the
+    conversion to SymPy fails for either tree.
+    """
+    import sympy
+
+    # Symbolic simplification can grow rapidly. Structural hashing remains
+    # available for larger inputs, while the optional CAS check stays bounded.
+    if ast_node_count(a) > 256 or ast_node_count(b) > 256:
+        return None
+
+    try:
+        expr_a = ast_to_sympy(a)
+        expr_b = ast_to_sympy(b)
+    except FormulaParseError:
+        return None
+
+    # Handle Eq objects.
+    if isinstance(expr_a, sympy.Eq) and isinstance(expr_b, sympy.Eq):
+        return bool(
+            sympy.simplify(expr_a.lhs - expr_b.lhs) == 0
+            and sympy.simplify(expr_a.rhs - expr_b.rhs) == 0
+        )
+
+    if isinstance(expr_a, sympy.Eq) or isinstance(expr_b, sympy.Eq):
+        return False
+
+    try:
+        return bool(sympy.simplify(expr_a - expr_b) == 0)
+    except (TypeError, AttributeError):
+        return None

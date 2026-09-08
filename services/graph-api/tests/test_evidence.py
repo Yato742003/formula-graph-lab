@@ -3,8 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from app.evidence import build_evidence_graph, build_reported_claim
+from app.evidence import analyze_equation, build_evidence_graph, build_reported_claim
 from app.extractor import extract_paper
+from app.models import ExtractedEquation
 
 FIXTURE = Path(__file__).parent / "fixtures" / "arxiv_sample.html"
 
@@ -13,9 +14,19 @@ def test_exact_graph_preserves_every_formula_and_source_episode():
     paper = extract_paper(FIXTURE.read_text(encoding="utf-8"), "https://arxiv.org/html/1706.03762v7")
     graph = build_evidence_graph(paper, workspace_id="a")
     equations = [n for n in graph.nodes if n["kind"] == "Equation"]
-    assert [json.loads(n["payload"]) for n in equations] == [
-        e.model_dump(mode="json") for e in paper.equations
-    ]
+    payloads = [json.loads(n["payload"]) for n in equations]
+    for payload, equation in zip(payloads, paper.equations, strict=True):
+        analysis = payload.pop("formula_analysis")
+        assert payload == equation.model_dump(mode="json")
+        assert analysis["status"] == "well_typed"
+        assert len(analysis["canonical_hash"]) == 64
+        assert analysis["contracts"]
+    symbols = [node for node in graph.nodes if node["kind"] == "Symbol"]
+    assert symbols
+    symbol_ids = {node["uuid"] for node in symbols}
+    symbol_relations = [edge for edge in graph.edges if edge["relation"] in {"defines", "uses"}]
+    assert symbol_relations
+    assert all(edge["target_uuid"] in symbol_ids for edge in symbol_relations)
     episode_ids = {e.uuid for e in graph.episodes}
     assert all(set(e["episode_uuids"]) <= episode_ids for e in graph.edges)
     assert graph == build_evidence_graph(paper, workspace_id="a")
@@ -65,3 +76,18 @@ def test_claim_rejects_fabricated_anchor():
         build_reported_claim(
             graph, logical_id="fake", statement="Fabricated.", source_anchor="missing",
         )
+
+
+def test_unsupported_formula_is_explicit_without_failing_import():
+    equation = ExtractedEquation(
+        equation_id="eq-unsupported",
+        anchor="S1.E1",
+        latex=r"\begin{matrix}x\end{matrix}",
+        extraction_method="alttext",
+        confidence=0.9,
+    )
+    analysis, parsed, contracts = analyze_equation(equation)
+    assert parsed is None
+    assert contracts == []
+    assert analysis["status"] == "unsupported"
+    assert analysis["error"]["code"] == "UNSUPPORTED_ENVIRONMENT"

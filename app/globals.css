@@ -1239,6 +1239,57 @@ button {
   line-height: 1.45;
 }
 
+.canonical-hash {
+  display: block;
+  overflow-wrap: anywhere;
+  padding: 0.7rem;
+  border: 1px solid #dfe5f1;
+  border-radius: 0.55rem;
+  color: #46577c;
+  background: #f7f9fd;
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+
+.contract-grid {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.65rem;
+}
+
+.contract-grid > div {
+  display: grid;
+  grid-template-columns: minmax(2.5rem, 0.55fr) 1fr 1fr auto;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0.45rem 0.55rem;
+  border-radius: 0.45rem;
+  background: #f8faff;
+  font-size: 0.7rem;
+}
+
+.contract-grid code,
+.contract-grid b,
+.contract-grid span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.contract-grid i {
+  color: #56705f;
+  font-size: 0.62rem;
+  font-style: normal;
+  text-transform: uppercase;
+}
+
+.formula-readiness {
+  margin: 0.65rem 0 0;
+  color: #6b7488;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
 .inspector-section {
   margin-top: 21px;
 }

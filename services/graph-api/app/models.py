@@ -211,3 +211,98 @@ class EvidenceGraphSnapshotResponse(BaseModel):
     nodes: list[EvidenceGraphNode]
     edges: list[EvidenceGraphEdge]
     truncated: bool
+
+
+# ── Formula API models (FGL-402/403) ─────────────────────────────
+
+
+FormulaSymbolCategory = Literal[
+    "scalar",
+    "vector",
+    "matrix",
+    "tensor",
+    "function",
+    "distribution",
+    "index",
+]
+FormulaSymbolDomain = Literal["real", "positive", "non_negative", "complex", "integer"]
+
+
+class FormulaContractConfirmation(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    category: FormulaSymbolCategory
+    shape: list[int | str] | None = Field(default=None, max_length=16)
+    domain: FormulaSymbolDomain = "real"
+    constraints: list[str] = Field(default_factory=list, max_length=50)
+    scope: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class FormulaParseRequest(BaseModel):
+    latex: str = Field(min_length=1, max_length=20_000)
+    format: Literal["latex", "mathml"] = "latex"
+    section_id: str | None = Field(default=None, min_length=1, max_length=500)
+    extraction_confidence: float = Field(default=1.0, ge=0, le=1)
+    confirmations: list[FormulaContractConfirmation] = Field(
+        default_factory=list,
+        max_length=200,
+    )
+
+    @field_validator("confirmations")
+    @classmethod
+    def require_unique_confirmations(
+        cls, values: list[FormulaContractConfirmation]
+    ) -> list[FormulaContractConfirmation]:
+        names = [value.name for value in values]
+        if len(names) != len(set(names)):
+            raise ValueError("Contract confirmations must have unique symbol names.")
+        return values
+
+
+class FormulaSymbolResponse(BaseModel):
+    name: str
+    category: FormulaSymbolCategory
+    indices: list[str]
+    style: str | None
+
+
+class FormulaContractResponse(BaseModel):
+    name: str
+    category: FormulaSymbolCategory
+    shape: list[int | str] | None
+    domain: FormulaSymbolDomain
+    constraints: list[str]
+    scope: str | None
+    confidence: float
+    confirmed: bool
+
+
+class FormulaValidationIssue(BaseModel):
+    message: str
+    location: str
+    symbols: list[str]
+
+
+class FormulaParseResponse(BaseModel):
+    ast: dict[str, Any]
+    symbols: list[FormulaSymbolResponse]
+    free_variables: list[str]
+    bound_variables: list[str]
+    canonical_hash: str
+    contracts: list[FormulaContractResponse]
+    result_shape: list[int | str] | None
+    shape_errors: list[FormulaValidationIssue]
+    domain_errors: list[FormulaValidationIssue]
+    requires_confirmation: bool
+
+
+class FormulaCompareRequest(BaseModel):
+    formula_a: str = Field(min_length=1, max_length=20_000)
+    formula_b: str = Field(min_length=1, max_length=20_000)
+    format: Literal["latex", "mathml"] = "latex"
+
+
+class FormulaCompareResponse(BaseModel):
+    structurally_equal: bool
+    sympy_equivalent: bool | None
+    hash_a: str
+    hash_b: str

@@ -13,6 +13,7 @@ from app.evidence import build_evidence_graph
 from app.evidence_store import EvidenceSnapshotDataError, Neo4jEvidenceStore
 from app.extractor import PaperExtractionError, extract_paper
 from app.fetcher import PaperFetchError, fetch_paper_html
+from app.formula_ast import FormulaParseError, parse_formula, sympy_equivalent
 from app.graph_store import GraphitiResearchStore
 from app.models import (
     EvidenceGraphSnapshotRequest,
@@ -23,6 +24,14 @@ from app.models import (
     EvidenceSearchRequest,
     EvidenceSearchResponse,
     ExtractedPaper,
+    FormulaCompareRequest,
+    FormulaCompareResponse,
+    FormulaContractConfirmation,
+    FormulaContractResponse,
+    FormulaParseRequest,
+    FormulaParseResponse,
+    FormulaSymbolResponse,
+    FormulaValidationIssue,
     HealthResponse,
     PaperImportRequest,
 )
@@ -33,6 +42,13 @@ from app.search import (
     SearchDataError,
 )
 from app.security import UnsafePaperUrl, normalize_arxiv_html_url
+from app.symbol_contracts import (
+    SymbolContract,
+    apply_contract_confirmations,
+    check_denominator_domain,
+    infer_contracts,
+    infer_expression_shape,
+)
 
 
 @asynccontextmanager
@@ -206,3 +222,124 @@ async def graph_snapshot(
         return await store.graph_snapshot(body)
     except (EvidenceSnapshotDataError, Neo4jError, ServiceUnavailable, OSError) as exc:
         raise HTTPException(status_code=503, detail="Evidence graph failed.") from exc
+
+
+# ── Formula endpoints (FGL-402/403) ──────────────────────────────
+
+
+@app.post("/v1/formulas/parse", response_model=FormulaParseResponse)
+async def formula_parse(
+    body: FormulaParseRequest,
+    _: None = Depends(require_service_token),
+) -> FormulaParseResponse:
+    try:
+        parsed = parse_formula(body.latex, source_format=body.format)
+    except FormulaParseError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc), "position": exc.position},
+        ) from exc
+
+    contracts = infer_contracts(
+        parsed,
+        section_id=body.section_id,
+        extraction_confidence=body.extraction_confidence,
+    )
+    try:
+        contracts = apply_contract_confirmations(
+            contracts,
+            [_confirmed_contract(item, body.section_id) for item in body.confirmations],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    result_shape, shape_errors = infer_expression_shape(contracts, parsed)
+    domain_errors = check_denominator_domain(contracts, parsed)
+    return FormulaParseResponse(
+        ast=parsed.root.to_dict(),
+        symbols=[
+            FormulaSymbolResponse(
+                name=s.name,
+                category=s.category,
+                indices=list(s.indices),
+                style=s.style,
+            )
+            for s in parsed.symbols
+        ],
+        free_variables=list(parsed.free_variables),
+        bound_variables=list(parsed.bound_variables),
+        canonical_hash=parsed.canonical_hash,
+        contracts=[
+            FormulaContractResponse(
+                name=c.name,
+                category=c.category,
+                shape=list(c.shape) if c.shape is not None else None,
+                domain=c.domain,
+                constraints=c.constraints,
+                scope=c.scope,
+                confidence=c.confidence,
+                confirmed=c.confirmed,
+            )
+            for c in contracts
+        ],
+        result_shape=list(result_shape) if result_shape is not None else None,
+        shape_errors=[
+            FormulaValidationIssue(
+                message=error.message,
+                location=error.node_path,
+                symbols=list(error.symbols),
+            )
+            for error in shape_errors
+        ],
+        domain_errors=[
+            FormulaValidationIssue(
+                message=error.message,
+                location=error.location,
+                symbols=[error.symbol],
+            )
+            for error in domain_errors
+        ],
+        requires_confirmation=any(not contract.confirmed for contract in contracts),
+    )
+
+
+def _confirmed_contract(
+    confirmation: FormulaContractConfirmation,
+    default_scope: str | None,
+) -> SymbolContract:
+    if confirmation.scope and default_scope and confirmation.scope != default_scope:
+        raise ValueError("Contract confirmation scope does not match the formula section.")
+    return SymbolContract(
+        name=confirmation.name,
+        category=confirmation.category,
+        shape=tuple(confirmation.shape) if confirmation.shape is not None else None,
+        domain=confirmation.domain,
+        constraints=confirmation.constraints,
+        scope=confirmation.scope or default_scope,
+        confidence=1,
+        confirmed=True,
+    )
+
+
+@app.post("/v1/formulas/compare", response_model=FormulaCompareResponse)
+async def formula_compare(
+    body: FormulaCompareRequest,
+    _: None = Depends(require_service_token),
+) -> FormulaCompareResponse:
+    try:
+        parsed_a = parse_formula(body.formula_a, source_format=body.format)
+        parsed_b = parse_formula(body.formula_b, source_format=body.format)
+    except FormulaParseError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc), "position": exc.position},
+        ) from exc
+
+    structurally_equal = parsed_a.canonical_hash == parsed_b.canonical_hash
+    equiv = sympy_equivalent(parsed_a.root, parsed_b.root)
+
+    return FormulaCompareResponse(
+        structurally_equal=structurally_equal,
+        sympy_equivalent=equiv,
+        hash_a=parsed_a.canonical_hash,
+        hash_b=parsed_b.canonical_hash,
+    )

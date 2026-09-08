@@ -1,6 +1,6 @@
 # Delivery status
 
-Last updated: 2026-09-06
+Last updated: 2026-09-09
 
 | Task | Status | Evidence |
 | --- | --- | --- |
@@ -15,16 +15,21 @@ Last updated: 2026-09-06
 | FGL-202 | Complete | Ordered episodes, atomic evidence writes, episode-resolving provenance, idempotent replay and enrichment retry receipts pass Neo4j integration tests |
 | FGL-203 | Complete | Out-of-order v1/v2/v3 imports, `SUPERSEDES`, historical lookup and independent cross-paper disagreement pass against Neo4j |
 | FGL-301 | Implemented; live semantic-provider validation pending | Tenant-scoped BM25, Graphiti semantic adapter, two-hop graph traversal, filters, RRF ranking and signed keyset pagination pass unit and Neo4j integration tests |
-| FGL-302 | Partial UI shell | Search results and an in-memory graph are visible; persisted graph reads, pan/zoom, relation filters and keyboard graph navigation remain |
-| FGL-303+ | Not started | Provenance history, formula typing, hypotheses, verification and beta remain later gates |
+| FGL-302 | Complete | Persisted graph restores after reload; React Flow pan/zoom, minimap, keyboard selection, relation filters, node legend, mobile fallback and 200% text-zoom contract pass component tests |
+| FGL-303 | Complete | Search and graph share one inspector with source text/anchor, episodes, confidence, paper version and relation/supersession history; broken anchors and multi-episode evidence are tested |
+| FGL-401 | Complete | Bounded LaTeX/MathML parser produces an operator tree and tracks free/bound variables, indices, scalar/vector/matrix/tensor/function/distribution roles; malformed, binder, indexed and MathML corpora pass |
+| FGL-402 | Complete | Bound variables are alpha-renamed; addition and provably scalar multiplication are normalized while matrix/tensor multiplication order is preserved; deterministic SHA-256 is verified across separate processes; bounded SymPy comparison is available |
+| FGL-403 | Complete | Shape/domain/constraint/scope contracts, ordered tensor contraction, no-broadcast checks, denominator guards, cross-section shadowing and an explicit low-confidence human-confirmation gate are exposed by protected parse/compare APIs |
+| FGL-5xx+ | Not started | Transformation DSL, AI proposal service, verification pipeline, auth, OWASP, observability, beta remain |
 
 ## Latest validation
 
-- Backend offline: 89 passed, 18 opt-in tests deselected, two upstream deprecation warnings.
+- Backend offline: 213 passed, 18 opt-in tests deselected, two upstream deprecation warnings.
 - Live arXiv corpus: 12 passed; see ingestion-validation.md.
-- Neo4j integration: 6 passed, 101 deselected; the isolated container and network
+- Neo4j integration: 6 passed, 225 deselected; the isolated container and network
   were removed by the runner.
-- Frontend: 6 files and 29 tests passed; product lint and production build passed.
+- Frontend: 8 files and 41 tests passed; TypeScript, Oxlint, Ruff and the production
+  build passed.
 - Local Worker end-to-end: two authenticated imports of arXiv `1706.03762v7`
   produced 7 equations, 39 nodes, 58 edges and 31 episodes. The replay returned
   `replayed=true`; D1 held 1 workspace, 1 paper, 2 successful jobs and 0 failed jobs.
@@ -36,7 +41,7 @@ Last updated: 2026-09-06
   in dev-only Drizzle tooling and are not force-upgraded.
 - Docker Desktop 4.74.0 / Engine 29.4.3 is working after a clean WSL backend
   restart. The latest isolated integration container and network were removed.
-- Production build exposes `/`, `/api/imports`, and `/api/search`. The source is
+- Production build exposes `/`, `/api/graph`, `/api/imports`, and `/api/search`. The source is
   not yet connected to a publicly reachable HTTPS Graph API in the hosted environment.
 
 ## Findings and limits
@@ -49,8 +54,13 @@ Last updated: 2026-09-06
 - Group IDs and UUID preparation now match Graphiti 0.30.1.
 - Exact graph imports have atomic receipts; semantic enrichment has explicit
   pending/succeeded/reconciliation states and cannot ambiguously replay.
-- The viewport uses the curated demo before import and real source-bound nodes
-  afterward. Persisted graph retrieval on reload belongs to FGL-302.
+- The viewport uses the curated demo before import and restores real source-bound
+  nodes after import or reload. Search and graph selection share provenance state.
+- Supported equations persist a formula-analysis payload, section-scoped `Symbol`
+  nodes and `defines`/`uses` edges. Unsupported formulas remain exact evidence with
+  a structured diagnostic instead of aborting the paper import.
+- Contract inference is intentionally conservative. Low-confidence contracts remain
+  blocked behind explicit human confirmation; it is not a claim of mathematical proof.
 - Search never accepts a browser-supplied workspace. The Worker derives the
   workspace from the authenticated user, verifies D1 ownership, and the Graph API
   maps semantic episode IDs back to immutable exact-evidence nodes.
@@ -65,12 +75,12 @@ Last updated: 2026-09-06
 
 ## Next actions
 
-1. Implement FGL-302 persisted graph retrieval so imports survive page reload and
-   the viewport no longer depends on an in-memory response.
-2. Implement pan/zoom, relation filters and keyboard navigation on the persisted
-   graph, then connect search selection to the shared inspector.
-3. Deploy the Python Graph API/Neo4j boundary behind public HTTPS, configure hosted
+1. Stop after Sprint 4 and review the Sprint 5 transformation/verification boundary
+   before implementing hypothesis mashups.
+2. Deploy the Python Graph API/Neo4j boundary behind public HTTPS, configure hosted
    secrets, and rerun the authenticated import smoke test in the private site.
-4. Continue through formula typing, hypotheses, verification, remaining security
-   controls and the reviewed beta corpus.
+3. Smoke-test the Graphiti semantic-provider path with a live model API key.
+4. Continue through transformation DSL (FGL-501), AI proposal service (FGL-502),
+   verification pipeline (FGL-503), remaining security controls and the reviewed
+   beta corpus.
    The project is not yet a finished monetizable V1.

@@ -75,7 +75,24 @@ async def test_atomic_import_concurrent_replay_and_native_graphiti_read():
         assert {json.loads(r["payload"])["latex"] for r in result} == {
             e.latex for e in paper.equations
         }
+        assert all(
+            len(json.loads(record["payload"])["formula_analysis"]["canonical_hash"]) == 64
+            for record in result
+        )
         assert all("verification_status" not in json.loads(r["payload"]) for r in result)
+        result, _, _ = await store.driver.execute_query(
+            "MATCH (n:Evidence {group_id:$group, kind:'Symbol'}) "
+            "RETURN count(n) AS symbols",
+            group=graph.group_id,
+        )
+        assert result[0]["symbols"] > 0
+        result, _, _ = await store.driver.execute_query(
+            "MATCH (:Evidence {group_id:$group, kind:'Equation'})"
+            "-[r:EVIDENCE_RELATION]->(:Evidence {group_id:$group, kind:'Symbol'}) "
+            "WHERE r.relation IN ['defines', 'uses'] RETURN count(r) AS relations",
+            group=graph.group_id,
+        )
+        assert result[0]["relations"] > 0
 
         # Read persisted episodes with Graphiti's real SDK, no model calls.
         native_driver = Neo4jDriver(uri, user, password)

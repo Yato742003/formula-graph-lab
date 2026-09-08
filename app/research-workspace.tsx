@@ -89,6 +89,19 @@ type InspectorRecord = {
     validAt: string;
   }>;
   superseded: boolean;
+  formulaAnalysis: {
+    status: string;
+    canonicalHash: string;
+    requiresConfirmation: boolean;
+    issueCount: number;
+    contracts: Array<{
+      name: string;
+      category: string;
+      shape: string;
+      confidence: number;
+      confirmed: boolean;
+    }>;
+  } | null;
 };
 
 const demoNodes: FormulaNode[] = [
@@ -215,6 +228,56 @@ function graphTone(kind: EvidenceGraphNode['kind']): FormulaNode['type'] {
   return 'evidence';
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function formulaAnalysisFromPayload(
+  payload: Record<string, unknown>,
+): InspectorRecord['formulaAnalysis'] {
+  const analysis = payload.formula_analysis;
+  if (!isRecord(analysis)) return null;
+  const canonicalHash = analysis.canonical_hash;
+  const status = analysis.status;
+  if (typeof canonicalHash !== 'string' || typeof status !== 'string') return null;
+  const contracts = Array.isArray(analysis.contracts)
+    ? analysis.contracts.flatMap((value) => {
+        if (!isRecord(value)) return [];
+        if (
+          typeof value.name !== 'string' ||
+          typeof value.category !== 'string' ||
+          typeof value.confidence !== 'number' ||
+          typeof value.confirmed !== 'boolean'
+        ) {
+          return [];
+        }
+        const shape = Array.isArray(value.shape)
+          ? value.shape.map(String).join(' × ') || 'scalar'
+          : 'n/a';
+        return [{
+          name: value.name,
+          category: value.category,
+          shape,
+          confidence: value.confidence,
+          confirmed: value.confirmed,
+        }];
+      })
+    : [];
+  const shapeErrors = Array.isArray(analysis.shape_errors)
+    ? analysis.shape_errors.length
+    : 0;
+  const domainErrors = Array.isArray(analysis.domain_errors)
+    ? analysis.domain_errors.length
+    : 0;
+  return {
+    status: status.replaceAll('_', ' '),
+    canonicalHash,
+    requiresConfirmation: analysis.requires_confirmation === true,
+    issueCount: shapeErrors + domainErrors,
+    contracts,
+  };
+}
+
 export function buildEvidenceInspector(
   node: EvidenceGraphNode | EvidenceSearchHit,
   sourceUrl: string,
@@ -286,6 +349,7 @@ export function buildEvidenceInspector(
     superseded: matchingEdges.some(
       (edge) => edge.relation === 'supersedes' && edge.target_uuid === node.uuid,
     ),
+    formulaAnalysis: formulaAnalysisFromPayload(node.payload),
   };
 }
 
@@ -313,6 +377,7 @@ function demoInspector(node: FormulaNode): InspectorRecord {
     episodeIds: ['demo-attention-episode'],
     relations: [],
     superseded: false,
+    formulaAnalysis: null,
   };
 }
 
@@ -1057,10 +1122,10 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               variant="outline"
               className="mashup-button"
               disabled
-              title="Formula typing and mashup arrive after retrieval"
+              title="Typed formulas are ready; hypothesis mashup begins in Sprint 5"
             >
               <FlaskConical size={16} />
-              Mashup next
+              Mashup in Sprint 5
             </Button>
           </div>
         </section>
@@ -1082,6 +1147,37 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                 <p>{hasPersistedGraph ? 'Extracted expression' : 'Canonical expression'}</p>
                 <code>{inspector.expression}</code>
               </div>
+
+              {inspector.formulaAnalysis ? (
+                <section className="inspector-section formula-identity">
+                  <div className="section-title">
+                    <h3>Formula identity</h3>
+                    <span>{inspector.formulaAnalysis.status}</span>
+                  </div>
+                  <code className="canonical-hash" title="Stable canonical SHA-256">
+                    {inspector.formulaAnalysis.canonicalHash}
+                  </code>
+                  <div className="contract-grid" aria-label="Inferred symbol contracts">
+                    {inspector.formulaAnalysis.contracts.map((contract) => (
+                      <div key={contract.name}>
+                        <code>{contract.name}</code>
+                        <span>{contract.category}</span>
+                        <b>{contract.shape}</b>
+                        <i title={`${Math.round(contract.confidence * 100)}% confidence`}>
+                          {contract.confirmed ? 'confirmed' : 'review'}
+                        </i>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="formula-readiness">
+                    {inspector.formulaAnalysis.requiresConfirmation
+                      ? 'Human confirmation is required before this formula can enter a verified mashup.'
+                      : inspector.formulaAnalysis.issueCount > 0
+                        ? `${inspector.formulaAnalysis.issueCount} type or domain issue(s) need review.`
+                        : 'Canonical structure and inferred contracts are ready for typed transformations.'}
+                  </p>
+                </section>
+              ) : null}
 
               <section className="inspector-section">
                 <div className="section-title">

@@ -6,8 +6,15 @@ from datetime import datetime
 from uuid import NAMESPACE_URL, uuid5
 
 from app.episodes import ResearchEpisode, build_paper_episodes
-from app.models import ExtractedPaper
+from app.formula_ast import AstNode, FormulaParseError, ParsedFormula, parse_formula
+from app.models import ExtractedEquation, ExtractedPaper
 from app.ontology import RelationContract
+from app.symbol_contracts import (
+    SymbolContract,
+    check_denominator_domain,
+    infer_contracts,
+    infer_expression_shape,
+)
 
 
 def _uuid(*parts: object) -> str:
@@ -38,6 +45,7 @@ def build_evidence_graph(
     root = episodes[0]
     nodes: list[dict] = []
     edges: list[dict] = []
+    symbol_nodes: dict[tuple[str, str], str] = {}
 
     def node(kind: str, logical_id: str, payload: dict, episode_uuid: str) -> str:
         # Paper is shared across its revisions; every source snapshot remains immutable.
@@ -102,18 +110,137 @@ def build_evidence_graph(
                  "contains", episode_uuid, anchor)
     for equation in paper.equations:
         episode_uuid = section_episodes.get(equation.section_id, root.uuid)
+        analysis, parsed, contracts = analyze_equation(equation)
+        equation_payload = equation.model_dump(mode="json")
+        equation_payload["formula_analysis"] = analysis
         equation_uuid = node(
-            "Equation", equation.equation_id, equation.model_dump(mode="json"), episode_uuid,
+            "Equation", equation.equation_id, equation_payload, episode_uuid,
         )
         source_uuid = section_nodes.get(equation.section_id, version_uuid)
         source_type = "Section" if equation.section_id else "PaperVersion"
         edge(source_uuid, equation_uuid, source_type, "Equation", "contains", episode_uuid,
              equation.anchor if equation.anchor_is_source else "")
+        if parsed is None:
+            continue
+        defined_names = _defined_symbol_names(parsed.root)
+        scope = equation.section_id or f"{paper.paper_id}v{paper.version}"
+        for contract in contracts:
+            symbol_key = (scope, contract.name)
+            symbol_uuid = symbol_nodes.get(symbol_key)
+            if symbol_uuid is None:
+                symbol_uuid = node(
+                    "Symbol",
+                    f"{scope}:{contract.name}",
+                    {
+                        "notation": contract.name,
+                        "semantic_name": None,
+                        "mathematical_type": contract.category,
+                        "shape": list(contract.shape) if contract.shape is not None else None,
+                        "domain": contract.domain,
+                        "constraints": contract.constraints,
+                        "scope": contract.scope,
+                        "confidence": contract.confidence,
+                        "confirmed": contract.confirmed,
+                    },
+                    episode_uuid,
+                )
+                symbol_nodes[symbol_key] = symbol_uuid
+            relation = "defines" if contract.name in defined_names else "uses"
+            edge(
+                equation_uuid,
+                symbol_uuid,
+                "Equation",
+                "Symbol",
+                relation,
+                episode_uuid,
+                equation.anchor if equation.anchor_is_source else "",
+            )
     return EvidenceGraph(
         import_uuid=root.uuid, group_id=root.group_id, paper_id=paper.paper_id,
         version=paper.version, source_sha256=paper.source_sha256,
         paper_version_uuid=version_uuid, episodes=episodes, nodes=nodes, edges=edges,
     )
+
+
+def analyze_equation(
+    equation: ExtractedEquation,
+) -> tuple[dict[str, object], ParsedFormula | None, list[SymbolContract]]:
+    """Return bounded, deterministic analysis without rejecting an entire import."""
+    try:
+        parsed = parse_formula(equation.latex)
+    except FormulaParseError as exc:
+        return (
+            {
+                "status": "unsupported",
+                "error": {
+                    "code": exc.code,
+                    "message": str(exc),
+                    "position": exc.position,
+                },
+            },
+            None,
+            [],
+        )
+
+    contracts = infer_contracts(
+        parsed,
+        section_id=equation.section_id,
+        extraction_confidence=equation.confidence,
+    )
+    result_shape, shape_errors = infer_expression_shape(contracts, parsed)
+    domain_errors = check_denominator_domain(contracts, parsed)
+    requires_confirmation = any(not contract.confirmed for contract in contracts)
+    status = (
+        "invalid"
+        if shape_errors or domain_errors
+        else "needs_confirmation"
+        if requires_confirmation
+        else "well_typed"
+    )
+    return (
+        {
+            "status": status,
+            "ast": parsed.root.to_dict(),
+            "canonical_hash": parsed.canonical_hash,
+            "free_variables": list(parsed.free_variables),
+            "bound_variables": list(parsed.bound_variables),
+            "symbols": [symbol.to_dict() for symbol in parsed.symbols],
+            "contracts": [contract.model_dump(mode="json") for contract in contracts],
+            "result_shape": list(result_shape) if result_shape is not None else None,
+            "shape_errors": [
+                {
+                    "message": error.message,
+                    "location": error.node_path,
+                    "symbols": list(error.symbols),
+                }
+                for error in shape_errors
+            ],
+            "domain_errors": [
+                {
+                    "message": error.message,
+                    "location": error.location,
+                    "symbols": [error.symbol],
+                }
+                for error in domain_errors
+            ],
+            "requires_confirmation": requires_confirmation,
+        },
+        parsed,
+        contracts,
+    )
+
+
+def _defined_symbol_names(root: AstNode) -> set[str]:
+    if root.kind != "equals" or not root.children:
+        return set()
+    return _ast_symbol_names(root.children[0])
+
+
+def _ast_symbol_names(node: AstNode) -> set[str]:
+    names = {node.value} if node.kind == "symbol" and node.value else set()
+    for child in node.children:
+        names.update(_ast_symbol_names(child))
+    return names
 
 
 @dataclass(frozen=True)

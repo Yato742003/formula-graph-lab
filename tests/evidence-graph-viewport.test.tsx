@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
 
+import './setup';
+
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import EvidenceGraphViewport, {
   type GraphViewportEdge,
@@ -106,13 +109,13 @@ describe('EvidenceGraphViewport', () => {
 
   it('keeps graph controls and labels usable at 200% text zoom', () => {
     const css = readFileSync(
-      new URL('../app/globals.css', import.meta.url),
+      resolve(process.cwd(), 'app/globals.css'),
       'utf8',
     );
 
-    expect(css).toMatch(/\.relation-toolbar\s*\{[^}]*flex-wrap:\s*wrap/s);
-    expect(css).toMatch(/\.flow-evidence-node strong\s*\{[^}]*font-size:\s*0\.9rem/s);
-    expect(css).toMatch(/\.flow-evidence-node strong\s*\{[^}]*overflow-wrap:\s*anywhere/s);
-    expect(css).toMatch(/\.mobile-graph-list\s*\{[^}]*max-height:[^}]*overflow:\s*auto/s);
+    expect(css).toMatch(/\.relation-toolbar\s*\{[^}]*flex-wrap:\s*wrap/);
+    expect(css).toMatch(/\.flow-evidence-node strong\s*\{[^}]*font-size:\s*0\.9rem/);
+    expect(css).toMatch(/\.flow-evidence-node strong\s*\{[^}]*overflow-wrap:\s*anywhere/);
+    expect(css).toMatch(/\.mobile-graph-list\s*\{[^}]*max-height:[^}]*overflow:\s*auto/);
   });
 });
