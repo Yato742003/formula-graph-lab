@@ -83,6 +83,11 @@ class Neo4jEvidenceStore:
         return cls(AsyncGraphDatabase.driver(uri, auth=(user, password)), database=database)
 
     async def initialize(self) -> None:
+        for label in ("ResearchJob", "ResearchQueueLock"):
+            await self.driver.execute_query(
+                f"CREATE CONSTRAINT fgl_{label.lower()}_id IF NOT EXISTS "
+                f"FOR (n:{label}) REQUIRE n.id IS UNIQUE", database_=self.database,
+            )
         for label, constraint in [
             ("Evidence", "fgl_evidence_uuid"),
             ("EvidenceImport", "fgl_import_uuid"),

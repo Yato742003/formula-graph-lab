@@ -390,6 +390,7 @@ class FormulaCompareRequest(BaseModel):
     formula_a: str = Field(min_length=1, max_length=20_000)
     formula_b: str = Field(min_length=1, max_length=20_000)
     format: Literal["latex", "mathml"] = "latex"
+    model_config = {"extra": "forbid"}
 
 
 class FormulaCompareResponse(BaseModel):

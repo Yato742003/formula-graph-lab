@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -74,6 +75,8 @@ class CheckResult(BaseModel):
     duration_ms: int = Field(ge=0)
     created_at: datetime
     schema_version: Literal["check-result.v1"] = "check-result.v1"
+    job_id: str | None = None
+    execution_image: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
 
     model_config = {"frozen": True, "extra": "forbid"}
 
@@ -84,7 +87,7 @@ class CheckResultResponse(CheckResult):
 
 def symbolic_request_hash(
     formula_a: str, formula_b: str, *, source_format: FormulaFormat = "latex",
-    timeout_ms: int = 2_000,
+    timeout_ms: int = 2_000, execution_image: str | None = None,
 ) -> str:
     from app.formula_ast import CANONICALIZER_VERSION, SYNTAX_HASH_VERSION
 
@@ -93,6 +96,8 @@ def symbolic_request_hash(
         CHECKER_VERSION, CANONICALIZER_VERSION, SYNTAX_HASH_VERSION,
         MAX_CHECK_AST_NODES,
     ]
+    if execution_image is not None:
+        payload.extend(["sandbox-policy.v1", execution_image])
     return hashlib.sha256(json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
     ).encode("utf-8")).hexdigest()
@@ -104,6 +109,7 @@ def run_symbolic_check(
     *,
     source_format: FormulaFormat = "latex",
     timeout_ms: int = 2_000,
+    worker_runner: Callable | None = None,
 ) -> CheckResult:
     """Run one symbolic comparison with conservative preflight gates."""
     started = time.monotonic()
@@ -193,7 +199,7 @@ def run_symbolic_check(
             error_code="UNRESOLVED_DOMAIN" if domain_status != "unsupported" else None,
         )
 
-    worker = _run_worker_payload(
+    worker = (worker_runner or _run_worker_payload)(
         {
             "formula_a": formula_a,
             "formula_b": formula_b,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from functools import partial
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
@@ -41,6 +42,8 @@ from app.models import (
     ReviewedFormulaContract,
     SymbolicCheckCreateRequest,
 )
+from app.research_jobs import JobRejected, ResearchQueue, configured_queue_key
+from app.sandbox import configured_image, run_sandbox
 from app.search import (
     EvidenceSearchService,
     InvalidSearchCursor,
@@ -56,7 +59,12 @@ from app.symbol_contracts import (
     infer_domain_obligations,
     infer_expression_shape,
 )
-from app.verification import CheckResultResponse, run_symbolic_check, symbolic_request_hash
+from app.verification import (
+    CheckResult,
+    CheckResultResponse,
+    run_symbolic_check,
+    symbolic_request_hash,
+)
 from app.worker_auth import WorkerPrincipal, require_research_checks_enabled, require_worker
 
 
@@ -405,6 +413,9 @@ async def formula_compare(
     structurally_equal = parsed_a.canonical_hash == parsed_b.canonical_hash
     check = await run_in_threadpool(
         run_symbolic_check, body.formula_a, body.formula_b, source_format=body.format,
+        worker_runner=lambda *args, **kwargs: {
+            "outcome": "unknown", "error_code": "AUTHENTICATED_RESEARCH_JOB_REQUIRED",
+        },
     )
     equiv = True if check.outcome == "supported" else False if check.outcome == "refuted" else None
 
@@ -437,6 +448,11 @@ async def create_symbolic_check(
         raise HTTPException(status_code=422, detail="Invalid idempotency key.")
     actor.require("checks:run", body.workspace_id)
     try:
+        image = configured_image()
+        queue = ResearchQueue(store, configured_queue_key())
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail="Research sandbox is not configured.") from exc
+    try:
         source = await store.equation_source(
             workspace_id=body.workspace_id, equation_uuid=body.target_uuid,
         )
@@ -445,6 +461,7 @@ async def create_symbolic_check(
         request_hash = symbolic_request_hash(
             body.formula_a, body.formula_b, source_format=body.format,
             timeout_ms=body.timeout_ms,
+            execution_image=image,
         )
         existing = await store.lookup_check_result(
             workspace_id=body.workspace_id, target_uuid=body.target_uuid,
@@ -452,16 +469,38 @@ async def create_symbolic_check(
         )
         if existing is not None:
             return CheckResultResponse(**existing.result.model_dump(), replayed=True)
-        result = await run_in_threadpool(
-            run_symbolic_check, body.formula_a, body.formula_b,
-            source_format=body.format, timeout_ms=body.timeout_ms,
+        payload = {"formula_a": body.formula_a, "formula_b": body.formula_b,
+                   "format": body.format, "timeout_ms": body.timeout_ms}
+        ticket = await queue.admit(
+            actor, workspace_id=body.workspace_id, target_uuid=body.target_uuid,
+            idempotency_key=idempotency_key, request_hash=request_hash,
+            payload=payload, image=image,
         )
+        if ticket.result is not None:
+            result = CheckResult.model_validate_json(ticket.result)
+            if (result.request_hash != request_hash or result.job_id != ticket.envelope.job_id
+                    or result.execution_image != image):
+                raise JobRejected("JOB_RESULT_MISMATCH")
+        else:
+            await queue.claim(ticket, actor, payload, image)
+            result = await run_in_threadpool(
+                run_symbolic_check, body.formula_a, body.formula_b,
+                source_format=body.format, timeout_ms=body.timeout_ms,
+                worker_runner=partial(run_sandbox, image=image),
+            )
+            result = result.model_copy(update={
+                "request_hash": request_hash, "job_id": ticket.envelope.job_id,
+                "execution_image": image,
+            })
+            await queue.finish(ticket, result.model_dump_json())
         receipt = await store.append_check_result(
             workspace_id=body.workspace_id,
             target_uuid=body.target_uuid,
             idempotency_key=idempotency_key,
             result=result,
         )
+    except JobRejected as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (Neo4jError, ServiceUnavailable, OSError) as exc:

@@ -12,7 +12,10 @@ from app.formula_ast import FormulaParseError, ast_to_sympy, parse_formula
 
 def main() -> int:
     try:
-        payload = json.loads(sys.stdin.read(64 * 1024))
+        raw = sys.stdin.buffer.read(192 * 1024 + 1)
+        if len(raw) > 192 * 1024:
+            raise ValueError("oversized payload")
+        payload = json.loads(raw)
         if not isinstance(payload, dict) or set(payload) != {"formula_a", "formula_b", "format"}:
             raise ValueError("invalid payload")
         if not isinstance(payload["formula_a"], str) or not isinstance(payload["formula_b"], str):

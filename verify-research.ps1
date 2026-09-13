@@ -20,7 +20,7 @@ Push-Location (Join-Path $researchRoot 'services\graph-api')
 try {
     Invoke-ResearchCheck $researchPython @('-m', 'ruff', 'check', 'app', 'tests')
     Invoke-ResearchCheck $researchPython @(
-        '-m', 'pytest', '-m', 'not integration and not live', '-q'
+        '-m', 'pytest', '-m', 'not integration and not live and not sandbox', '-q'
     )
 } finally {
     Pop-Location

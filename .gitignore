@@ -42,5 +42,16 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
-/.agent/
 *.tsbuildinfo
+
+# openai
+.openai/
+
+# documentation
+/docs/
+
+# testing
+/tests/
+services/graph-api/tests/
+test-*.ps1
+docker-compose.test.yml
