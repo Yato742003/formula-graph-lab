@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from neo4j import AsyncGraphDatabase
 
+from app.analysis_versions import make_analysis_version, source_hash, source_payload
 from app.enrichment import EnrichmentAttempt
 from app.episodes import workspace_group_id
-from app.evidence import EvidenceGraph, ReportedClaim
+from app.evidence import EvidenceGraph, ReportedClaim, analyze_equation
+from app.extractor import ExtractedEquation
 from app.models import (
     EvidenceGraphEdge,
     EvidenceGraphNode,
@@ -21,9 +24,12 @@ from app.search import (
     EvidenceSearchFilters,
     build_lucene_query,
 )
+from app.symbol_contracts import ContractReview, ReviewedContractValue
+from app.verification import CheckResult
 
 MAX_SNAPSHOT_NODES = 500
 MAX_SNAPSHOT_EDGES = 1_500
+logger = logging.getLogger(__name__)
 
 
 class EvidenceSnapshotDataError(RuntimeError):
@@ -36,6 +42,18 @@ class ImportReceipt:
     node_count: int
     edge_count: int
     episode_count: int
+    replayed: bool
+
+
+@dataclass(frozen=True)
+class ContractReviewReceipt:
+    review: ContractReview
+    replayed: bool
+
+
+@dataclass(frozen=True)
+class CheckResultReceipt:
+    result: CheckResult
     replayed: bool
 
 
@@ -71,6 +89,10 @@ class Neo4jEvidenceStore:
             ("Episodic", "fgl_episode_uuid"),
             ("Saga", "fgl_saga_uuid"),
             ("SemanticEnrichment", "fgl_semantic_enrichment_uuid"),
+            ("ContractReview", "fgl_contract_review_uuid"),
+            ("CheckResult", "fgl_check_result_uuid"),
+            ("FormulaAnalysisVersion", "fgl_formula_analysis_uuid"),
+            ("AnalysisMigration", "fgl_analysis_migration_uuid"),
         ]:
             # Labels/names are code-owned constants, never request inputs.
             await self.driver.execute_query(
@@ -94,6 +116,369 @@ class Neo4jEvidenceStore:
     async def ingest(self, graph: EvidenceGraph) -> ImportReceipt:
         async with self.driver.session(database=self.database) as session:
             return await session.execute_write(self._write, graph)
+
+    async def equation_source(self, *, workspace_id: str, equation_uuid: str) -> dict:
+        rows, _, _ = await self.driver.execute_query(
+            "MATCH (e:Evidence {uuid:$uuid, group_id:$group, kind:'Equation'}) "
+            "RETURN e.payload AS payload",
+            uuid=equation_uuid, group=workspace_group_id(workspace_id), database_=self.database,
+        )
+        if not rows:
+            raise ValueError("Check target must exist in this workspace.")
+        return source_payload(rows[0]["payload"])
+
+    async def append_contract_review(
+        self,
+        *,
+        workspace_id: str,
+        equation_uuid: str,
+        idempotency_key: str,
+        review: ContractReview,
+    ) -> ContractReviewReceipt:
+        """Append an immutable, idempotent review to a source equation."""
+        if review.scope != equation_uuid:
+            raise ValueError("Contract review scope does not match the source equation.")
+        group_id = workspace_group_id(workspace_id)
+        review_uuid = str(uuid5(
+            NAMESPACE_URL,
+            f"{group_id}/contract-review/{review.reviewer_id}/{idempotency_key}",
+        ))
+        persisted = review.model_copy(update={"review_id": review_uuid})
+        payload = json.dumps(
+            persisted.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        async with self.driver.session(database=self.database) as session:
+            replayed, effective_payload = await session.execute_write(
+                self._append_contract_review,
+                group_id,
+                equation_uuid,
+                persisted.symbol_name,
+                persisted.reviewer_id,
+                persisted.reviewer_role,
+                persisted.decision,
+                review_uuid,
+                payload,
+                persisted.reviewed_at,
+            )
+        effective_review = ContractReview.model_validate_json(
+            effective_payload,
+        )
+        logger.info("contract_review_receipt", extra={
+            "event": "contract_review_receipt", "review_id": effective_review.review_id,
+            "replayed": replayed,
+        })
+        return ContractReviewReceipt(
+            review=effective_review, replayed=replayed,
+        )
+
+    async def append_check_result(
+        self,
+        *,
+        workspace_id: str,
+        target_uuid: str,
+        idempotency_key: str,
+        result: CheckResult,
+    ) -> CheckResultReceipt:
+        """Append a worker-derived immutable result scoped to existing evidence."""
+        group_id = workspace_group_id(workspace_id)
+        check_uuid = str(uuid5(
+            NAMESPACE_URL,
+            f"{group_id}/check-result/{target_uuid}/{idempotency_key}",
+        ))
+        persisted = result.model_copy(update={
+            "check_id": check_uuid,
+            "workspace_id": workspace_id,
+            "target_uuid": target_uuid,
+        })
+        payload = json.dumps(
+            persisted.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        async with self.driver.session(database=self.database) as session:
+            replayed, effective_payload = await session.execute_write(
+                self._append_check_result,
+                group_id,
+                target_uuid,
+                check_uuid,
+                persisted.checker,
+                persisted.checker_version,
+                persisted.outcome,
+                payload,
+                persisted.created_at,
+            )
+        effective = CheckResult.model_validate_json(effective_payload)
+        logger.info("check_result_receipt", extra={
+            "event": "check_result_receipt", "check_id": effective.check_id,
+            "outcome": effective.outcome, "replayed": replayed,
+        })
+        return CheckResultReceipt(result=effective, replayed=replayed)
+
+    async def lookup_check_result(
+        self, *, workspace_id: str, target_uuid: str, idempotency_key: str,
+        request_hash: str,
+    ) -> CheckResultReceipt | None:
+        group = workspace_group_id(workspace_id)
+        check_uuid = str(uuid5(
+            NAMESPACE_URL, f"{group}/check-result/{target_uuid}/{idempotency_key}",
+        ))
+        records, _, _ = await self.driver.execute_query(
+            "MATCH (c:CheckResult {uuid:$uuid, group_id:$group, target_uuid:$target}) "
+            "RETURN c.payload AS payload",
+            uuid=check_uuid, group=group, target=target_uuid, database_=self.database,
+        )
+        if not records:
+            return None
+        result = CheckResult.model_validate_json(records[0]["payload"])
+        if result.request_hash is not None and result.request_hash != request_hash:
+            raise ValueError("Check result idempotency key conflicts with prior content.")
+        return CheckResultReceipt(result=result, replayed=True)
+
+    @staticmethod
+    async def _append_check_result(
+        tx,
+        group_id: str,
+        target_uuid: str,
+        check_uuid: str,
+        checker: str,
+        checker_version: str,
+        outcome: str,
+        payload: str,
+        created_at: datetime,
+    ) -> tuple[bool, str]:
+        source = await tx.run(
+            """
+            MATCH (target:Evidence {uuid:$target_uuid, group_id:$group})
+            RETURN target.uuid AS target_uuid
+            LIMIT 1
+            """,
+            target_uuid=target_uuid,
+            group=group_id,
+        )
+        if await source.single() is None:
+            raise ValueError("Check target must exist in this workspace.")
+        now = datetime.now(UTC)
+        creation_token = str(uuid4())
+        query = await tx.run(
+            """
+            MERGE (check:CheckResult {uuid:$check_uuid})
+            ON CREATE SET check.group_id=$group,
+                check.target_uuid=$target_uuid,
+                check.checker=$checker,
+                check.checker_version=$checker_version,
+                check.outcome=$outcome,
+                check.payload=$payload,
+                check.checked_at=$checked_at,
+                check.creation_token=$creation_token,
+                check.created_at=$now
+            RETURN check.group_id AS group_id,
+                   check.target_uuid AS target_uuid,
+                   check.payload AS payload,
+                   check.creation_token = $creation_token AS created
+            """,
+            check_uuid=check_uuid,
+            group=group_id,
+            target_uuid=target_uuid,
+            checker=checker,
+            checker_version=checker_version,
+            outcome=outcome,
+            payload=payload,
+            checked_at=created_at,
+            now=now,
+            creation_token=creation_token,
+        )
+        record = await query.single(strict=True)
+        stored = CheckResult.model_validate_json(record["payload"])
+        incoming = CheckResult.model_validate_json(payload)
+        same_request = (
+            stored.request_hash == incoming.request_hash
+            if stored.request_hash is not None and incoming.request_hash is not None
+            else stored.model_dump(exclude={"created_at", "duration_ms", "request_hash"})
+            == incoming.model_dump(exclude={"created_at", "duration_ms", "request_hash"})
+        )
+        if (
+            record["group_id"] != group_id
+            or record["target_uuid"] != target_uuid
+            or not same_request
+        ):
+            raise ValueError("Check result idempotency key conflicts with prior content.")
+        await tx.run(
+            """
+            MATCH (check:CheckResult {uuid:$check_uuid, group_id:$group})
+            MATCH (target:Evidence {uuid:$target_uuid, group_id:$group})
+            MERGE (check)-[relation:CHECKS {uuid:$check_uuid}]->(target)
+            ON CREATE SET relation.group_id=$group, relation.created_at=$now
+            """,
+            check_uuid=check_uuid,
+            target_uuid=target_uuid,
+            group=group_id,
+            now=now,
+        )
+        return not bool(record["created"]), record["payload"]
+
+    @staticmethod
+    async def _append_contract_review(
+        tx,
+        group_id: str,
+        equation_uuid: str,
+        symbol_name: str,
+        reviewer_id: str,
+        reviewer_role: str,
+        decision: str,
+        review_uuid: str,
+        payload: str,
+        reviewed_at: datetime,
+    ) -> tuple[bool, str]:
+        source = await tx.run(
+            """
+            MATCH (equation:Evidence {uuid:$equation_uuid, group_id:$group,
+                                      kind:'Equation'})
+            MATCH (equation)-[relation:EVIDENCE_RELATION]->
+                  (symbol:Evidence {group_id:$group, kind:'Symbol'})
+            WHERE relation.relation IN ['defines', 'uses']
+              AND symbol.logical_id ENDS WITH ':' + $symbol_name
+            RETURN equation.uuid AS equation_uuid
+            LIMIT 1
+            """,
+            equation_uuid=equation_uuid,
+            group=group_id,
+            symbol_name=symbol_name,
+        )
+        if await source.single() is None:
+            raise ValueError("Reviewed equation and symbol must exist in this workspace.")
+
+        now = datetime.now(UTC)
+        creation_token = str(uuid4())
+        result = await tx.run(
+            """
+            MERGE (review:ContractReview {uuid:$review_uuid})
+            ON CREATE SET review.group_id=$group,
+                review.equation_uuid=$equation_uuid,
+                review.symbol_name=$symbol_name,
+                review.reviewer_id=$reviewer_id,
+                review.reviewer_role=$reviewer_role,
+                review.decision=$decision,
+                review.payload=$payload,
+                review.reviewed_at=$reviewed_at,
+                review.creation_token=$creation_token,
+                review.created_at=$now
+            RETURN review.group_id AS group_id,
+                   review.equation_uuid AS equation_uuid,
+                   review.payload AS payload,
+                   review.creation_token = $creation_token AS created
+            """,
+            review_uuid=review_uuid,
+            group=group_id,
+            equation_uuid=equation_uuid,
+            symbol_name=symbol_name,
+            reviewer_id=reviewer_id,
+            reviewer_role=reviewer_role,
+            decision=decision,
+            payload=payload,
+            reviewed_at=reviewed_at,
+            now=now,
+            creation_token=creation_token,
+        )
+        record = await result.single(strict=True)
+        created = bool(record["created"])
+        if not created:
+            stored = ContractReview.model_validate_json(record["payload"])
+            incoming = ContractReview.model_validate_json(payload)
+            if (
+                stored.model_dump(exclude={"reviewed_at"})
+                != incoming.model_dump(exclude={"reviewed_at"})
+            ):
+                raise ValueError(
+                    "Contract review idempotency key conflicts"
+                    " with prior content.",
+                )
+        if (
+            record["group_id"] != group_id
+            or record["equation_uuid"] != equation_uuid
+        ):
+            raise ValueError(
+                "Contract review idempotency key conflicts"
+                " with prior content.",
+            )
+        await tx.run(
+            """
+            MATCH (review:ContractReview {uuid:$review_uuid, group_id:$group})
+            MATCH (equation:Evidence {uuid:$equation_uuid, group_id:$group,
+                                      kind:'Equation'})
+            MERGE (review)-[relation:REVIEWS {uuid:$review_uuid}]->(equation)
+            ON CREATE SET relation.group_id=$group, relation.created_at=$now
+            """,
+            review_uuid=review_uuid,
+            equation_uuid=equation_uuid,
+            group=group_id,
+            now=now,
+        )
+        eq_data = await tx.run(
+            """
+            MATCH (equation:Evidence {uuid:$equation_uuid, group_id:$group, kind:'Equation'})
+            OPTIONAL MATCH (r:ContractReview {group_id:$group})-[:REVIEWS]->(equation)
+            WHERE r.decision = 'confirmed'
+            RETURN equation.payload AS eq_payload, collect(r.payload) AS review_payloads
+            """,
+            equation_uuid=equation_uuid,
+            group=group_id,
+        )
+        eq_record = await eq_data.single()
+        if eq_record and eq_record["eq_payload"]:
+            eq_raw = eq_record["eq_payload"]
+            extracted_eq = ExtractedEquation.model_validate_json(eq_raw)
+            confirmed_contracts: dict[str, ReviewedContractValue] = {}
+            for rev_json in eq_record["review_payloads"]:
+                rev_obj = ContractReview.model_validate_json(rev_json)
+                if rev_obj.reviewed_contract is not None:
+                    confirmed_contracts[rev_obj.reviewed_contract.name] = rev_obj.reviewed_contract
+            if confirmed_contracts:
+                analysis, _, _ = analyze_equation(
+                    extracted_eq,
+                    reviewed_contracts=confirmed_contracts.values(),
+                )
+                version_record = make_analysis_version(
+                    equation_uuid,
+                    eq_raw,
+                    analysis,
+                )
+                await tx.run(
+                    """
+                    MATCH (equation:Evidence {
+                        uuid:$equation_uuid, group_id:$group, kind:'Equation'
+                    })
+                    MERGE (analysis:FormulaAnalysisVersion {uuid:$analysis_uuid})
+                    ON CREATE SET analysis.group_id=$group,
+                        analysis.equation_uuid=$equation_uuid,
+                        analysis.payload=$payload,
+                        analysis.schema_version=$schema_version,
+                        analysis.analyzer_version=$analyzer_version,
+                        analysis.canonicalizer_version=$canonicalizer_version,
+                        analysis.syntax_hash=$syntax_hash,
+                        analysis.source_hash=$source_hash,
+                        analysis.retired=false,
+                        analysis.created_at=$now
+                    MERGE (analysis)-[relation:ANALYZES {uuid:$analysis_uuid}]->(equation)
+                    ON CREATE SET relation.group_id=$group, relation.created_at=$now
+                    """,
+                    equation_uuid=equation_uuid,
+                    group=group_id,
+                    analysis_uuid=version_record["uuid"],
+                    payload=version_record["payload"],
+                    schema_version=version_record["schema_version"],
+                    analyzer_version=version_record["analyzer_version"],
+                    canonicalizer_version=version_record["canonicalizer_version"],
+                    syntax_hash=version_record["syntax_hash"],
+                    source_hash=version_record["source_hash"],
+                    now=now,
+                )
+        replayed = not created
+        effective_payload = record["payload"] if replayed else payload
+        return replayed, effective_payload
 
     async def version_at(
         self, *, workspace_id: str, paper_id: str, as_of: datetime,
@@ -281,7 +666,36 @@ class Neo4jEvidenceStore:
             database_=self.database,
         )
         nodes_truncated = len(node_records) > MAX_SNAPSHOT_NODES
-        node_records = node_records[:MAX_SNAPSHOT_NODES]
+        node_records = [dict(record) for record in node_records[:MAX_SNAPSHOT_NODES]]
+        equation_uuids = [
+            record["uuid"] for record in node_records if record["kind"] == "Equation"
+        ]
+        latest_analyses: dict[str, str] = {}
+        if equation_uuids:
+            analysis_records, _, _ = await self.driver.execute_query(
+                """
+                MATCH (analysis:FormulaAnalysisVersion {group_id:$group})
+                      -[:ANALYZES]->(equation:Evidence {group_id:$group, kind:'Equation'})
+                WHERE equation.uuid IN $equation_uuids
+                  AND coalesce(analysis.retired, false) = false
+                WITH equation, analysis
+                ORDER BY CASE analysis.analyzer_version
+                    WHEN 'legacy-embedded.v0' THEN 0 ELSE 1 END DESC,
+                    analysis.created_at DESC, analysis.uuid DESC
+                WITH equation, collect(analysis.payload)[0] AS payload
+                RETURN equation.uuid AS equation_uuid, payload
+                """,
+                group=group_id,
+                equation_uuids=equation_uuids,
+                database_=self.database,
+            )
+            latest_analyses = {
+                record["equation_uuid"]: record["payload"] for record in analysis_records
+            }
+        for record in node_records:
+            analysis_payload = latest_analyses.get(record["uuid"])
+            if analysis_payload is not None:
+                record["analysis_payload"] = analysis_payload
         nodes = [self._graph_node(record) for record in node_records]
         node_uuids = [node.uuid for node in nodes]
         if not node_uuids:
@@ -323,6 +737,16 @@ class Neo4jEvidenceStore:
             raise EvidenceSnapshotDataError("Evidence payload is invalid.") from exc
         if not isinstance(payload, dict):
             raise EvidenceSnapshotDataError("Evidence payload must be an object.")
+        analysis_payload = record.get("analysis_payload")
+        if analysis_payload is not None:
+            try:
+                analysis = json.loads(analysis_payload)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise EvidenceSnapshotDataError("Formula analysis payload is invalid.") from exc
+            if not isinstance(analysis, dict):
+                raise EvidenceSnapshotDataError("Formula analysis payload must be an object.")
+            # Response compatibility only. The persisted Equation payload stays raw.
+            payload = {**payload, "formula_analysis": analysis}
         return EvidenceGraphNode(
             uuid=record["uuid"],
             kind=record["kind"],
@@ -334,6 +758,25 @@ class Neo4jEvidenceStore:
             payload=payload,
             episode_uuids=list(record["episode_uuids"]),
         )
+
+    async def analysis_history(
+        self, *, workspace_id: str, equation_uuid: str, after_uuid: str = "",
+        limit: int = 50, include_retired: bool = False,
+    ) -> list[dict]:
+        if not 1 <= limit <= 100:
+            raise ValueError("Analysis history limit must be between 1 and 100.")
+        records, _, _ = await self.driver.execute_query(
+            "MATCH (a:FormulaAnalysisVersion {group_id:$group})-[:ANALYZES]->"
+            "(e:Evidence {uuid:$equation, group_id:$group, kind:'Equation'}) "
+            "WHERE a.uuid > $after AND ($retired OR coalesce(a.retired,false)=false) "
+            "RETURN a.uuid AS uuid, a.payload AS payload, a.source_hash AS source_hash, "
+            "a.schema_version AS schema_version, a.analyzer_version AS analyzer_version, "
+            "a.canonicalizer_version AS canonicalizer_version, "
+            "coalesce(a.retired,false) AS retired ORDER BY a.uuid LIMIT $limit",
+            group=workspace_group_id(workspace_id), equation=equation_uuid,
+            after=after_uuid, retired=include_retired, limit=limit, database_=self.database,
+        )
+        return [{**dict(row), "payload": json.loads(row["payload"])} for row in records]
 
     @staticmethod
     def _graph_edge(record) -> EvidenceGraphEdge:
@@ -587,6 +1030,9 @@ class Neo4jEvidenceStore:
             bool(state["completed"]),
         )
         if state["completed"]:
+            await Neo4jEvidenceStore._write_formula_analyses(
+                tx, graph.group_id, graph.analyses, now
+            )
             return receipt
 
         episodes = [
@@ -636,6 +1082,9 @@ class Neo4jEvidenceStore:
         )
         if (await collisions.single(strict=True))["conflicts"]:
             raise ValueError("Evidence UUID conflicts with existing immutable content.")
+        await Neo4jEvidenceStore._write_formula_analyses(
+            tx, graph.group_id, graph.analyses, now
+        )
         await tx.run(
             """
             MATCH (v:Evidence {uuid:$version_uuid, group_id:$group, kind:'PaperVersion'})
@@ -730,3 +1179,74 @@ class Neo4jEvidenceStore:
             edges=len(graph.edges), episodes=len(graph.episodes),
         )
         return receipt
+
+    @staticmethod
+    async def _write_formula_analyses(
+        tx,
+        group_id: str,
+        analyses: list[dict],
+        now: datetime,
+    ) -> None:
+        if not analyses:
+            return
+        sources = await tx.run(
+            """
+            UNWIND $analyses AS item
+            OPTIONAL MATCH (equation:Evidence {uuid:item.equation_uuid, group_id:$group,
+                                                kind:'Equation'})
+            RETURN item.equation_uuid AS uuid, equation.payload AS payload
+            """,
+            analyses=analyses,
+            group=group_id,
+        )
+        source_records = await sources.data()
+        hashes = {}
+        for record in source_records:
+            if record["payload"] is None:
+                raise ValueError("Formula analysis source equation is missing from this workspace.")
+            hashes[record["uuid"]] = source_hash(record["payload"])
+        if any(hashes.get(item["equation_uuid"]) != item["source_hash"] for item in analyses):
+            raise ValueError("Formula analysis does not match its immutable source.")
+        await tx.run(
+            """
+            UNWIND $analyses AS item
+            MATCH (equation:Evidence {uuid:item.equation_uuid, group_id:$group,
+                                      kind:'Equation'})
+            MERGE (analysis:FormulaAnalysisVersion {uuid:item.uuid})
+            ON CREATE SET analysis.group_id=$group,
+                analysis.equation_uuid=item.equation_uuid,
+                analysis.payload=item.payload,
+                analysis.schema_version=item.schema_version,
+                analysis.analyzer_version=item.analyzer_version,
+                analysis.canonicalizer_version=item.canonicalizer_version,
+                analysis.syntax_hash=item.syntax_hash,
+                analysis.source_hash=item.source_hash,
+                analysis.retired=false,
+                analysis.created_at=$now
+            MERGE (analysis)-[relation:ANALYZES {uuid:item.uuid}]->(equation)
+            ON CREATE SET relation.group_id=$group, relation.created_at=$now
+            """,
+            analyses=analyses,
+            group=group_id,
+            now=now,
+        )
+        conflicts = await tx.run(
+            """
+            UNWIND $analyses AS item
+            MATCH (analysis:FormulaAnalysisVersion {uuid:item.uuid})
+            WHERE analysis.group_id <> $group
+               OR analysis.equation_uuid <> item.equation_uuid
+               OR analysis.payload <> item.payload
+               OR analysis.schema_version <> item.schema_version
+               OR analysis.analyzer_version <> item.analyzer_version
+               OR analysis.source_hash <> item.source_hash
+               OR coalesce(analysis.canonicalizer_version, '') <>
+                  coalesce(item.canonicalizer_version, '')
+               OR coalesce(analysis.syntax_hash, '') <> coalesce(item.syntax_hash, '')
+            RETURN count(analysis) AS conflicts
+            """,
+            analyses=analyses,
+            group=group_id,
+        )
+        if (await conflicts.single(strict=True))["conflicts"]:
+            raise ValueError("Formula analysis identity conflicts with immutable content.")

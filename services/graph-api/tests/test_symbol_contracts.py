@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from app.formula_ast import parse_formula
 from app.symbol_contracts import (
     CONFIDENCE_THRESHOLD,
+    ContractReview,
+    ReviewedContractValue,
     SymbolContract,
-    apply_contract_confirmations,
-    check_denominator_domain,
+    apply_contract_reviews,
+    assess_domain_obligations,
     check_shape_compatibility,
     detect_symbol_shadowing,
+    domain_assumption,
     infer_contracts,
+    infer_domain_obligations,
     infer_expression_shape,
 )
 
@@ -24,12 +30,20 @@ class TestInferContracts:
         return next((c for c in contracts if c.name == name), None)
 
     def test_scalar_shape(self):
+        """Under FGL-H3, unstyled lowercase is unknown; bound index is scalar shape."""
         f = parse_formula("x + y")
         contracts = infer_contracts(f)
         c = self._contract(contracts, "x")
         assert c is not None
-        assert c.shape == ()
-        assert c.category == "scalar"
+        assert c.shape is None
+        assert c.category == "unknown"
+
+        f_sum = parse_formula(r"\sum_{i=1}^n x_i")
+        contracts_sum = infer_contracts(f_sum)
+        c_i = self._contract(contracts_sum, "i")
+        assert c_i is not None
+        assert c_i.shape == ()
+        assert c_i.category == "index"
 
     def test_vector_shape(self):
         f = parse_formula("x_i")
@@ -81,7 +95,11 @@ class TestInferContracts:
         contracts = infer_contracts(f)
         c = self._contract(contracts, "b")
         assert c is not None
-        assert "!= 0" in c.constraints
+        assert c.constraints == []
+        obligations = infer_domain_obligations(contracts, f)
+        assert len(obligations) == 1
+        assert obligations[0].predicate == "nonzero"
+        assert obligations[0].expression["value"] == "b"
 
     def test_numerator_no_constraint(self):
         f = parse_formula(r"\frac{a}{b}")
@@ -97,52 +115,65 @@ class TestInferContracts:
 
 
 class TestConfidence:
-    def test_high_confidence_confirmed(self):
-        f = parse_formula("x + y")
+    def test_high_confidence_does_not_create_human_confirmation(self):
+        f = parse_formula(r"\mathbf{W} + \mathbf{V}")
         contracts = infer_contracts(f, extraction_confidence=0.9)
         for c in contracts:
-            assert c.confidence >= CONFIDENCE_THRESHOLD
-            assert c.confirmed is True
+            assert c.inference_confidence >= CONFIDENCE_THRESHOLD
+            assert c.review_required is False
+            assert "confirmed" not in c.model_dump()
 
-    def test_low_confidence_unconfirmed(self):
+    def test_low_confidence_requests_review(self):
         f = parse_formula("x + y")
         contracts = infer_contracts(f, extraction_confidence=0.3)
         for c in contracts:
-            assert c.confidence < CONFIDENCE_THRESHOLD
-            assert c.confirmed is False
+            assert c.inference_confidence < CONFIDENCE_THRESHOLD
+            assert c.review_required is True
 
     def test_threshold_boundary(self):
-        f = parse_formula("x + y")
+        f = parse_formula(r"\mathbf{W} + \mathbf{V}")
         contracts = infer_contracts(f, extraction_confidence=0.6)
         for c in contracts:
-            assert c.confirmed is True
+            assert c.review_required is False
 
     def test_style_boosts_confidence(self):
         f = parse_formula(r"\mathbf{x}")
         contracts = infer_contracts(f, extraction_confidence=0.55)
         c = next(c for c in contracts if c.name == "x")
         # Bold style should add 0.1 → 0.65 ≥ 0.6.
-        assert c.confidence >= CONFIDENCE_THRESHOLD
-        assert c.confirmed is True
+        assert c.inference_confidence >= CONFIDENCE_THRESHOLD
+        assert c.review_required is False
 
-    def test_human_confirmation_replaces_low_confidence_contract(self):
-        inferred = infer_contracts(parse_formula("x"), extraction_confidence=0.2)
-        confirmed = apply_contract_confirmations(
-            inferred,
-            [
-                SymbolContract(
-                    name="x",
-                    category="vector",
-                    shape=(128,),
-                    domain="real",
-                    confidence=1,
-                    confirmed=True,
-                )
-            ],
+    def test_human_review_is_a_separate_immutable_record(self):
+        inferred = infer_contracts(
+            parse_formula("x"), section_id="sec-1", extraction_confidence=0.2
         )
-        assert confirmed[0].shape == (128,)
-        assert confirmed[0].confirmed is True
-        assert confirmed[0].confidence == 1
+        reviewed_contract = ReviewedContractValue(
+            name="x",
+            category="vector",
+            shape=(128,),
+            domain="real",
+            scope="sec-1",
+        )
+        review = ContractReview(
+            review_id="review-1",
+            symbol_name="x",
+            reviewer_id="human-1",
+            reviewer_role="reviewer",
+            decision="accepted",
+            scope="sec-1",
+            reviewed_contract=reviewed_contract,
+            evidence=["source-span-1"],
+            reviewed_at=datetime.now(UTC),
+        )
+        resolved = apply_contract_reviews(
+            inferred,
+            [review],
+            scope="sec-1",
+        )
+        assert resolved[0].shape == (128,)
+        assert inferred[0].shape is None
+        assert review.decision == "accepted"
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -227,41 +258,133 @@ class TestShapeCompatibility:
 
 
 class TestDenominatorDomain:
-    def test_denominator_without_constraint(self):
-        """A symbol in the denominator without != 0 is flagged."""
-        contracts = [
-            SymbolContract(name="a", category="scalar", shape=()),
-            SymbolContract(name="b", category="scalar", shape=(), constraints=[]),
-        ]
-        f = parse_formula(r"\frac{a}{b}")
-        errors = check_denominator_domain(contracts, f)
-        assert len(errors) == 1
-        assert errors[0].symbol == "b"
+    def test_denominator_tracks_the_full_expression(self):
+        formula = parse_formula(r"\frac{1}{a+b}")
+        obligations = infer_domain_obligations(infer_contracts(formula), formula)
+        assert len(obligations) == 1
+        assert obligations[0].predicate == "nonzero"
+        assert obligations[0].expression["kind"] == "add"
+        assert assess_domain_obligations(obligations).status == "unresolved"
 
-    def test_denominator_with_constraint_ok(self):
-        """A symbol with != 0 constraint is not flagged."""
-        contracts = [
-            SymbolContract(name="a", category="scalar", shape=()),
-            SymbolContract(name="b", category="scalar", shape=(), constraints=["!= 0"]),
+    def test_symbol_nonzero_assumptions_do_not_discharge_sum(self):
+        formula = parse_formula(r"\frac{1}{a+b}")
+        obligations = infer_domain_obligations(infer_contracts(formula), formula)
+        a, b = formula.root.children[1].children
+        assumptions = [
+            domain_assumption(
+                assumption_id="a-nonzero",
+                predicate="nonzero",
+                expression=a,
+                origin="user_accepted",
+                acceptance="accepted",
+                accepted_by="human",
+            ),
+            domain_assumption(
+                assumption_id="b-nonzero",
+                predicate="nonzero",
+                expression=b,
+                origin="user_accepted",
+                acceptance="accepted",
+                accepted_by="human",
+            ),
         ]
-        f = parse_formula(r"\frac{a}{b}")
-        errors = check_denominator_domain(contracts, f)
-        assert errors == []
+        assert assess_domain_obligations(obligations, assumptions).status == "unresolved"
 
-    def test_no_division_no_errors(self):
-        contracts = [
-            SymbolContract(name="a", category="scalar", shape=()),
-            SymbolContract(name="b", category="scalar", shape=()),
+    def test_ai_proposed_assumption_cannot_discharge_itself(self):
+        formula = parse_formula("x/x")
+        obligations = infer_domain_obligations(infer_contracts(formula), formula)
+        proposed = domain_assumption(
+            assumption_id="model-proposal",
+            predicate="nonzero",
+            expression=formula.root.children[1],
+            origin="ai_proposed",
+            acceptance="proposed",
+        )
+        assessment = assess_domain_obligations(obligations, [proposed])
+        assert assessment.status == "unresolved"
+        assert assessment.obligations[0].discharged_by == []
+
+    def test_user_assumption_is_conditional_not_proof(self):
+        formula = parse_formula("x/x")
+        obligations = infer_domain_obligations(infer_contracts(formula), formula)
+        accepted = domain_assumption(
+            assumption_id="human-condition",
+            predicate="nonzero",
+            expression=formula.root.children[1],
+            origin="user_accepted",
+            acceptance="accepted",
+            accepted_by="human",
+        )
+        assessment = assess_domain_obligations(obligations, [accepted])
+        assert assessment.status == "conditional"
+        assert assessment.obligations[0].conditions == ["human-condition"]
+
+    def test_checker_supported_assumption_discharges_obligation(self):
+        formula = parse_formula("x/x")
+        obligations = infer_domain_obligations(infer_contracts(formula), formula)
+        checked = domain_assumption(
+            assumption_id="checker-result",
+            predicate="positive",
+            expression=formula.root.children[1],
+            origin="checker_supported",
+            acceptance="accepted",
+        )
+        assessment = assess_domain_obligations(obligations, [checked])
+        assert assessment.status == "discharged"
+        assert assessment.obligations[0].discharged_by == ["checker-result"]
+
+    def test_log_and_sqrt_obligations_respect_real_or_complex_contract(self):
+        real_log = parse_formula(r"\log(x)")
+        real_obligations = infer_domain_obligations(infer_contracts(real_log), real_log)
+        assert [item.predicate for item in real_obligations] == ["positive"]
+
+        complex_contracts = [
+            SymbolContract(name="log", category="function", shape=None),
+            SymbolContract(name="x", category="scalar", shape=(), domain="complex"),
         ]
-        f = parse_formula("a + b")
-        errors = check_denominator_domain(contracts, f)
-        assert errors == []
+        complex_obligations = infer_domain_obligations(complex_contracts, real_log)
+        assert [item.predicate for item in complex_obligations] == ["nonzero"]
+
+        real_sqrt = parse_formula(r"\sqrt{x}")
+        sqrt_obligations = infer_domain_obligations(
+            infer_contracts(real_sqrt), real_sqrt
+        )
+        assert [item.predicate for item in sqrt_obligations] == ["non_negative"]
+
+    def test_contradictory_assumptions_do_not_create_vacuous_success(self):
+        formula = parse_formula("1/x")
+        obligations = infer_domain_obligations(infer_contracts(formula), formula)
+        expression = formula.root.children[1]
+        assumptions = [
+            domain_assumption(
+                assumption_id="positive",
+                predicate="positive",
+                expression=expression,
+                origin="user_accepted",
+                acceptance="accepted",
+                accepted_by="human",
+            ),
+            domain_assumption(
+                assumption_id="negative",
+                predicate="negative",
+                expression=expression,
+                origin="user_accepted",
+                acceptance="accepted",
+                accepted_by="human",
+            ),
+        ]
+        assessment = assess_domain_obligations(obligations, assumptions)
+        assert assessment.status == "contradictory"
+        assert assessment.contradictions == [("negative", "positive")]
 
     def test_index_is_not_constrained_as_a_denominator(self):
-        contracts = infer_contracts(parse_formula(r"\frac{a}{d_k}"))
+        formula = parse_formula(r"\frac{a}{d_k}")
+        contracts = infer_contracts(formula)
         by_name = {contract.name: contract for contract in contracts}
-        assert "!= 0" in by_name["d"].constraints
-        assert "!= 0" not in by_name["k"].constraints
+        assert by_name["d"].constraints == []
+        assert by_name["k"].constraints == []
+        obligations = infer_domain_obligations(contracts, formula)
+        assert obligations[0].expression["kind"] == "subscript"
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -319,12 +442,12 @@ class TestContractSerialization:
             domain="real",
             constraints=["!= 0"],
             scope="sec-1",
-            confidence=0.85,
-            confirmed=True,
+            inference_confidence=0.85,
+            review_required=False,
         )
         data = c.model_dump(mode="json")
         restored = SymbolContract.model_validate(data)
         assert restored.name == c.name
         assert restored.shape == c.shape
         assert restored.constraints == c.constraints
-        assert restored.confidence == c.confidence
+        assert restored.inference_confidence == c.inference_confidence

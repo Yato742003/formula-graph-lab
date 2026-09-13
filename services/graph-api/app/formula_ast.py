@@ -30,6 +30,8 @@ NodeKind = Literal[
 MAX_FORMULA_CHARACTERS = 20_000
 MAX_AST_NODES = 2_048
 MAX_PARSE_DEPTH = 64
+SYNTAX_HASH_VERSION = "syntax-hash.v3"
+CANONICALIZER_VERSION = "alpha-canonicalizer.v3"
 
 
 class FormulaParseError(ValueError):
@@ -71,6 +73,7 @@ class ParsedSymbol:
         "function",
         "distribution",
         "index",
+        "unknown",
     ]
     indices: tuple[str, ...] = ()
     style: str | None = None
@@ -91,6 +94,11 @@ class ParsedFormula:
     bound_variables: tuple[str, ...]
     symbols: tuple[ParsedSymbol, ...]
     source_format: FormulaFormat
+    syntax_hash: str = ""
+    syntax_hash_version: str = SYNTAX_HASH_VERSION
+    canonicalizer_version: str = CANONICALIZER_VERSION
+    # Compatibility alias for persisted Sprint 4 readers. New code must use
+    # syntax_hash and its explicit version.
     canonical_hash: str = ""
 
 
@@ -143,14 +151,15 @@ def parse_formula(source: str, source_format: FormulaFormat = "latex") -> Parsed
     tokens = _tokenize_latex(latex)
     root = _FormulaParser(tokens).parse()
     free, bound, symbols = _analyze_symbols(root)
-    c_hash = compute_canonical_hash(root)
+    syntax_hash = compute_canonical_hash(root)
     return ParsedFormula(
         root=root,
         free_variables=tuple(sorted(free)),
         bound_variables=tuple(sorted(bound)),
         symbols=tuple(symbols),
         source_format=source_format,
-        canonical_hash=c_hash,
+        syntax_hash=syntax_hash,
+        canonical_hash=syntax_hash,
     )
 
 
@@ -522,6 +531,13 @@ def _bound_name(lower: AstNode | None) -> str | None:
     return candidate.value if candidate.kind == "symbol" else None
 
 
+def _is_binder_declaration(node: AstNode, binder: str) -> bool:
+    candidate = node
+    while candidate.kind == "subscript" and candidate.children:
+        candidate = candidate.children[0]
+    return candidate.kind == "symbol" and candidate.value == binder
+
+
 def _analyze_symbols(
     root: AstNode,
 ) -> tuple[set[str], set[str], list[ParsedSymbol]]:
@@ -529,6 +545,7 @@ def _analyze_symbols(
     bound: set[str] = set()
     collected: dict[str, ParsedSymbol] = {}
     category_rank = {
+        "unknown": -1,
         "scalar": 0,
         "index": 1,
         "vector": 2,
@@ -551,8 +568,17 @@ def _analyze_symbols(
             if binder:
                 bound.add(binder)
                 collect(ParsedSymbol(binder, "index"))
-            for child in node.children[:-1]:
-                visit(child, local_scope)
+            for index, child in enumerate(node.children[:-1]):
+                if index == 0 and binder:
+                    if child.kind == "equals" and len(child.children) == 2:
+                        visit(child.children[0], local_scope, "bound")
+                        visit(child.children[1], scope)
+                    elif _is_binder_declaration(child, binder):
+                        visit(child, local_scope, "bound")
+                    else:
+                        visit(child, scope)
+                else:
+                    visit(child, scope)
             if body is not None:
                 visit(body, local_scope)
             return
@@ -632,7 +658,9 @@ def _symbol_names(node: AstNode) -> set[str]:
     return names
 
 
-def _plain_category(node: AstNode) -> Literal["scalar", "vector", "matrix", "tensor"]:
+def _plain_category(
+    node: AstNode,
+) -> Literal["scalar", "vector", "matrix", "tensor", "unknown"]:
     style = node.attribute("style")
     if style == "calligraphy":
         return "tensor"
@@ -640,12 +668,16 @@ def _plain_category(node: AstNode) -> Literal["scalar", "vector", "matrix", "ten
         return "vector"
     if style == "bold":
         return "matrix" if node.value and node.value[:1].isupper() else "vector"
-    return "matrix" if node.value and node.value[:1].isupper() else "scalar"
+    # A printed lowercase name is not a proof of scalar type.
+    # Only literal numbers, bound indices, and reviewed contracts are proofs.
+    if node.value and node.value[:1].isupper():
+        return "matrix"
+    return "unknown"
 
 
 def _indexed_category(
-    base: AstNode, index_count: int
-) -> Literal["scalar", "vector", "matrix", "tensor"]:
+    base: AstNode, index_count: int,
+) -> Literal["scalar", "vector", "matrix", "tensor", "unknown"]:
     style = base.attribute("style")
     if style == "calligraphy" or index_count >= 3:
         return "tensor"
@@ -653,7 +685,9 @@ def _indexed_category(
         return "matrix"
     if index_count >= 2:
         return "matrix"
-    return "vector" if index_count == 1 or style in {"bold", "vector"} else "scalar"
+    if index_count == 1 or style in {"bold", "vector"}:
+        return "vector"
+    return "unknown"
 
 
 def _mathml_to_latex(source: str) -> str:
@@ -726,41 +760,56 @@ def _mathml_to_latex(source: str) -> str:
 
 
 def canonicalize(root: AstNode) -> AstNode:
-    """Alpha-rename bound variables and sort commutative children.
+    """Return a syntax-only, capture-avoiding alpha-normal form.
 
-    Returns a new tree that can be compared structurally for equivalence.
+    Syntax canonicalization deliberately preserves operand order. Whether a
+    mathematical operator is commutative depends on reviewed types and operator
+    semantics and therefore belongs in semantic canonicalization, not parsing.
     """
-    return _canonicalize_node(root, {}, _BoundCounter())
-
-
-class _BoundCounter:
-    """Mutable counter for generating canonical bound variable names."""
-
-    def __init__(self) -> None:
-        self.n = 0
-
-    def next(self) -> str:
-        name = f"_b{self.n}"
-        self.n += 1
-        return name
+    used_names = _free_symbol_names(root)
+    return _canonicalize_node(root, {}, 0, used_names)
 
 
 def _canonicalize_node(
     node: AstNode,
     renames: dict[str, str],
-    counter: _BoundCounter,
+    binder_depth: int,
+    used_names: set[str],
 ) -> AstNode:
     if node.kind in {"sum", "product", "integral"}:
         binder = node.attribute("binder")
         local_renames = dict(renames)
         new_binder: str | None = None
         if binder:
-            new_binder = counter.next()
+            new_binder = _canonical_bound_name(binder_depth, used_names)
             local_renames[binder] = new_binder
 
         new_children: list[AstNode] = []
-        for child in node.children:
-            new_children.append(_canonicalize_node(child, local_renames, counter))
+        for index, child in enumerate(node.children):
+            if index == len(node.children) - 1:
+                normalized = _canonicalize_node(
+                    child, local_renames, binder_depth + 1, used_names,
+                )
+            elif index == 0 and binder:
+                if child.kind == "equals" and len(child.children) == 2:
+                    declaration = _canonicalize_node(
+                        child.children[0], local_renames, binder_depth + 1, used_names,
+                    )
+                    lower_value = _canonicalize_node(
+                        child.children[1], renames, binder_depth, used_names,
+                    )
+                    normalized = replace(child, children=(declaration, lower_value))
+                elif _is_binder_declaration(child, binder):
+                    normalized = _canonicalize_node(
+                        child, local_renames, binder_depth + 1, used_names,
+                    )
+                else:
+                    normalized = _canonicalize_node(
+                        child, renames, binder_depth, used_names,
+                    )
+            else:
+                normalized = _canonicalize_node(child, renames, binder_depth, used_names)
+            new_children.append(normalized)
 
         new_attrs = tuple(
             ("binder", new_binder) if k == "binder" and new_binder else (k, v)
@@ -770,19 +819,57 @@ def _canonicalize_node(
 
     if node.kind == "symbol" and node.value:
         renamed = renames.get(node.value, node.value)
-        return AstNode(node.kind, renamed, node.children, node.attributes)
+        attributes = tuple((k, v) for k, v in node.attributes if k != "binding")
+        if node.value in renames:
+            attributes += (("binding", "bound_index"),)
+        return AstNode(node.kind, renamed, node.children, attributes)
 
-    new_children = [_canonicalize_node(c, renames, counter) for c in node.children]
-
-    # Addition is commutative for supported numeric/tensor values. Multiplication
-    # is reordered only when every operand is provably scalar; matrix/tensor order
-    # must remain significant.
-    if node.kind == "add" or (
-        node.kind == "multiply" and all(_is_provably_scalar(child) for child in new_children)
-    ):
-        new_children.sort(key=_ast_to_json)
+    new_children = [
+        _canonicalize_node(c, renames, binder_depth, used_names) for c in node.children
+    ]
 
     return AstNode(node.kind, node.value, tuple(new_children), node.attributes)
+
+
+def _canonical_bound_name(depth: int, used_names: set[str]) -> str:
+    """Choose one stable placeholder per lexical depth without name capture."""
+    candidate = f"__fgl_bound_{depth}"
+    suffix = 0
+    while candidate in used_names:
+        suffix += 1
+        candidate = f"__fgl_bound_{depth}_{suffix}"
+    return candidate
+
+
+def _free_symbol_names(root: AstNode) -> set[str]:
+    """Include every free spelling, including operator names, to avoid capture."""
+    names: set[str] = set()
+
+    def visit(node: AstNode, scope: frozenset[str]) -> None:
+        if node.kind == "symbol" and node.value and node.value not in scope:
+            names.add(node.value)
+        binder = node.attribute("binder") if node.kind in {"sum", "product", "integral"} else None
+        if binder and node.children:
+            local = scope | {binder}
+            for index, child in enumerate(node.children):
+                if index == len(node.children) - 1:
+                    visit(child, local)
+                elif index == 0:
+                    if child.kind == "equals" and len(child.children) == 2:
+                        visit(child.children[0], local)
+                        visit(child.children[1], scope)
+                    elif _is_binder_declaration(child, binder):
+                        visit(child, local)
+                    else:
+                        visit(child, scope)
+                else:
+                    visit(child, scope)
+            return
+        for child in node.children:
+            visit(child, scope)
+
+    visit(root, frozenset())
+    return names
 
 
 def _ast_to_json(node: AstNode) -> str:
@@ -796,15 +883,15 @@ def _ast_to_json(node: AstNode) -> str:
 
 
 def _is_provably_scalar(node: AstNode) -> bool:
+    """Return only syntax-level scalar facts safe for CAS conversion.
+
+    A printed lowercase name is not a proof of scalar type. Literal numbers and
+    bound indices are the only scalar facts available without reviewed types.
+    """
     if node.kind == "number":
         return True
     if node.kind == "symbol":
-        return (
-            node.attribute("style") is None
-            and node.attribute("role") != "function"
-            and bool(node.value)
-            and node.value[:1].islower()
-        )
+        return node.attribute("binding") == "bound_index"
     if node.kind in {"negate", "add", "multiply", "divide", "power"}:
         return bool(node.children) and all(_is_provably_scalar(child) for child in node.children)
     return False
@@ -816,9 +903,19 @@ def ast_node_count(root: AstNode) -> int:
 
 
 def compute_canonical_hash(root: AstNode) -> str:
-    """Canonical SHA-256 hash of the alpha-renamed, commutative-sorted tree."""
+    """Versioned syntax hash of the capture-avoiding alpha-normal tree."""
     canonical = canonicalize(root)
-    json_bytes = _ast_to_json(canonical).encode("utf-8")
+    payload = {
+        "syntax_hash_version": SYNTAX_HASH_VERSION,
+        "canonicalizer_version": CANONICALIZER_VERSION,
+        "ast": canonical.to_dict(),
+    }
+    json_bytes = _json_mod.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     return hashlib.sha256(json_bytes).hexdigest()
 
 
@@ -982,10 +1079,13 @@ def _collect_index_names(node: AstNode, out: list[str]) -> None:
 
 
 def sympy_equivalent(a: AstNode, b: AstNode) -> bool | None:
-    """Check algebraic equivalence of two ASTs using SymPy.
+    """Legacy helper: Check algebraic equivalence of two ASTs using SymPy.
 
-    Returns ``True`` if equivalent, ``False`` if not, or ``None`` when the
-    conversion to SymPy fails for either tree.
+    DEPRECATED / NON-AUTHORITATIVE:
+    This function is a legacy structural heuristic and MUST NOT be used as
+    an authority for scientific equivalence or refutation. Failure to simplify
+    to zero does not imply refutation.
+    Authoritative verification must use ``app.verification.run_symbolic_check``.
     """
     import sympy
 

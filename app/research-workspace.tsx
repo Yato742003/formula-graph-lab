@@ -11,6 +11,10 @@ import {
   History,
   Link2,
   Network,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Plus,
   Search,
   ShieldCheck,
@@ -25,6 +29,7 @@ import {
   useState,
 } from 'react';
 import EvidenceGraphViewport, {
+  renderFormulaHtml,
   type GraphViewportEdge,
   type GraphViewportNode,
 } from '@/app/evidence-graph-viewport';
@@ -92,14 +97,15 @@ type InspectorRecord = {
   formulaAnalysis: {
     status: string;
     canonicalHash: string;
-    requiresConfirmation: boolean;
+    requiresReview: boolean;
+    domainStatus: string;
     issueCount: number;
     contracts: Array<{
       name: string;
       category: string;
       shape: string;
-      confidence: number;
-      confirmed: boolean;
+      inferenceConfidence: number;
+      reviewRequired: boolean;
     }>;
   } | null;
 };
@@ -163,11 +169,36 @@ const demoNodes: FormulaNode[] = [
 ];
 
 const demoConnections: GraphViewportEdge[] = [
-  { id: 'demo-scaled', source: 'dot-product', target: 'scaled', relation: 'derived_from' },
-  { id: 'demo-heads', source: 'scaled', target: 'multi-head', relation: 'generalizes' },
-  { id: 'demo-kernel', source: 'dot-product', target: 'kernel', relation: 'approximates' },
-  { id: 'demo-mashup-kernel', source: 'kernel', target: 'mashup', relation: 'derived_from' },
-  { id: 'demo-mashup-heads', source: 'multi-head', target: 'mashup', relation: 'derived_from' },
+  {
+    id: 'demo-scaled',
+    source: 'dot-product',
+    target: 'scaled',
+    relation: 'derived_from',
+  },
+  {
+    id: 'demo-heads',
+    source: 'scaled',
+    target: 'multi-head',
+    relation: 'generalizes',
+  },
+  {
+    id: 'demo-kernel',
+    source: 'dot-product',
+    target: 'kernel',
+    relation: 'approximates',
+  },
+  {
+    id: 'demo-mashup-kernel',
+    source: 'kernel',
+    target: 'mashup',
+    relation: 'derived_from',
+  },
+  {
+    id: 'demo-mashup-heads',
+    source: 'multi-head',
+    target: 'mashup',
+    relation: 'derived_from',
+  },
 ];
 
 const demoPaperSections = [
@@ -199,7 +230,8 @@ function payloadString(
 function graphNodeLabel(node: EvidenceGraphNode): string {
   if (node.kind === 'Equation') {
     const number = node.payload.equation_number;
-    if (typeof number === 'string' && number.trim()) return `Equation ${number}`;
+    if (typeof number === 'string' && number.trim())
+      return `Equation ${number}`;
   }
   return payloadString(
     node.payload,
@@ -239,41 +271,71 @@ function formulaAnalysisFromPayload(
   if (!isRecord(analysis)) return null;
   const canonicalHash = analysis.canonical_hash;
   const status = analysis.status;
-  if (typeof canonicalHash !== 'string' || typeof status !== 'string') return null;
+  if (typeof canonicalHash !== 'string' || typeof status !== 'string')
+    return null;
   const contracts = Array.isArray(analysis.contracts)
     ? analysis.contracts.flatMap((value) => {
         if (!isRecord(value)) return [];
+        const inferenceConfidence =
+          typeof value.inference_confidence === 'number'
+            ? value.inference_confidence
+            : value.confidence;
+        const reviewRequired =
+          typeof value.review_required === 'boolean'
+            ? value.review_required
+            : value.confirmed === false;
         if (
           typeof value.name !== 'string' ||
           typeof value.category !== 'string' ||
-          typeof value.confidence !== 'number' ||
-          typeof value.confirmed !== 'boolean'
+          typeof inferenceConfidence !== 'number' ||
+          typeof reviewRequired !== 'boolean'
         ) {
           return [];
         }
         const shape = Array.isArray(value.shape)
           ? value.shape.map(String).join(' × ') || 'scalar'
           : 'n/a';
-        return [{
-          name: value.name,
-          category: value.category,
-          shape,
-          confidence: value.confidence,
-          confirmed: value.confirmed,
-        }];
+        return [
+          {
+            name: value.name,
+            category: value.category,
+            shape,
+            inferenceConfidence,
+            reviewRequired,
+          },
+        ];
       })
     : [];
   const shapeErrors = Array.isArray(analysis.shape_errors)
     ? analysis.shape_errors.length
     : 0;
-  const domainErrors = Array.isArray(analysis.domain_errors)
-    ? analysis.domain_errors.length
-    : 0;
+  const domainAssessment = isRecord(analysis.domain_assessment)
+    ? analysis.domain_assessment
+    : null;
+  const domainObligations = Array.isArray(domainAssessment?.obligations)
+    ? domainAssessment.obligations.filter(
+        (value) =>
+          isRecord(value) &&
+          ['unresolved', 'contradictory', 'unsupported'].includes(
+            String(value.status),
+          ),
+      ).length
+    : Array.isArray(analysis.domain_errors)
+      ? analysis.domain_errors.length
+      : 0;
   return {
     status: status.replaceAll('_', ' '),
     canonicalHash,
-    requiresConfirmation: analysis.requires_confirmation === true,
-    issueCount: shapeErrors + domainErrors,
+    requiresReview:
+      analysis.requires_review === true ||
+      analysis.requires_confirmation === true,
+    domainStatus:
+      typeof domainAssessment?.status === 'string'
+        ? domainAssessment.status.replaceAll('_', ' ')
+        : domainObligations > 0
+          ? 'unresolved'
+          : 'not assessed',
+    issueCount: shapeErrors + domainObligations,
     contracts,
   };
 }
@@ -298,7 +360,8 @@ export function buildEvidenceInspector(
     'match_sources' in node
       ? node.match_sources.join(' + ')
       : (matchingEdges[0]?.relation.replaceAll('_', ' ') ?? 'source-bound');
-  const pinnedSource = sourceUrl ||
+  const pinnedSource =
+    sourceUrl ||
     `https://arxiv.org/html/${node.paper_id}${node.version ? `v${node.version}` : ''}`;
   const anchorIsSource = node.payload.anchor_is_source === true;
   return {
@@ -329,11 +392,16 @@ export function buildEvidenceInspector(
             typeof value === 'string' && Boolean(value.trim()),
         )
         .join(' ') ||
-      payloadString(node.payload, ['text', 'statement'], 'Source text unavailable'),
+      payloadString(
+        node.payload,
+        ['text', 'statement'],
+        'Source text unavailable',
+      ),
     validAt: node.valid_at ?? 'Unknown source time',
     episodeIds: node.episode_uuids,
     relations: matchingEdges.map((edge) => {
-      const direction = edge.source_uuid === node.uuid ? 'outgoing' : 'incoming';
+      const direction =
+        edge.source_uuid === node.uuid ? 'outgoing' : 'incoming';
       const neighborId =
         direction === 'outgoing' ? edge.target_uuid : edge.source_uuid;
       const neighbor = nodes.find((candidate) => candidate.uuid === neighborId);
@@ -347,7 +415,8 @@ export function buildEvidenceInspector(
       };
     }),
     superseded: matchingEdges.some(
-      (edge) => edge.relation === 'supersedes' && edge.target_uuid === node.uuid,
+      (edge) =>
+        edge.relation === 'supersedes' && edge.target_uuid === node.uuid,
     ),
     formulaAnalysis: formulaAnalysisFromPayload(node.payload),
   };
@@ -458,16 +527,16 @@ function searchHitExcerpt(hit: EvidenceSearchHit): string {
 export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   const [selectedId, setSelectedId] = useState<string | null>('scaled');
   const [isImporting, setIsImporting] = useState(false);
-  const [imported, setImported] = useState<WorkspaceImportResponse | null>(null);
+  const [imported, setImported] = useState<WorkspaceImportResponse | null>(
+    null,
+  );
   const [graphSnapshot, setGraphSnapshot] =
     useState<EvidenceGraphSnapshotResponse | null>(null);
   const [isGraphLoading, setIsGraphLoading] = useState(false);
   const [graphNotice, setGraphNotice] = useState('Loading saved evidence…');
   const [selectedSearchHit, setSelectedSearchHit] =
     useState<EvidenceSearchHit | null>(null);
-  const [paperUrl, setPaperUrl] = useState(
-    'https://arxiv.org/html/1706.03762',
-  );
+  const [paperUrl, setPaperUrl] = useState('https://arxiv.org/html/1706.03762');
   const [notice, setNotice] = useState(
     'Curated demo · import an arXiv HTML paper to replace it',
   );
@@ -479,6 +548,13 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   const [searchNotice, setSearchNotice] = useState(
     'Search exact symbols, concepts, claims, and neighboring evidence',
   );
+  const [isLeftCollapsed, setIsLeftCollapsed] = useState(false);
+  const [isRightCollapsed, setIsRightCollapsed] = useState(false);
+
+  useEffect(() => {
+    window.dispatchEvent(new Event('resize'));
+  }, [isLeftCollapsed, isRightCollapsed]);
+
   const hasPersistedGraph = Boolean(graphSnapshot?.paper);
   const evidenceNodes = useMemo(
     () => graphSnapshot?.nodes ?? [],
@@ -574,36 +650,36 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
     selectedId,
     selectedSearchHit,
   ]);
-  const paperSections = useMemo(
-    () => {
-      if (hasPersistedGraph) {
-        const selectedSectionId = selectedEvidence?.payload.section_id;
-        return evidenceNodes
-          .filter((node) => node.kind === 'Section')
-          .map((node) => ({
-            id: node.logical_id,
-            graphId: node.uuid,
-            label: graphNodeLabel(node),
-            count: Array.isArray(node.payload.equation_ids)
-              ? node.payload.equation_ids.length
-              : 0,
-            active: selectedSectionId === node.logical_id,
-          }));
-      }
-      return demoPaperSections.map((section, index) => ({
-        ...section,
-        id: `demo-${index}`,
-        graphId: null,
-      }));
-    }, [evidenceNodes, hasPersistedGraph, selectedEvidence],
-  );
+  const paperSections = useMemo(() => {
+    if (hasPersistedGraph) {
+      const selectedSectionId = selectedEvidence?.payload.section_id;
+      return evidenceNodes
+        .filter((node) => node.kind === 'Section')
+        .map((node) => ({
+          id: node.logical_id,
+          graphId: node.uuid,
+          label: graphNodeLabel(node),
+          count: Array.isArray(node.payload.equation_ids)
+            ? node.payload.equation_ids.length
+            : 0,
+          active: selectedSectionId === node.logical_id,
+        }));
+    }
+    return demoPaperSections.map((section, index) => ({
+      ...section,
+      id: `demo-${index}`,
+      graphId: null,
+    }));
+  }, [evidenceNodes, hasPersistedGraph, selectedEvidence]);
   const persistedAuthors = Array.isArray(persistedVersionNode?.payload.authors)
     ? persistedVersionNode.payload.authors.filter(
         (author): author is string => typeof author === 'string',
       )
     : [];
   const paperTitle =
-    graphSnapshot?.paper?.title ?? imported?.paper.title ?? 'Attention Is All You Need';
+    graphSnapshot?.paper?.title ??
+    imported?.paper.title ??
+    'Attention Is All You Need';
   const paperId =
     graphSnapshot?.paper?.paper_id ?? imported?.paper.paper_id ?? '1706.03762';
   const paperVersion =
@@ -617,7 +693,9 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
     : (imported?.paper.equations.length ?? 7);
 
   const loadPersistedGraph = useCallback(
-    async (signal?: AbortSignal): Promise<EvidenceGraphSnapshotResponse | undefined> => {
+    async (
+      signal?: AbortSignal,
+    ): Promise<EvidenceGraphSnapshotResponse | undefined> => {
       await Promise.resolve();
       setIsGraphLoading(true);
       setGraphNotice('Loading saved evidence…');
@@ -627,9 +705,10 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
           headers: { accept: 'application/json' },
           signal,
         });
-        const result = (await response.json()) as Partial<EvidenceGraphSnapshotResponse> & {
-          code?: string;
-        };
+        const result =
+          (await response.json()) as Partial<EvidenceGraphSnapshotResponse> & {
+            code?: string;
+          };
         if (!response.ok) {
           setGraphNotice(graphErrorMessage(result.code));
           return undefined;
@@ -650,8 +729,8 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
           setSelectedId((current) =>
             completed.nodes.some((node) => node.uuid === current)
               ? current
-              : (completed.nodes.find((node) => node.kind === 'Equation')?.uuid ??
-                completed.nodes[0].uuid),
+              : (completed.nodes.find((node) => node.kind === 'Equation')
+                  ?.uuid ?? completed.nodes[0].uuid),
           );
         }
         setGraphNotice(
@@ -721,7 +800,9 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
           }
           const canonicalUrl = normalizeArxivHtmlUrl(input.url);
           setPaperUrl(canonicalUrl);
-          setNotice('URL staged by your AI assistant · review and import when ready');
+          setNotice(
+            'URL staged by your AI assistant · review and import when ready',
+          );
           return { status: 'staged', canonicalUrl };
         },
       },
@@ -746,9 +827,10 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ url: canonicalUrl }),
       });
-      const result = (await response.json()) as Partial<WorkspaceImportResponse> & {
-        code?: string;
-      };
+      const result =
+        (await response.json()) as Partial<WorkspaceImportResponse> & {
+          code?: string;
+        };
       if (!response.ok) {
         setNotice(importErrorMessage(result.code));
         return;
@@ -783,7 +865,9 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
       return;
     }
     setIsSearching(true);
-    setSearchNotice(cursor ? 'Loading the next evidence page…' : 'Ranking evidence…');
+    setSearchNotice(
+      cursor ? 'Loading the next evidence page…' : 'Ranking evidence…',
+    );
     try {
       const response = await fetch('/api/search', {
         method: 'POST',
@@ -794,9 +878,10 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
           ...(cursor ? { cursor } : {}),
         }),
       });
-      const result = (await response.json()) as Partial<EvidenceSearchResponse> & {
-        code?: string;
-      };
+      const result =
+        (await response.json()) as Partial<EvidenceSearchResponse> & {
+          code?: string;
+        };
       if (!response.ok) {
         setSearchNotice(searchErrorMessage(result.code));
         return;
@@ -860,13 +945,23 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
         </div>
 
         <nav className="top-nav" aria-label="Primary navigation">
-          <button className="nav-item">Library</button>
-          <button className="nav-item nav-item-active">Graph</button>
-          <button className="nav-item">Experiments</button>
+          <button type="button" className="nav-item">
+            Library
+          </button>
+          <button
+            type="button"
+            className="nav-item nav-item-active"
+          >
+            Graph
+          </button>
+          <button type="button" className="nav-item">
+            Experiments
+          </button>
         </nav>
 
         <div className="top-actions">
           <button
+            type="button"
             className={`icon-button ${isSearchOpen ? 'icon-button-active' : ''}`}
             aria-label={isSearchOpen ? 'Close graph search' : 'Search graph'}
             aria-expanded={isSearchOpen}
@@ -925,7 +1020,10 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               {searchNotice}
             </p>
             {searchResult ? (
-              <div className="search-results" aria-label="Evidence search results">
+              <div
+                className="search-results"
+                aria-label="Evidence search results"
+              >
                 {searchResult.hits.map((hit) => (
                   <button
                     className="search-result"
@@ -936,7 +1034,8 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                     <span className="search-result-topline">
                       <b>{hit.kind}</b>
                       <span>
-                        {hit.paper_id}{hit.version ? `v${hit.version}` : ''}
+                        {hit.paper_id}
+                        {hit.version ? `v${hit.version}` : ''}
                       </span>
                     </span>
                     <strong>{searchHitTitle(hit)}</strong>
@@ -961,23 +1060,30 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                     className="search-more"
                     type="button"
                     disabled={isSearching}
-                    onClick={() => void runSearch(searchResult.next_cursor ?? undefined)}
+                    onClick={() =>
+                      void runSearch(searchResult.next_cursor ?? undefined)
+                    }
                   >
                     Load more evidence
                   </Button>
                 ) : null}
               </div>
             ) : (
-              <div className="search-suggestions" aria-label="Search suggestions">
-                {['scaled attention', 'd_model', 'convergence'].map((suggestion) => (
-                  <button
-                    key={suggestion}
-                    type="button"
-                    onClick={() => setSearchQuery(suggestion)}
-                  >
-                    {suggestion}
-                  </button>
-                ))}
+              <div
+                className="search-suggestions"
+                aria-label="Search suggestions"
+              >
+                {['scaled attention', 'd_model', 'convergence'].map(
+                  (suggestion) => (
+                    <button
+                      key={suggestion}
+                      type="button"
+                      onClick={() => setSearchQuery(suggestion)}
+                    >
+                      {suggestion}
+                    </button>
+                  ),
+                )}
               </div>
             )}
           </div>
@@ -997,7 +1103,11 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
             className="paper-url-input"
             spellCheck={false}
           />
-          <Button className="import-button" type="submit" disabled={isImporting}>
+          <Button
+            className="import-button"
+            type="submit"
+            disabled={isImporting}
+          >
             <Plus size={16} />
             {isImporting ? 'Importing…' : 'Import paper'}
           </Button>
@@ -1008,16 +1118,34 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
         </p>
       </section>
 
-      <div className="research-grid">
-        <aside className="source-panel" aria-label="Paper sources">
+      <div
+        className={`research-grid ${isLeftCollapsed ? 'is-left-collapsed' : ''} ${isRightCollapsed ? 'is-right-collapsed' : ''}`}
+      >
+        <aside
+          className={`source-panel ${isLeftCollapsed ? 'is-collapsed' : ''}`}
+          aria-label="Paper sources"
+        >
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Evidence</p>
               <h2>Paper sources</h2>
             </div>
-            <Badge variant="outline" className="count-badge">
-              01
-            </Badge>
+            <div className="panel-heading-actions">
+              <Badge variant="outline" className="count-badge">
+                01
+              </Badge>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="panel-collapse-btn"
+                onClick={() => setIsLeftCollapsed(true)}
+                title="Collapse paper sources"
+                aria-label="Collapse paper sources"
+              >
+                <PanelLeftClose size={15} />
+              </Button>
+            </div>
           </div>
 
           <article className="paper-card">
@@ -1044,7 +1172,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                   ? `${evidenceNodes.length} evidence nodes`
                   : imported
                     ? `${imported.receipt.node_count} evidence nodes`
-                  : '6 versions'}
+                    : '6 versions'}
               </span>
             </div>
           </article>
@@ -1077,21 +1205,71 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
             <ShieldCheck size={18} />
             <div>
               <strong>Source-bound evidence</strong>
-              <p>Every extracted fact retains its paper version and HTML anchor.</p>
+              <p>
+                Every extracted fact retains its paper version and HTML anchor.
+              </p>
             </div>
           </div>
         </aside>
 
-        <section className="graph-panel" aria-label="Formula relationship graph">
+        <section
+          className="graph-panel"
+          aria-label="Formula relationship graph"
+        >
           <div className="graph-header">
-            <div>
-              <p className="eyebrow">Temporal formula graph</p>
-              <h1>{hasPersistedGraph ? 'Exact evidence snapshot' : 'Attention lineage'}</h1>
+            <div className="graph-header-left">
+              {isLeftCollapsed ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="sidebar-expand-btn"
+                  onClick={() => setIsLeftCollapsed(false)}
+                  title="Expand paper sources"
+                  aria-label="Expand paper sources"
+                >
+                  <PanelLeftOpen size={14} className="mr-1.5" />
+                  Sources
+                </Button>
+              ) : null}
+              <div>
+                <p className="eyebrow">Temporal formula graph</p>
+                <h1>
+                  {hasPersistedGraph
+                    ? 'Exact evidence snapshot'
+                    : 'Attention lineage'}
+                </h1>
+              </div>
             </div>
-            <div className="legend" aria-label="Graph legend">
-              <span><i className="legend-dot evidence-dot" />Evidence</span>
-              <span><i className="legend-dot concept-dot" />Concept</span>
-              <span><i className="legend-dot hypothesis-dot" />Hypothesis</span>
+            <div className="graph-header-right">
+              <div className="legend" aria-label="Graph legend">
+                <span>
+                  <i className="legend-dot evidence-dot" />
+                  Evidence
+                </span>
+                <span>
+                  <i className="legend-dot concept-dot" />
+                  Concept
+                </span>
+                <span>
+                  <i className="legend-dot hypothesis-dot" />
+                  Hypothesis
+                </span>
+              </div>
+              {isRightCollapsed ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="sidebar-expand-btn"
+                  onClick={() => setIsRightCollapsed(false)}
+                  title="Expand inspector"
+                  aria-label="Expand inspector"
+                >
+                  <PanelRightOpen size={14} className="mr-1.5" />
+                  Inspector
+                </Button>
+              ) : null}
             </div>
           </div>
 
@@ -1105,7 +1283,9 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
             />
             <div className="graph-status">
               <span className="pulse-dot" />
-              {hasPersistedGraph ? 'Exact graph persisted' : 'Version-aware demo'}
+              {hasPersistedGraph
+                ? 'Exact graph persisted'
+                : 'Version-aware demo'}
               <span>{graphNotice}</span>
             </div>
           </div>
@@ -1130,7 +1310,10 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
           </div>
         </section>
 
-        <aside className="inspector-panel" aria-label="Formula inspector">
+        <aside
+          className={`inspector-panel ${isRightCollapsed ? 'is-collapsed' : ''}`}
+          aria-label="Formula inspector"
+        >
           {inspector ? (
             <>
               <div className="panel-heading inspector-heading">
@@ -1138,14 +1321,42 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                   <p className="eyebrow">Inspector</p>
                   <h2>{inspector.label}</h2>
                 </div>
-                <span className={`type-token type-${inspector.tone}`}>
-                  {inspector.kind}
-                </span>
+                <div className="panel-heading-actions">
+                  <span className={`type-token type-${inspector.tone}`}>
+                    {inspector.kind}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="panel-collapse-btn"
+                    onClick={() => setIsRightCollapsed(true)}
+                    title="Collapse inspector"
+                    aria-label="Collapse inspector"
+                  >
+                    <PanelRightClose size={15} />
+                  </Button>
+                </div>
               </div>
 
               <div className="formula-display">
-                <p>{hasPersistedGraph ? 'Extracted expression' : 'Canonical expression'}</p>
-                <code>{inspector.expression}</code>
+                <p>
+                  {hasPersistedGraph
+                    ? 'Extracted expression'
+                    : 'Canonical expression'}
+                </p>
+                {(() => {
+                  const isMath = inspector.kind === 'Equation' || !hasPersistedGraph;
+                  const latexHtml = isMath ? renderFormulaHtml(inspector.expression) : null;
+                  return latexHtml ? (
+                    <div
+                      className="inspector-latex-math"
+                      dangerouslySetInnerHTML={{ __html: latexHtml }}
+                    />
+                  ) : (
+                    <code>{inspector.expression}</code>
+                  );
+                })()}
               </div>
 
               {inspector.formulaAnalysis ? (
@@ -1154,27 +1365,37 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                     <h3>Formula identity</h3>
                     <span>{inspector.formulaAnalysis.status}</span>
                   </div>
-                  <code className="canonical-hash" title="Stable canonical SHA-256">
+                  <code
+                    className="canonical-hash"
+                    title="Stable canonical SHA-256"
+                  >
                     {inspector.formulaAnalysis.canonicalHash}
                   </code>
-                  <div className="contract-grid" aria-label="Inferred symbol contracts">
+                  <div
+                    className="contract-grid"
+                    aria-label="Inferred symbol contracts"
+                  >
                     {inspector.formulaAnalysis.contracts.map((contract) => (
                       <div key={contract.name}>
                         <code>{contract.name}</code>
                         <span>{contract.category}</span>
                         <b>{contract.shape}</b>
-                        <i title={`${Math.round(contract.confidence * 100)}% confidence`}>
-                          {contract.confirmed ? 'confirmed' : 'review'}
+                        <i
+                          title={`${Math.round(contract.inferenceConfidence * 100)}% inference confidence`}
+                        >
+                          {contract.reviewRequired
+                            ? 'review required'
+                            : 'inferred'}
                         </i>
                       </div>
                     ))}
                   </div>
                   <p className="formula-readiness">
-                    {inspector.formulaAnalysis.requiresConfirmation
-                      ? 'Human confirmation is required before this formula can enter a verified mashup.'
+                    {inspector.formulaAnalysis.requiresReview
+                      ? 'The inferred contract needs human review; confidence never counts as confirmation.'
                       : inspector.formulaAnalysis.issueCount > 0
-                        ? `${inspector.formulaAnalysis.issueCount} type or domain issue(s) need review.`
-                        : 'Canonical structure and inferred contracts are ready for typed transformations.'}
+                        ? `${inspector.formulaAnalysis.issueCount} unresolved type or domain obligation(s).`
+                        : `Domain ${inspector.formulaAnalysis.domainStatus}; no human confirmation is implied.`}
                   </p>
                 </section>
               ) : null}
@@ -1182,7 +1403,9 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               <section className="inspector-section">
                 <div className="section-title">
                   <h3>Relation</h3>
-                  <span>{Math.round(inspector.confidence * 100)}% confidence</span>
+                  <span>
+                    {Math.round(inspector.confidence * 100)}% confidence
+                  </span>
                 </div>
                 <div className="relation-card">
                   <GitBranch size={17} />
@@ -1195,23 +1418,59 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
 
               <section className="inspector-section">
                 <div className="section-title">
-                  <h3>{hasPersistedGraph ? 'Source context' : 'Symbol contract'}</h3>
-                  <span>{hasPersistedGraph ? 'immutable snapshot' : '4 symbols'}</span>
+                  <h3>
+                    {hasPersistedGraph ? 'Source context' : 'Symbol contract'}
+                  </h3>
+                  <span>
+                    {hasPersistedGraph ? 'immutable snapshot' : '4 symbols'}
+                  </span>
                 </div>
                 <div className="symbol-table">
                   {hasPersistedGraph || selectedSearchHit ? (
                     <>
-                      <div><code>#</code><span>anchor</span><b>{inspector.anchor}</b></div>
-                      <div><code>§</code><span>section</span><b>{inspector.section}</b></div>
-                      <div><code>↳</code><span>extractor</span><b>{inspector.extractionMethod}</b></div>
-                      <div><code>◫</code><span>episodes</span><b>{inspector.episodeCount}</b></div>
+                      <div>
+                        <code>#</code>
+                        <span>anchor</span>
+                        <b>{inspector.anchor}</b>
+                      </div>
+                      <div>
+                        <code>§</code>
+                        <span>section</span>
+                        <b>{inspector.section}</b>
+                      </div>
+                      <div>
+                        <code>↳</code>
+                        <span>extractor</span>
+                        <b>{inspector.extractionMethod}</b>
+                      </div>
+                      <div>
+                        <code>◫</code>
+                        <span>episodes</span>
+                        <b>{inspector.episodeCount}</b>
+                      </div>
                     </>
                   ) : (
                     <>
-                      <div><code>Q</code><span>query tensor</span><b>n × dₖ</b></div>
-                      <div><code>K</code><span>key tensor</span><b>m × dₖ</b></div>
-                      <div><code>V</code><span>value tensor</span><b>m × dᵥ</b></div>
-                      <div><code>dₖ</code><span>key dimension</span><b>ℕ⁺</b></div>
+                      <div>
+                        <code>Q</code>
+                        <span>query tensor</span>
+                        <b>n × dₖ</b>
+                      </div>
+                      <div>
+                        <code>K</code>
+                        <span>key tensor</span>
+                        <b>m × dₖ</b>
+                      </div>
+                      <div>
+                        <code>V</code>
+                        <span>value tensor</span>
+                        <b>m × dᵥ</b>
+                      </div>
+                      <div>
+                        <code>dₖ</code>
+                        <span>key dimension</span>
+                        <b>ℕ⁺</b>
+                      </div>
                     </>
                   )}
                 </div>
@@ -1227,7 +1486,9 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                   <ol className="relation-history">
                     {inspector.relations.map((relation) => (
                       <li key={relation.id}>
-                        <span>{relation.direction === 'incoming' ? '←' : '→'}</span>
+                        <span>
+                          {relation.direction === 'incoming' ? '←' : '→'}
+                        </span>
                         <div>
                           <strong>{relation.relation}</strong>
                           <small>{relation.neighbor}</small>
@@ -1237,7 +1498,9 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                     ))}
                   </ol>
                 ) : (
-                  <p className="history-empty">No visible relations for this node.</p>
+                  <p className="history-empty">
+                    No visible relations for this node.
+                  </p>
                 )}
               </section>
 
@@ -1248,7 +1511,9 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                 </div>
                 <ul className="episode-list">
                   {inspector.episodeIds.map((episodeId) => (
-                    <li key={episodeId}><code>{episodeId}</code></li>
+                    <li key={episodeId}>
+                      <code>{episodeId}</code>
+                    </li>
                   ))}
                 </ul>
               </section>
@@ -1259,8 +1524,14 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                   <span>{inspector.verificationStatus}</span>
                 </div>
                 <ul className="check-list">
-                  <li><Check size={14} />Exact source snapshot retained</li>
-                  <li><Check size={14} />Paper revision pinned · {inspector.paperLabel}</li>
+                  <li>
+                    <Check size={14} />
+                    Exact source snapshot retained
+                  </li>
+                  <li>
+                    <Check size={14} />
+                    Paper revision pinned · {inspector.paperLabel}
+                  </li>
                   <li>
                     <Check size={14} />
                     {!inspector.anchorIsSource
@@ -1269,7 +1540,9 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                   </li>
                   <li>
                     <Check size={14} />
-                    {inspector.superseded ? 'Superseded by a newer revision' : 'No newer revision in view'}
+                    {inspector.superseded
+                      ? 'Superseded by a newer revision'
+                      : 'No newer revision in view'}
                   </li>
                 </ul>
               </section>
@@ -1281,16 +1554,41 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                 rel="noopener noreferrer"
               >
                 <BookOpenText size={16} />
-                {inspector.anchorIsSource ? 'Open evidence in source' : 'Open paper source'}
+                {inspector.anchorIsSource
+                  ? 'Open evidence in source'
+                  : 'Open paper source'}
                 <span>↗</span>
               </a>
             </>
           ) : (
-            <div className="inspector-empty">
-              <Braces size={22} />
-              <strong>No formula selected</strong>
-              <span>Import a paper containing display equations to inspect one.</span>
-            </div>
+            <>
+              <div className="panel-heading inspector-heading">
+                <div>
+                  <p className="eyebrow">Inspector</p>
+                  <h2>Abstract</h2>
+                </div>
+                <div className="panel-heading-actions">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="panel-collapse-btn"
+                    onClick={() => setIsRightCollapsed(true)}
+                    title="Collapse inspector"
+                    aria-label="Collapse inspector"
+                  >
+                    <PanelRightClose size={15} />
+                  </Button>
+                </div>
+              </div>
+              <div className="inspector-empty">
+                <Braces size={22} />
+                <strong>No formula selected</strong>
+                <span>
+                  Import a paper containing display equations to inspect one.
+                </span>
+              </div>
+            </>
           )}
         </aside>
       </div>

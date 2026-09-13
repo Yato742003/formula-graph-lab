@@ -8,63 +8,195 @@ cross-section symbol shadowing.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.formula_ast import AstNode, ParsedFormula, ParsedSymbol
 
-# The threshold below which a contract is flagged as *unconfirmed* and cannot
-# participate in verified transformations without human review.
+# The threshold is a review-routing hint only. It never creates a human review
+# or proves that a contract is mathematically valid.
 CONFIDENCE_THRESHOLD = 0.6
 
 SymbolCategory = Literal[
     "scalar", "vector", "matrix", "tensor", "function", "distribution", "index",
 ]
+InferredCategory = Literal[
+    "scalar", "vector", "matrix", "tensor", "function", "distribution", "index",
+    "unknown",
+]
 SymbolDomain = Literal["real", "positive", "non_negative", "complex", "integer"]
+DomainPredicateKind = Literal[
+    "nonzero", "zero", "positive", "negative", "non_negative", "non_positive",
+]
+DomainStatus = Literal[
+    "discharged", "conditional", "unresolved", "contradictory", "unsupported",
+]
 
 
 class SymbolContract(BaseModel):
-    """A typed contract describing a mathematical symbol's properties."""
+    """An inferred, immutable mathematical contract.
+
+    Human review is intentionally absent. A review is a separate
+    :class:`ContractReview` record so extraction or inference confidence cannot
+    impersonate an approval.
+    """
+
+    name: str
+    category: InferredCategory
+    shape: tuple[int | str, ...] | None = None
+    domain: SymbolDomain = "real"
+    constraints: list[str] = Field(default_factory=list)
+    scope: str | None = None  # section_id
+    inference_confidence: float = Field(ge=0, le=1, default=1.0)
+    review_required: bool = False
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+
+class ReviewedContractValue(BaseModel):
+    """The mathematical values accepted by a reviewer, without confidence."""
 
     name: str
     category: SymbolCategory
     shape: tuple[int | str, ...] | None = None
     domain: SymbolDomain = "real"
     constraints: list[str] = Field(default_factory=list)
-    scope: str | None = None  # section_id
-    confidence: float = Field(ge=0, le=1, default=1.0)
-    confirmed: bool = True
+    scope: str | None = None
 
-    model_config = {"frozen": True}
+    model_config = {"frozen": True, "extra": "forbid"}
 
 
-def apply_contract_confirmations(
-    inferred: list[SymbolContract],
-    confirmations: list[SymbolContract],
-) -> list[SymbolContract]:
-    """Apply explicit human-reviewed contracts to an inferred contract set."""
-    inferred_names = {contract.name for contract in inferred}
-    confirmation_names = [contract.name for contract in confirmations]
-    if len(confirmation_names) != len(set(confirmation_names)):
-        raise ValueError("Contract confirmations must have unique symbol names.")
-    unknown = sorted(set(confirmation_names) - inferred_names)
-    if unknown:
-        raise ValueError(f"Contract confirmation references unknown symbol: {unknown[0]}")
-    by_name = {contract.name: contract for contract in confirmations}
-    return [
-        by_name[contract.name].model_copy(
-            update={
-                "scope": by_name[contract.name].scope or contract.scope,
-                "confidence": 1.0,
-                "confirmed": True,
-            }
-        )
-        if contract.name in by_name
-        else contract
-        for contract in inferred
+class ContractReview(BaseModel):
+    """A human-authored decision stored independently from inference."""
+
+    review_id: str = Field(min_length=1, max_length=200)
+    symbol_name: str = Field(min_length=1, max_length=200)
+    reviewer_id: str = Field(min_length=1, max_length=200)
+    reviewer_role: Literal["researcher", "reviewer", "admin"]
+    decision: Literal["accepted", "rejected"]
+    scope: str = Field(min_length=1, max_length=500)
+    reviewed_contract: ReviewedContractValue | None = None
+    evidence: list[str] = Field(default_factory=list, max_length=50)
+    schema_version: Literal["contract-review.v1"] = "contract-review.v1"
+    reviewed_at: datetime
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    @field_validator("reviewed_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Contract review time must be timezone-aware.")
+        return value
+
+
+class DomainObligation(BaseModel):
+    """A predicate over an expression required for a formula to be defined."""
+
+    obligation_id: str
+    predicate: DomainPredicateKind
+    expression: dict[str, object]
+    expression_hash: str
+    location: str
+    origin: Literal["inferred"] = "inferred"
+    status: DomainStatus = "unresolved"
+    discharged_by: list[str] = Field(default_factory=list)
+    conditions: list[str] = Field(default_factory=list)
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    @model_validator(mode="after")
+    def validate_expression_hash(self):
+        if self.expression_hash != _expression_dict_hash(self.expression):
+            raise ValueError("Domain obligation expression hash does not match its AST.")
+        return self
+
+
+class DomainAssumption(BaseModel):
+    """A source, user, model, or checker predicate considered by assessment."""
+
+    assumption_id: str = Field(min_length=1, max_length=200)
+    predicate: DomainPredicateKind
+    expression: dict[str, object]
+    expression_hash: str
+    origin: Literal[
+        "source_reported", "user_accepted", "ai_proposed", "checker_supported",
     ]
+    acceptance: Literal["proposed", "accepted", "rejected"]
+    accepted_by: str | None = Field(default=None, min_length=1, max_length=200)
+    evidence: list[str] = Field(default_factory=list, max_length=50)
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    @model_validator(mode="after")
+    def validate_acceptance(self):
+        if self.expression_hash != _expression_dict_hash(self.expression):
+            raise ValueError("Domain assumption expression hash does not match its AST.")
+        if self.origin == "checker_supported" and self.acceptance != "accepted":
+            raise ValueError("Checker-supported assumptions must be accepted.")
+        if (
+            self.origin == "ai_proposed"
+            and self.acceptance == "accepted"
+            and self.accepted_by is None
+        ):
+            raise ValueError("An AI-proposed assumption needs a human acceptance record.")
+        return self
+
+
+class DomainAssessment(BaseModel):
+    status: DomainStatus
+    obligations: list[DomainObligation]
+    contradictions: list[tuple[str, str]] = Field(default_factory=list)
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+
+def apply_contract_reviews(
+    inferred: list[SymbolContract],
+    reviews: list[ContractReview],
+    *,
+    scope: str,
+) -> list[SymbolContract]:
+    """Resolve accepted human reviews for trusted internal computation.
+
+    The review records remain the authority and must be persisted separately.
+    This helper never accepts review-shaped client data and is not exposed by
+    the formula parse endpoint.
+    """
+    inferred_names = {contract.name for contract in inferred}
+    reviewed_names = [review.symbol_name for review in reviews]
+    if len(reviewed_names) != len(set(reviewed_names)):
+        raise ValueError("Contract reviews must have unique symbol names.")
+    unknown = sorted(set(reviewed_names) - inferred_names)
+    if unknown:
+        raise ValueError(f"Contract review references unknown symbol: {unknown[0]}")
+    if any(review.scope != scope for review in reviews):
+        raise ValueError("Contract review scope does not match the formula scope.")
+    rejected = next((review for review in reviews if review.decision == "rejected"), None)
+    if rejected is not None:
+        raise ValueError(f"Contract review rejected symbol: {rejected.symbol_name}")
+    by_name = {review.symbol_name: review for review in reviews}
+    resolved: list[SymbolContract] = []
+    for contract in inferred:
+        review = by_name.get(contract.name)
+        reviewed = review.reviewed_contract if review else None
+        if reviewed is None:
+            resolved.append(contract)
+            continue
+        resolved.append(contract.model_copy(update={
+            "category": reviewed.category,
+            "shape": reviewed.shape,
+            "domain": reviewed.domain,
+            "constraints": reviewed.constraints,
+            "scope": reviewed.scope or contract.scope,
+            "review_required": False,
+        }))
+    return resolved
 
 
 # ── Validation result types ──────────────────────────────────────
@@ -77,15 +209,6 @@ class ShapeError:
     message: str
     node_path: str
     symbols: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class DomainError:
-    """Raised when a symbol in a denominator can be zero."""
-
-    message: str
-    symbol: str
-    location: str
 
 
 @dataclass(frozen=True)
@@ -116,28 +239,25 @@ def infer_contracts(
     single unknown dimension, matrices two, and tensors three.
     """
     contracts: list[SymbolContract] = []
-    denominator_names = _denominator_symbols(formula.root)
-
     for sym in formula.symbols:
         shape = _infer_shape(sym)
-        domain = _infer_domain(sym, denominator_names)
-        constraints = _infer_constraints(sym, denominator_names)
+        domain = _infer_domain(sym)
         confidence = _compute_confidence(sym, extraction_confidence)
         contracts.append(SymbolContract(
             name=sym.name,
             category=sym.category,
             shape=shape,
             domain=domain,
-            constraints=constraints,
+            constraints=[],
             scope=section_id,
-            confidence=confidence,
-            confirmed=confidence >= CONFIDENCE_THRESHOLD,
+            inference_confidence=confidence,
+            review_required=confidence < CONFIDENCE_THRESHOLD,
         ))
     return contracts
 
 
 def _infer_shape(sym: ParsedSymbol) -> tuple[int | str, ...] | None:
-    if sym.category in {"function", "distribution"}:
+    if sym.category in {"function", "distribution", "unknown"}:
         return None
     if sym.category in {"scalar", "index"}:
         return ()
@@ -150,23 +270,17 @@ def _infer_shape(sym: ParsedSymbol) -> tuple[int | str, ...] | None:
     return tuple("?" for _ in range(max(inferred_rank, index_count)))
 
 
-def _infer_domain(sym: ParsedSymbol, denominator_names: set[str]) -> SymbolDomain:
+def _infer_domain(sym: ParsedSymbol) -> SymbolDomain:
     if sym.category in {"function", "distribution"}:
         return "real"
-    if sym.name in denominator_names:
-        return "real"  # Could be constrained but we default conservatively.
     return "real"
-
-
-def _infer_constraints(sym: ParsedSymbol, denominator_names: set[str]) -> list[str]:
-    constraints: list[str] = []
-    if sym.name in denominator_names:
-        constraints.append("!= 0")
-    return constraints
 
 
 def _compute_confidence(sym: ParsedSymbol, extraction_confidence: float) -> float:
     base = extraction_confidence
+    # Unknown category has no structural evidence — always low confidence.
+    if sym.category == "unknown":
+        return min(base, CONFIDENCE_THRESHOLD - 0.1)
     # Style annotations increase confidence.
     if sym.style is not None:
         base = min(base + 0.1, 1.0)
@@ -177,33 +291,6 @@ def _compute_confidence(sym: ParsedSymbol, extraction_confidence: float) -> floa
     if sym.category in {"function", "distribution"}:
         return min(base + 0.05, 1.0)
     return base
-
-
-def _denominator_symbols(node: AstNode) -> set[str]:
-    """Collect symbol names that appear in the denominator of a division."""
-    names: set[str] = set()
-    _walk_denominators(node, names, in_denominator=False)
-    return names
-
-
-def _walk_denominators(node: AstNode, out: set[str], *, in_denominator: bool) -> None:
-    if node.kind == "divide" and len(node.children) == 2:
-        _walk_denominators(node.children[0], out, in_denominator=in_denominator)
-        _walk_denominators(node.children[1], out, in_denominator=True)
-        return
-    if node.kind == "subscript" and node.children and in_denominator:
-        base = node.children[0]
-        if base.kind == "symbol" and base.value:
-            out.add(base.value)
-        return
-    if node.kind in {"call", "distribution"} and node.children:
-        for child in node.children[1:]:
-            _walk_denominators(child, out, in_denominator=in_denominator)
-        return
-    if node.kind == "symbol" and node.value and in_denominator:
-        out.add(node.value)
-    for child in node.children:
-        _walk_denominators(child, out, in_denominator=in_denominator)
 
 
 # ── Shape compatibility ─────────────────────────────────────────
@@ -385,28 +472,225 @@ def _child_symbol_names(*nodes: AstNode) -> tuple[str, ...]:
     return tuple(names)
 
 
-# ── Denominator domain ───────────────────────────────────────────
+# ── Domain obligations ───────────────────────────────────────────
 
 
-def check_denominator_domain(
+def infer_domain_obligations(
     contracts: list[SymbolContract],
     formula: ParsedFormula,
-) -> list[DomainError]:
-    """Flag symbols that appear in a denominator without a ``!= 0`` constraint."""
-    contract_map = {c.name: c for c in contracts}
-    denom_names = _denominator_symbols(formula.root)
-    errors: list[DomainError] = []
-    for name in sorted(denom_names):
-        c = contract_map.get(name)
-        if c is None:
-            continue
-        if "!= 0" not in c.constraints:
-            errors.append(DomainError(
-                message=f"Symbol '{name}' appears in a denominator without a '!= 0' constraint.",
-                symbol=name,
-                location="denominator",
+) -> list[DomainObligation]:
+    """Infer whole-expression definedness predicates without discharging them."""
+    contract_map = {contract.name: contract for contract in contracts}
+    obligations: list[DomainObligation] = []
+
+    def walk(node: AstNode, path: str) -> None:
+        if node.kind == "divide" and len(node.children) == 2:
+            obligations.append(_domain_obligation(
+                "nonzero", node.children[1], f"{path}.denominator"
             ))
-    return errors
+        if node.kind == "call" and len(node.children) >= 2:
+            function = node.children[0]
+            argument = node.children[1]
+            function_name = function.value if function.kind == "symbol" else None
+            domain = _expression_domain(argument, contract_map)
+            if function_name == "log":
+                predicate: DomainPredicateKind = (
+                    "nonzero" if domain == "complex" else "positive"
+                )
+                obligations.append(_domain_obligation(
+                    predicate, argument, f"{path}.log_argument"
+                ))
+            elif function_name == "sqrt" and domain != "complex":
+                obligations.append(_domain_obligation(
+                    "non_negative", argument, f"{path}.sqrt_argument"
+                ))
+        for index, child in enumerate(node.children):
+            walk(child, f"{path}.{node.kind}[{index}]")
+
+    walk(formula.root, "root")
+    unique = {obligation.obligation_id: obligation for obligation in obligations}
+    return [unique[key] for key in sorted(unique)]
+
+
+def domain_assumption(
+    *,
+    assumption_id: str,
+    predicate: DomainPredicateKind,
+    expression: AstNode,
+    origin: Literal[
+        "source_reported", "user_accepted", "ai_proposed", "checker_supported",
+    ],
+    acceptance: Literal["proposed", "accepted", "rejected"],
+    accepted_by: str | None = None,
+    evidence: list[str] | None = None,
+) -> DomainAssumption:
+    """Build a stable assumption record from an AST expression."""
+    expression_dict, expression_hash = _expression_identity(expression)
+    return DomainAssumption(
+        assumption_id=assumption_id,
+        predicate=predicate,
+        expression=expression_dict,
+        expression_hash=expression_hash,
+        origin=origin,
+        acceptance=acceptance,
+        accepted_by=accepted_by,
+        evidence=evidence or [],
+    )
+
+
+def assess_domain_obligations(
+    obligations: list[DomainObligation],
+    assumptions: list[DomainAssumption] | None = None,
+) -> DomainAssessment:
+    """Assess obligations while preserving conditional and contradictory states."""
+    considered = [
+        assumption
+        for assumption in (assumptions or [])
+        if assumption.acceptance == "accepted"
+    ]
+    contradictions = _domain_contradictions(considered)
+    contradiction_ids = {item for pair in contradictions for item in pair}
+    assessed: list[DomainObligation] = []
+    for obligation in obligations:
+        matching = [
+            assumption
+            for assumption in considered
+            if assumption.expression_hash == obligation.expression_hash
+            and _predicate_implies(assumption.predicate, obligation.predicate)
+        ]
+        conflicting = [
+            assumption.assumption_id
+            for assumption in considered
+            if assumption.expression_hash == obligation.expression_hash
+            and assumption.assumption_id in contradiction_ids
+        ]
+        if conflicting:
+            assessed.append(obligation.model_copy(update={
+                "status": "contradictory",
+                "conditions": sorted(conflicting),
+            }))
+            continue
+        checker_ids = sorted(
+            assumption.assumption_id
+            for assumption in matching
+            if assumption.origin == "checker_supported"
+        )
+        conditional_ids = sorted(
+            assumption.assumption_id
+            for assumption in matching
+            if assumption.origin != "checker_supported"
+        )
+        if checker_ids:
+            assessed.append(obligation.model_copy(update={
+                "status": "discharged",
+                "discharged_by": checker_ids,
+            }))
+        elif conditional_ids:
+            assessed.append(obligation.model_copy(update={
+                "status": "conditional",
+                "conditions": conditional_ids,
+            }))
+        else:
+            assessed.append(obligation)
+
+    if contradictions:
+        status: DomainStatus = "contradictory"
+    elif any(item.status == "unresolved" for item in assessed):
+        status = "unresolved"
+    elif any(item.status == "conditional" for item in assessed):
+        status = "conditional"
+    else:
+        status = "discharged"
+    return DomainAssessment(
+        status=status,
+        obligations=assessed,
+        contradictions=contradictions,
+    )
+
+
+def _domain_obligation(
+    predicate: DomainPredicateKind,
+    expression: AstNode,
+    location: str,
+) -> DomainObligation:
+    expression_dict, expression_hash = _expression_identity(expression)
+    obligation_id = hashlib.sha256(
+        f"domain-obligation.v1:{predicate}:{expression_hash}:{location}".encode()
+    ).hexdigest()
+    return DomainObligation(
+        obligation_id=obligation_id,
+        predicate=predicate,
+        expression=expression_dict,
+        expression_hash=expression_hash,
+        location=location,
+    )
+
+
+def _expression_identity(expression: AstNode) -> tuple[dict[str, object], str]:
+    expression_dict = expression.to_dict()
+    return expression_dict, _expression_dict_hash(expression_dict)
+
+
+def _expression_dict_hash(expression: dict[str, object]) -> str:
+    serialized = json.dumps(
+        expression, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def _expression_domain(
+    expression: AstNode,
+    contracts: dict[str, SymbolContract],
+) -> SymbolDomain:
+    names = _all_symbol_names(expression)
+    return "complex" if any(
+        contracts[name].domain == "complex" for name in names if name in contracts
+    ) else "real"
+
+
+def _all_symbol_names(node: AstNode) -> set[str]:
+    names = {node.value} if node.kind == "symbol" and node.value else set()
+    for child in node.children:
+        names.update(_all_symbol_names(child))
+    return names
+
+
+def _predicate_implies(
+    actual: DomainPredicateKind,
+    required: DomainPredicateKind,
+) -> bool:
+    if actual == required:
+        return True
+    implications = {
+        "positive": {"nonzero", "non_negative"},
+        "negative": {"nonzero", "non_positive"},
+        "zero": {"non_negative", "non_positive"},
+    }
+    return required in implications.get(actual, set())
+
+
+def _domain_contradictions(
+    assumptions: list[DomainAssumption],
+) -> list[tuple[str, str]]:
+    contradictions: list[tuple[str, str]] = []
+    incompatible = {
+        frozenset(("positive", "negative")),
+        frozenset(("positive", "non_positive")),
+        frozenset(("negative", "non_negative")),
+        frozenset(("zero", "nonzero")),
+        frozenset(("zero", "positive")),
+        frozenset(("zero", "negative")),
+    }
+    for index, left in enumerate(assumptions):
+        for right in assumptions[index + 1:]:
+            if left.expression_hash != right.expression_hash:
+                continue
+            if frozenset((left.predicate, right.predicate)) in incompatible:
+                contradictions.append(tuple(sorted((
+                    left.assumption_id,
+                    right.assumption_id,
+                ))))
+    return sorted(set(contradictions))
 
 
 # ── Symbol shadowing ─────────────────────────────────────────────

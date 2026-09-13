@@ -265,10 +265,11 @@ class TestIndexedNotation:
         return next((s for s in f.symbols if s.name == name), None)
 
     def test_scalar(self):
+        """Under FGL-H3, an unstyled lowercase name is unknown, not assumed scalar."""
         f = parse_formula("x + y")
         s = self._symbol(f, "x")
         assert s is not None
-        assert s.category == "scalar"
+        assert s.category == "unknown"
 
     def test_vector_single_index(self):
         f = parse_formula("x_i")
@@ -393,16 +394,16 @@ class TestMathMLInput:
 
 
 class TestCanonicalize:
-    def test_commutative_addition(self):
-        """a + b and b + a have the same canonical hash."""
+    def test_unknown_addition_preserves_order(self):
+        """Syntax hashing does not infer algebraic properties from notation."""
         h1 = parse_formula("a + b").canonical_hash
         h2 = parse_formula("b + a").canonical_hash
-        assert h1 == h2
+        assert h1 != h2
 
-    def test_commutative_multiplication(self):
+    def test_unknown_multiplication_preserves_order(self):
         h1 = parse_formula("a * b").canonical_hash
         h2 = parse_formula("b * a").canonical_hash
-        assert h1 == h2
+        assert h1 != h2
 
     def test_non_equivalent_different_hash(self):
         h1 = parse_formula("a + b").canonical_hash
@@ -436,17 +437,15 @@ class TestCanonicalize:
         assert len(h) == 64
         assert all(c in "0123456789abcdef" for c in h)
 
-    def test_three_term_commutative(self):
-        """a + b + c in any order → same hash."""
+    def test_three_term_syntax_order_is_significant(self):
         perms = ["a + b + c", "b + c + a", "c + a + b", "b + a + c"]
         hashes = {parse_formula(p).canonical_hash for p in perms}
-        assert len(hashes) == 1
+        assert len(hashes) == len(perms)
 
-    def test_nested_commutative(self):
-        """(a + b) * (c + d) and (d + c) * (b + a) → same hash."""
+    def test_nested_unknown_operators_preserve_order(self):
         h1 = parse_formula("(a + b) * (c + d)").canonical_hash
         h2 = parse_formula("(d + c) * (b + a)").canonical_hash
-        assert h1 == h2
+        assert h1 != h2
 
     def test_canonicalize_preserves_structure(self):
         """Non-commutative operations like divide preserve child order."""
@@ -474,10 +473,10 @@ class TestCanonicalize:
 
 class TestSympyEquivalence:
     def test_expanded_square(self):
-        """(a+b)^2 is algebraically equivalent to a^2 + 2ab + b^2."""
+        """Unknown operands are not silently treated as commutative scalars."""
         a = parse_formula("(a + b)^2").root
         b = parse_formula("a^2 + 2 * a * b + b^2").root
-        assert sympy_equivalent(a, b) is True
+        assert sympy_equivalent(a, b) is False
 
     def test_not_equivalent(self):
         a = parse_formula("a + b").root
@@ -492,7 +491,7 @@ class TestSympyEquivalence:
     def test_commutative_equivalence(self):
         a = parse_formula("x * y + z").root
         b = parse_formula("z + y * x").root
-        assert sympy_equivalent(a, b) is True
+        assert sympy_equivalent(a, b) is False
 
     def test_fraction_equivalence(self):
         a = parse_formula(r"\frac{a}{b}").root
@@ -510,14 +509,14 @@ class TestSympyEquivalence:
         import sympy
         node = parse_formula(r"\sin(x)").root
         expr = ast_to_sympy(node)
-        x = sympy.Symbol("x")
+        x = sympy.Symbol("x", commutative=False)
         assert expr == sympy.sin(x)
 
     def test_ast_to_sympy_negation(self):
         import sympy
         node = parse_formula("-x").root
         expr = ast_to_sympy(node)
-        assert expr == -sympy.Symbol("x")
+        assert expr == -sympy.Symbol("x", commutative=False)
 
     def test_sympy_identity_check(self):
         """Same tree compared to itself is equivalent."""
@@ -537,6 +536,9 @@ class TestCanonicalHashFunction:
     def test_matches_parsed_formula(self):
         f = parse_formula("a * b + c")
         assert f.canonical_hash == compute_canonical_hash(f.root)
+        assert f.syntax_hash == f.canonical_hash
+        assert f.syntax_hash_version == "syntax-hash.v3"
+        assert f.canonicalizer_version == "alpha-canonicalizer.v3"
 
     def test_hash_is_stable_across_processes(self):
         formula = r"\sum_{i=1}^{n} x_i"

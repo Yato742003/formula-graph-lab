@@ -1,6 +1,12 @@
 # Delivery status
 
-Last updated: 2026-09-09
+Last updated: 2026-09-13
+
+Current worktree: Sprint 4.5 is partially complete; Sprint 5 is not implemented.
+H1-H5 and the host-process verifier baseline are implemented and verified. H6
+remains partial because the current worker has no raw-socket/filesystem sandbox
+and the research queue controls are still planned. Research-check execution stays
+disabled by default. See `RESEARCH_IMPLEMENTATION_HANDOFF.md` for the boundary.
 
 | Task | Status | Evidence |
 | --- | --- | --- |
@@ -20,15 +26,20 @@ Last updated: 2026-09-09
 | FGL-401 | Complete | Bounded LaTeX/MathML parser produces an operator tree and tracks free/bound variables, indices, scalar/vector/matrix/tensor/function/distribution roles; malformed, binder, indexed and MathML corpora pass |
 | FGL-402 | Complete | Bound variables are alpha-renamed; addition and provably scalar multiplication are normalized while matrix/tensor multiplication order is preserved; deterministic SHA-256 is verified across separate processes; bounded SymPy comparison is available |
 | FGL-403 | Complete | Shape/domain/constraint/scope contracts, ordered tensor contraction, no-broadcast checks, denominator guards, cross-section shadowing and an explicit low-confidence human-confirmation gate are exposed by protected parse/compare APIs |
+| FGL-H3 | Complete | Scope audit resolves single-symbol binders to local scope and lower/upper bounds to outer scope; alpha-renaming is capture-avoiding; semantic normalization binds to explicit core operators; reviewed contracts connect to production semantic IR and persist via FormulaAnalysisVersion |
+| FGL-H4 | Complete | Checker result model distinguishes finite counterexamples from indeterminate forms; worker memory clamped to 256MB with child process tree termination on timeout; uncontracted coverage audited; request idempotency reconciles runtime timer variance; legacy boolean CAS helper deprecated |
+| FGL-H5 | Complete | FormulaAnalysisVersion dry-run report, batch migration, and rollback CLI paths implemented and unit tested; offline unit/integration test suites verified |
+| FGL-H6 | Partial | Worker roles, workspace grants, host-process limits and feature gates are implemented; raw-socket/filesystem sandboxing, research queue envelopes and per-workspace quotas remain required before enabling untrusted execution |
+| Sprint 4.5 Release Gate | Partial (In Progress) | H1-H5 code, offline and Neo4j integration suites, build and threat model pass; research checks remain gated while H6 sandbox and queue controls are incomplete |
 | FGL-5xx+ | Not started | Transformation DSL, AI proposal service, verification pipeline, auth, OWASP, observability, beta remain |
 
 ## Latest validation
 
-- Backend offline: 213 passed, 18 opt-in tests deselected, two upstream deprecation warnings.
+- Backend offline: 274 passed, 23 opt-in tests deselected, two upstream deprecation warnings.
 - Live arXiv corpus: 12 passed; see ingestion-validation.md.
-- Neo4j integration: 6 passed, 225 deselected; the isolated container and network
+- Neo4j integration: 11 passed, 286 deselected; the isolated container and network
   were removed by the runner.
-- Frontend: 8 files and 41 tests passed; TypeScript, Oxlint, Ruff and the production
+- Frontend: 10 files and 59 tests passed; TypeScript, Oxlint, Ruff and the production
   build passed.
 - Local Worker end-to-end: two authenticated imports of arXiv `1706.03762v7`
   produced 7 equations, 39 nodes, 58 edges and 31 episodes. The replay returned

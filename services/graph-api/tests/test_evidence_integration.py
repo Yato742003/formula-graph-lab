@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,6 +14,8 @@ from app.evidence_store import Neo4jEvidenceStore
 from app.extractor import extract_paper
 from app.models import EvidenceGraphSnapshotRequest, EvidenceSearchRequest
 from app.search import EvidenceSearchService, SearchCursorCodec
+from app.symbol_contracts import ContractReview, ReviewedContractValue
+from app.verification import run_symbolic_check
 
 FIXTURE = Path(__file__).parent / "fixtures" / "arxiv_sample.html"
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -75,11 +78,15 @@ async def test_atomic_import_concurrent_replay_and_native_graphiti_read():
         assert {json.loads(r["payload"])["latex"] for r in result} == {
             e.latex for e in paper.equations
         }
-        assert all(
-            len(json.loads(record["payload"])["formula_analysis"]["canonical_hash"]) == 64
-            for record in result
-        )
+        assert all("formula_analysis" not in json.loads(record["payload"]) for record in result)
         assert all("verification_status" not in json.loads(r["payload"]) for r in result)
+        analysis_records, _, _ = await store.driver.execute_query(
+            "MATCH (a:FormulaAnalysisVersion {group_id:$group})-[:ANALYZES]->"
+            "(:Evidence {group_id:$group, kind:'Equation'}) RETURN a.payload AS payload",
+            group=graph.group_id,
+        )
+        assert len(analysis_records) == len(paper.equations)
+        assert all(len(json.loads(row["payload"])["syntax_hash"]) == 64 for row in analysis_records)
         result, _, _ = await store.driver.execute_query(
             "MATCH (n:Evidence {group_id:$group, kind:'Symbol'}) "
             "RETURN count(n) AS symbols",
@@ -123,6 +130,168 @@ async def test_workspaces_do_not_share_equations_or_episode_ids():
         )
         assert result[0]["n"] == 0
         assert {e.uuid for e in a.episodes}.isdisjoint({e.uuid for e in b.episodes})
+    finally:
+        await store.close()
+
+
+async def test_contract_review_is_append_only_scoped_and_idempotent():
+    store = Neo4jEvidenceStore.connect(*connection())
+    paper = extract_paper(
+        FIXTURE.read_text(encoding="utf-8"),
+        "https://arxiv.org/html/1706.03762v7",
+    )
+    workspace_id = "test_review_" + uuid4().hex
+    graph = build_evidence_graph(paper, workspace_id=workspace_id)
+    try:
+        await store.initialize()
+        await store.ingest(graph)
+        equation = next(node for node in graph.nodes if node["kind"] == "Equation")
+        equation_payload = json.loads(equation["payload"])
+        version = next(a for a in graph.analyses if a["equation_uuid"] == equation["uuid"])
+        contract = json.loads(version["payload"])["contracts"][0]
+        review = ContractReview(
+            review_id="pending",
+            symbol_name=contract["name"],
+            reviewer_id="human-reviewer",
+            reviewer_role="reviewer",
+            decision="accepted",
+            scope=equation["uuid"],
+            reviewed_contract=ReviewedContractValue(
+                name=contract["name"],
+                category=contract["category"],
+                shape=tuple(contract["shape"]) if contract["shape"] is not None else None,
+                domain=contract["domain"],
+                constraints=contract["constraints"],
+                scope=contract["scope"],
+            ),
+            evidence=[f"source-anchor:{equation_payload['anchor']}"],
+            reviewed_at=datetime.now(UTC),
+        )
+        first = await store.append_contract_review(
+            workspace_id=workspace_id,
+            equation_uuid=equation["uuid"],
+            idempotency_key="integration-review-0001",
+            review=review,
+        )
+        replay = await store.append_contract_review(
+            workspace_id=workspace_id,
+            equation_uuid=equation["uuid"],
+            idempotency_key="integration-review-0001",
+            review=review,
+        )
+        assert first.replayed is False
+        assert replay.replayed is True
+        assert first.review.review_id == replay.review.review_id
+        retried = await store.append_contract_review(
+            workspace_id=workspace_id,
+            equation_uuid=equation["uuid"],
+            idempotency_key="integration-review-0001",
+            review=review.model_copy(
+                update={
+                    "reviewed_at": review.reviewed_at
+                    + timedelta(days=1),
+                },
+            ),
+        )
+        assert retried.replayed is True
+        assert retried.review == first.review
+
+        records, _, _ = await store.driver.execute_query(
+            "MATCH (review:ContractReview {group_id:$group})-[:REVIEWS]->"
+            "(equation:Evidence {uuid:$equation_uuid}) "
+            "RETURN count(review) AS count, collect(review.payload) AS payloads",
+            group=graph.group_id,
+            equation_uuid=equation["uuid"],
+        )
+        assert records[0]["count"] == 1
+        persisted = json.loads(records[0]["payloads"][0])
+        assert persisted["reviewer_id"] == "human-reviewer"
+        assert persisted["decision"] == "accepted"
+
+        conflicting = review.model_copy(update={"decision": "rejected"})
+        with pytest.raises(ValueError, match="idempotency key conflicts"):
+            await store.append_contract_review(
+                workspace_id=workspace_id,
+                equation_uuid=equation["uuid"],
+                idempotency_key="integration-review-0001",
+                review=conflicting,
+            )
+        with pytest.raises(ValueError, match="must exist in this workspace"):
+            await store.append_contract_review(
+                workspace_id="other_" + uuid4().hex,
+                equation_uuid=equation["uuid"],
+                idempotency_key="integration-review-0002",
+                review=review,
+            )
+    finally:
+        await store.close()
+
+
+async def test_check_result_is_immutable_scoped_and_idempotent():
+    store = Neo4jEvidenceStore.connect(*connection())
+    paper = extract_paper(
+        FIXTURE.read_text(encoding="utf-8"),
+        "https://arxiv.org/html/1706.03762v7",
+    )
+    workspace_id = "test_check_" + uuid4().hex
+    graph = build_evidence_graph(paper, workspace_id=workspace_id)
+    try:
+        await store.initialize()
+        await store.ingest(graph)
+        equation = next(node for node in graph.nodes if node["kind"] == "Equation")
+        result = run_symbolic_check("1+1", "2")
+        first = await store.append_check_result(
+            workspace_id=workspace_id,
+            target_uuid=equation["uuid"],
+            idempotency_key="integration-check-0001",
+            result=result,
+        )
+        replay = await store.append_check_result(
+            workspace_id=workspace_id,
+            target_uuid=equation["uuid"],
+            idempotency_key="integration-check-0001",
+            result=result,
+        )
+        assert first.replayed is False
+        assert replay.replayed is True
+        assert first.result.check_id == replay.result.check_id
+        timed_retry = await store.append_check_result(
+            workspace_id=workspace_id, target_uuid=equation["uuid"],
+            idempotency_key="integration-check-0001",
+            result=result.model_copy(update={
+                "created_at": result.created_at + timedelta(days=1), "duration_ms": 999,
+            }),
+        )
+        assert timed_retry.replayed is True
+        assert timed_retry.result == first.result
+
+        records, _, _ = await store.driver.execute_query(
+            "MATCH (check:CheckResult {group_id:$group})-[:CHECKS]->"
+            "(target:Evidence {uuid:$target_uuid}) "
+            "RETURN count(check) AS count, collect(check.payload) AS payloads",
+            group=graph.group_id,
+            target_uuid=equation["uuid"],
+        )
+        assert records[0]["count"] == 1
+        persisted = json.loads(records[0]["payloads"][0])
+        assert persisted["outcome"] == "supported"
+        assert persisted["vector"]["symbolic"] == "supported"
+
+        conflicting = run_symbolic_check("1+1", "3")
+        with pytest.raises(ValueError, match="idempotency key conflicts"):
+            await store.append_check_result(
+                workspace_id=workspace_id,
+                target_uuid=equation["uuid"],
+                idempotency_key="integration-check-0001",
+                result=conflicting,
+            )
+        with pytest.raises(ValueError, match="must exist in this workspace"):
+            await store.append_check_result(
+                workspace_id="other_" + uuid4().hex,
+                target_uuid=equation["uuid"],
+                idempotency_key="integration-check-0002",
+                result=result,
+            )
     finally:
         await store.close()
 

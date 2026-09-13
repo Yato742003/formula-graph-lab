@@ -4,7 +4,9 @@ from datetime import date, datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
+
+from app.verification import VerificationVector
 
 
 class PaperImportRequest(BaseModel):
@@ -216,7 +218,7 @@ class EvidenceGraphSnapshotResponse(BaseModel):
 # ── Formula API models (FGL-402/403) ─────────────────────────────
 
 
-FormulaSymbolCategory = Literal[
+ConcreteSymbolCategory = Literal[
     "scalar",
     "vector",
     "matrix",
@@ -225,16 +227,17 @@ FormulaSymbolCategory = Literal[
     "distribution",
     "index",
 ]
+FormulaSymbolCategory = Literal[
+    "scalar",
+    "vector",
+    "matrix",
+    "tensor",
+    "function",
+    "distribution",
+    "index",
+    "unknown",
+]
 FormulaSymbolDomain = Literal["real", "positive", "non_negative", "complex", "integer"]
-
-
-class FormulaContractConfirmation(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    category: FormulaSymbolCategory
-    shape: list[int | str] | None = Field(default=None, max_length=16)
-    domain: FormulaSymbolDomain = "real"
-    constraints: list[str] = Field(default_factory=list, max_length=50)
-    scope: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 class FormulaParseRequest(BaseModel):
@@ -242,20 +245,10 @@ class FormulaParseRequest(BaseModel):
     format: Literal["latex", "mathml"] = "latex"
     section_id: str | None = Field(default=None, min_length=1, max_length=500)
     extraction_confidence: float = Field(default=1.0, ge=0, le=1)
-    confirmations: list[FormulaContractConfirmation] = Field(
-        default_factory=list,
-        max_length=200,
-    )
 
-    @field_validator("confirmations")
-    @classmethod
-    def require_unique_confirmations(
-        cls, values: list[FormulaContractConfirmation]
-    ) -> list[FormulaContractConfirmation]:
-        names = [value.name for value in values]
-        if len(names) != len(set(names)):
-            raise ValueError("Contract confirmations must have unique symbol names.")
-        return values
+    # Review records are created through an authenticated human-review workflow,
+    # never inline with untrusted parse/model input.
+    model_config = {"extra": "forbid"}
 
 
 class FormulaSymbolResponse(BaseModel):
@@ -272,8 +265,77 @@ class FormulaContractResponse(BaseModel):
     domain: FormulaSymbolDomain
     constraints: list[str]
     scope: str | None
-    confidence: float
-    confirmed: bool
+    inference_confidence: float
+    review_required: bool
+
+
+class FormulaExtractionAssessmentResponse(BaseModel):
+    confidence: float = Field(ge=0, le=1)
+    source: Literal["request", "equation_extraction"]
+
+
+class ReviewedFormulaContract(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    category: ConcreteSymbolCategory
+    shape: list[int | str] | None = Field(default=None, max_length=16)
+    domain: FormulaSymbolDomain = "real"
+    constraints: list[str] = Field(default_factory=list, max_length=50)
+    scope: str | None = Field(default=None, min_length=1, max_length=500)
+
+    model_config = {"extra": "forbid"}
+
+
+class ContractReviewCreateRequest(BaseModel):
+    workspace_id: str = Field(min_length=1, max_length=200, pattern=r".*\S.*")
+    equation_uuid: str = Field(min_length=1, max_length=200)
+    symbol_name: str = Field(min_length=1, max_length=200)
+    decision: Literal["accepted", "rejected"]
+    reviewed_contract: ReviewedFormulaContract | None = None
+    evidence: list[str] = Field(default_factory=list, max_length=50)
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("equation_uuid")
+    @classmethod
+    def require_equation_uuid(cls, value: str) -> str:
+        UUID(value)
+        return value
+
+    @field_validator("evidence")
+    @classmethod
+    def validate_evidence(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value or len(value) > 500 for value in normalized):
+            raise ValueError("Review evidence references must be non-empty and bounded.")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("Review evidence references must be unique.")
+        return normalized
+
+    @model_validator(mode="after")
+    def require_accepted_contract(self):
+        if self.decision == "accepted" and self.reviewed_contract is None:
+            raise ValueError("An accepted review requires the reviewed contract.")
+        if (
+            self.reviewed_contract is not None
+            and self.reviewed_contract.name != self.symbol_name
+        ):
+            raise ValueError("Reviewed contract must match the reviewed symbol.")
+        return self
+
+
+class ContractReviewResponse(BaseModel):
+    review_id: str
+    workspace_id: str
+    equation_uuid: str
+    symbol_name: str
+    reviewer_id: str
+    reviewer_role: Literal["researcher", "reviewer", "admin"]
+    decision: Literal["accepted", "rejected"]
+    reviewed_contract: ReviewedFormulaContract | None
+    evidence: list[str]
+    schema_version: Literal["contract-review.v1"]
+    reviewed_at: datetime
+    replayed: bool
 
 
 class FormulaValidationIssue(BaseModel):
@@ -282,17 +344,46 @@ class FormulaValidationIssue(BaseModel):
     symbols: list[str]
 
 
+class FormulaDomainObligationResponse(BaseModel):
+    obligation_id: str
+    predicate: Literal[
+        "nonzero", "zero", "positive", "negative", "non_negative", "non_positive",
+    ]
+    expression: dict[str, Any]
+    expression_hash: str
+    location: str
+    origin: Literal["inferred"]
+    status: Literal[
+        "discharged", "conditional", "unresolved", "contradictory", "unsupported",
+    ]
+    discharged_by: list[str]
+    conditions: list[str]
+
+
+class FormulaDomainAssessmentResponse(BaseModel):
+    status: Literal[
+        "discharged", "conditional", "unresolved", "contradictory", "unsupported",
+    ]
+    obligations: list[FormulaDomainObligationResponse]
+    contradictions: list[tuple[str, str]]
+
+
 class FormulaParseResponse(BaseModel):
     ast: dict[str, Any]
     symbols: list[FormulaSymbolResponse]
     free_variables: list[str]
     bound_variables: list[str]
+    syntax_hash: str
+    syntax_hash_version: str
+    canonicalizer_version: str
+    # Kept during the FGL-H5 migration window for older clients.
     canonical_hash: str
+    extraction_assessment: FormulaExtractionAssessmentResponse
     contracts: list[FormulaContractResponse]
     result_shape: list[int | str] | None
     shape_errors: list[FormulaValidationIssue]
-    domain_errors: list[FormulaValidationIssue]
-    requires_confirmation: bool
+    domain_assessment: FormulaDomainAssessmentResponse
+    requires_review: bool
 
 
 class FormulaCompareRequest(BaseModel):
@@ -304,5 +395,19 @@ class FormulaCompareRequest(BaseModel):
 class FormulaCompareResponse(BaseModel):
     structurally_equal: bool
     sympy_equivalent: bool | None
+    verification: VerificationVector
     hash_a: str
     hash_b: str
+    syntax_hash_version: str
+    canonicalizer_version: str
+
+
+class SymbolicCheckCreateRequest(BaseModel):
+    workspace_id: str = Field(min_length=1, max_length=200, pattern=r".*\S.*")
+    target_uuid: str = Field(min_length=1, max_length=200)
+    formula_a: str = Field(min_length=1, max_length=20_000)
+    formula_b: str = Field(min_length=1, max_length=20_000)
+    format: Literal["latex", "mathml"] = "latex"
+    timeout_ms: int = Field(default=2_000, ge=10, le=30_000)
+
+    model_config = {"extra": "forbid"}

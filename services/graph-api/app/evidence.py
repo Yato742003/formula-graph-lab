@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import NAMESPACE_URL, uuid5
 
+from app.analysis_versions import make_analysis_version
 from app.episodes import ResearchEpisode, build_paper_episodes
 from app.formula_ast import AstNode, FormulaParseError, ParsedFormula, parse_formula
 from app.models import ExtractedEquation, ExtractedPaper
 from app.ontology import RelationContract
+from app.semantic_identity import CORE_OPERATOR_VERSIONS, build_semantic_identity
 from app.symbol_contracts import (
+    ReviewedContractValue,
     SymbolContract,
-    check_denominator_domain,
+    assess_domain_obligations,
     infer_contracts,
+    infer_domain_obligations,
     infer_expression_shape,
 )
 
@@ -36,15 +41,21 @@ class EvidenceGraph:
     episodes: list[ResearchEpisode]
     nodes: list[dict]
     edges: list[dict]
+    analyses: list[dict]
 
 
 def build_evidence_graph(
-    paper: ExtractedPaper, *, workspace_id: str, reference_time: datetime | None = None,
+    paper: ExtractedPaper,
+    *,
+    workspace_id: str,
+    reference_time: datetime | None = None,
+    reviewed_contracts: Mapping[str, Iterable[ReviewedContractValue]] | None = None,
 ) -> EvidenceGraph:
     episodes = build_paper_episodes(paper, workspace_id=workspace_id, reference_time=reference_time)
     root = episodes[0]
     nodes: list[dict] = []
     edges: list[dict] = []
+    analyses: list[dict] = []
     symbol_nodes: dict[tuple[str, str], str] = {}
 
     def node(kind: str, logical_id: str, payload: dict, episode_uuid: str) -> str:
@@ -110,12 +121,19 @@ def build_evidence_graph(
                  "contains", episode_uuid, anchor)
     for equation in paper.equations:
         episode_uuid = section_episodes.get(equation.section_id, root.uuid)
-        analysis, parsed, contracts = analyze_equation(equation)
+        eq_reviews = (
+            reviewed_contracts.get(equation.equation_id, ())
+            if reviewed_contracts
+            else ()
+        )
+        analysis, parsed, contracts = analyze_equation(
+            equation, reviewed_contracts=eq_reviews,
+        )
         equation_payload = equation.model_dump(mode="json")
-        equation_payload["formula_analysis"] = analysis
         equation_uuid = node(
             "Equation", equation.equation_id, equation_payload, episode_uuid,
         )
+        analyses.append(make_analysis_version(equation_uuid, _json(equation_payload), analysis))
         source_uuid = section_nodes.get(equation.section_id, version_uuid)
         source_type = "Section" if equation.section_id else "PaperVersion"
         edge(source_uuid, equation_uuid, source_type, "Equation", "contains", episode_uuid,
@@ -139,8 +157,8 @@ def build_evidence_graph(
                         "domain": contract.domain,
                         "constraints": contract.constraints,
                         "scope": contract.scope,
-                        "confidence": contract.confidence,
-                        "confirmed": contract.confirmed,
+                        "inference_confidence": contract.inference_confidence,
+                        "review_required": contract.review_required,
                     },
                     episode_uuid,
                 )
@@ -159,11 +177,15 @@ def build_evidence_graph(
         import_uuid=root.uuid, group_id=root.group_id, paper_id=paper.paper_id,
         version=paper.version, source_sha256=paper.source_sha256,
         paper_version_uuid=version_uuid, episodes=episodes, nodes=nodes, edges=edges,
+        analyses=analyses,
     )
 
 
 def analyze_equation(
     equation: ExtractedEquation,
+    reviewed_contracts: Iterable[ReviewedContractValue] = (),
+    *,
+    operator_versions: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, object], ParsedFormula | None, list[SymbolContract]]:
     """Return bounded, deterministic analysis without rejecting an entire import."""
     try:
@@ -188,20 +210,57 @@ def analyze_equation(
         extraction_confidence=equation.confidence,
     )
     result_shape, shape_errors = infer_expression_shape(contracts, parsed)
-    domain_errors = check_denominator_domain(contracts, parsed)
-    requires_confirmation = any(not contract.confirmed for contract in contracts)
+    domain_assessment = assess_domain_obligations(
+        infer_domain_obligations(contracts, parsed)
+    )
+    requires_review = any(contract.review_required for contract in contracts)
+    scope_id = equation.section_id or equation.equation_id
+    active_operators = (
+        dict(operator_versions)
+        if operator_versions is not None
+        else CORE_OPERATOR_VERSIONS
+    )
+    semantic_identity_payload = None
+    try:
+        sem_id = build_semantic_identity(
+            parsed,
+            reviewed_contracts,
+            scope_id=scope_id,
+            operator_versions=active_operators,
+        )
+        semantic_identity_payload = {
+            "semantic_hash": sem_id.semantic_hash,
+            "semantic_hash_version": sem_id.semantic_hash_version,
+            "canonicalizer_version": sem_id.canonicalizer_version,
+            "scoped_symbol_version": sem_id.scoped_symbol_version,
+            "complete_contracts": sem_id.complete_contracts,
+            "unresolved_symbols": list(sem_id.unresolved_symbols),
+            "typed_ir": sem_id.typed_ir.to_dict(),
+        }
+    except Exception:
+        semantic_identity_payload = None
     status = (
         "invalid"
-        if shape_errors or domain_errors
-        else "needs_confirmation"
-        if requires_confirmation
-        else "well_typed"
+        if shape_errors or domain_assessment.status == "contradictory"
+        else "needs_review"
+        if requires_review
+        else "needs_domain_assumptions"
+        if domain_assessment.status == "unresolved"
+        else "analyzed"
     )
     return (
         {
             "status": status,
             "ast": parsed.root.to_dict(),
+            "syntax_hash": parsed.syntax_hash,
+            "syntax_hash_version": parsed.syntax_hash_version,
+            "canonicalizer_version": parsed.canonicalizer_version,
             "canonical_hash": parsed.canonical_hash,
+            "semantic_identity": semantic_identity_payload,
+            "extraction_assessment": {
+                "confidence": equation.confidence,
+                "source": "equation_extraction",
+            },
             "free_variables": list(parsed.free_variables),
             "bound_variables": list(parsed.bound_variables),
             "symbols": [symbol.to_dict() for symbol in parsed.symbols],
@@ -215,15 +274,8 @@ def analyze_equation(
                 }
                 for error in shape_errors
             ],
-            "domain_errors": [
-                {
-                    "message": error.message,
-                    "location": error.location,
-                    "symbols": [error.symbol],
-                }
-                for error in domain_errors
-            ],
-            "requires_confirmation": requires_confirmation,
+            "domain_assessment": domain_assessment.model_dump(mode="json"),
+            "requires_review": requires_review,
         },
         parsed,
         contracts,

@@ -174,18 +174,22 @@ const completedGraph: EvidenceGraphSnapshotResponse = {
         ...(index === 0
           ? {
               formula_analysis: {
-                status: 'well_typed',
+                status: 'analyzed',
                 canonical_hash: 'b'.repeat(64),
-                requires_confirmation: false,
+                requires_review: false,
                 shape_errors: [],
-                domain_errors: [],
+                domain_assessment: {
+                  status: 'discharged',
+                  obligations: [],
+                  contradictions: [],
+                },
                 contracts: [
                   {
                     name: 'x',
                     category: 'scalar',
                     shape: [],
-                    confidence: 0.98,
-                    confirmed: true,
+                    inference_confidence: 0.98,
+                    review_required: false,
                   },
                 ],
               },
@@ -244,7 +248,10 @@ afterEach(() => {
 
 describe('ResearchWorkspace import interaction', () => {
   it('labels the initial graph as a curated seven-equation demo', () => {
-    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(emptyGraph)));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(emptyGraph)),
+    );
     render(
       <ResearchWorkspace
         user={{ displayName: 'Researcher', email: 'researcher@example.com' }}
@@ -256,7 +263,10 @@ describe('ResearchWorkspace import interaction', () => {
   });
 
   it('restores the persisted graph on reload without a new import', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(completedGraph)));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(completedGraph)),
+    );
     render(
       <ResearchWorkspace
         user={{ displayName: 'Researcher', email: 'researcher@example.com' }}
@@ -267,7 +277,7 @@ describe('ResearchWorkspace import interaction', () => {
     expect(screen.getByText('4 saved nodes · 3 relations')).toBeTruthy();
     expect(screen.getByText('Formula Graph Research')).toBeTruthy();
     expect(screen.getByText('Formula identity')).toBeTruthy();
-    expect(screen.getByText('well typed')).toBeTruthy();
+    expect(screen.getByText('analyzed')).toBeTruthy();
     expect(screen.getByLabelText('Inferred symbol contracts')).toBeTruthy();
   });
 
@@ -291,7 +301,9 @@ describe('ResearchWorkspace import interaction', () => {
       />,
     );
 
-    const input = screen.getByRole('textbox', { name: /arXiv HTML paper URL/i });
+    const input = screen.getByRole('textbox', {
+      name: /arXiv HTML paper URL/i,
+    });
     await user.clear(input);
     await user.type(input, 'https://arxiv.org/abs/2402.08954');
     await user.click(screen.getByRole('button', { name: 'Import paper' }));
@@ -488,5 +500,71 @@ describe('provenance inspector', () => {
 
     expect(inspector.episodeIds).toEqual(['episode-a', 'episode-b']);
     expect(inspector.relations[0].episodeCount).toBe(2);
+  });
+
+  it('collapses and expands the left source panel', async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <ResearchWorkspace user={{ displayName: 'Test User', email: 'test@example.com' }} />,
+    );
+
+    const grid = container.querySelector('.research-grid');
+    const sourcePanel = container.querySelector('.source-panel');
+    expect(grid).toBeTruthy();
+    expect(grid?.classList.contains('is-left-collapsed')).toBe(false);
+    expect(sourcePanel?.classList.contains('is-collapsed')).toBe(false);
+
+    // Collapse left sidebar
+    const collapseLeftBtn = screen.getByRole('button', {
+      name: /collapse paper sources/i,
+    });
+    await user.click(collapseLeftBtn);
+
+    expect(grid?.classList.contains('is-left-collapsed')).toBe(true);
+    expect(sourcePanel?.classList.contains('is-collapsed')).toBe(true);
+
+    // Expand button appears in graph-header
+    const expandSourcesBtn = screen.getByRole('button', {
+      name: /expand paper sources/i,
+    });
+    expect(expandSourcesBtn).toBeTruthy();
+
+    // Click expand button to restore
+    await user.click(expandSourcesBtn);
+    expect(grid?.classList.contains('is-left-collapsed')).toBe(false);
+    expect(sourcePanel?.classList.contains('is-collapsed')).toBe(false);
+  });
+
+  it('collapses and expands the right inspector panel', async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <ResearchWorkspace user={{ displayName: 'Test User', email: 'test@example.com' }} />,
+    );
+
+    const grid = container.querySelector('.research-grid');
+    const inspectorPanel = container.querySelector('.inspector-panel');
+    expect(grid).toBeTruthy();
+    expect(grid?.classList.contains('is-right-collapsed')).toBe(false);
+    expect(inspectorPanel?.classList.contains('is-collapsed')).toBe(false);
+
+    // Collapse right sidebar
+    const collapseRightBtn = screen.getByRole('button', {
+      name: /collapse inspector/i,
+    });
+    await user.click(collapseRightBtn);
+
+    expect(grid?.classList.contains('is-right-collapsed')).toBe(true);
+    expect(inspectorPanel?.classList.contains('is-collapsed')).toBe(true);
+
+    // Expand button appears in graph-header
+    const expandInspectorBtn = screen.getByRole('button', {
+      name: /expand inspector/i,
+    });
+    expect(expandInspectorBtn).toBeTruthy();
+
+    // Click expand button to restore
+    await user.click(expandInspectorBtn);
+    expect(grid?.classList.contains('is-right-collapsed')).toBe(false);
+    expect(inspectorPanel?.classList.contains('is-collapsed')).toBe(false);
   });
 });

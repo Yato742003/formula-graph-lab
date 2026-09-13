@@ -15,12 +15,19 @@ def test_exact_graph_preserves_every_formula_and_source_episode():
     graph = build_evidence_graph(paper, workspace_id="a")
     equations = [n for n in graph.nodes if n["kind"] == "Equation"]
     payloads = [json.loads(n["payload"]) for n in equations]
-    for payload, equation in zip(payloads, paper.equations, strict=True):
-        analysis = payload.pop("formula_analysis")
+    for payload, equation, version in zip(payloads, paper.equations, graph.analyses, strict=True):
+        assert "formula_analysis" not in payload
+        analysis = json.loads(version["payload"])
         assert payload == equation.model_dump(mode="json")
-        assert analysis["status"] == "well_typed"
+        assert analysis["status"] in {"analyzed", "needs_domain_assumptions"}
+        assert analysis["extraction_assessment"]["source"] == "equation_extraction"
+        assert "domain_assessment" in analysis
         assert len(analysis["canonical_hash"]) == 64
+        assert analysis["syntax_hash"] == analysis["canonical_hash"]
+        assert analysis["syntax_hash_version"] == "syntax-hash.v3"
         assert analysis["contracts"]
+        assert analysis["semantic_identity"] is not None
+        assert len(analysis["semantic_identity"]["semantic_hash"]) == 64
     symbols = [node for node in graph.nodes if node["kind"] == "Symbol"]
     assert symbols
     symbol_ids = {node["uuid"] for node in symbols}
