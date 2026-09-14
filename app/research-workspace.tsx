@@ -10,6 +10,7 @@ import {
   GitBranch,
   History,
   Link2,
+  Loader2,
   Network,
   PanelLeftClose,
   PanelLeftOpen,
@@ -1011,7 +1012,11 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                 maxLength={500}
               />
               <Button type="submit" disabled={isSearching}>
-                <Search size={15} />
+                {isSearching ? (
+                  <Loader2 size={15} className="animate-spin" />
+                ) : (
+                  <Search size={15} />
+                )}
                 {isSearching ? 'Searching…' : 'Search evidence'}
               </Button>
             </form>
@@ -1091,12 +1096,13 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
       ) : null}
 
       <section className="import-strip" aria-label="Import a paper">
-        <div className="import-label">
+        <label htmlFor="paper-url-input" className="import-label cursor-pointer">
           <Link2 size={16} />
           HTML source
-        </div>
+        </label>
         <form className="import-form" onSubmit={handleImport}>
           <Input
+            id="paper-url-input"
             aria-label="arXiv HTML paper URL"
             value={paperUrl}
             onChange={(event) => setPaperUrl(event.target.value)}
@@ -1108,7 +1114,11 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
             type="submit"
             disabled={isImporting}
           >
-            <Plus size={16} />
+            {isImporting ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Plus size={16} />
+            )}
             {isImporting ? 'Importing…' : 'Import paper'}
           </Button>
         </form>
