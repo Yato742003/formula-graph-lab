@@ -286,7 +286,11 @@ function mockApi(
   );
 }
 
-function compilerReplayReport(candidateId: string, activityId: string) {
+function compilerReplayReport(
+  candidateId: string,
+  activityId: string,
+  includeResearchCase = false,
+) {
   return {
     schema_version: 'compiler-replay-report.v1',
     report_hash: 'e'.repeat(64),
@@ -343,8 +347,18 @@ function compilerReplayReport(candidateId: string, activityId: string) {
       replay_status: 'replayed',
       performance_claim: false,
     }],
-    research_cases: [],
-    empirical_experiment: 'not_run',
+    research_cases: includeResearchCase ? [{
+      result_id: 'exp_' + '5'.repeat(32),
+      binding_id: 'bind_' + '6'.repeat(32),
+      outcome: 'failed_on_protocol',
+      holdout_mean: 0.002,
+      holdout_ci95_low: 0.001,
+      holdout_ci95_high: 0.003,
+      claim_scope: 'synthetic_operator_only_no_product_claim',
+      replay_status: 'replayed',
+      performance_claim: false,
+    }] : [],
+    empirical_experiment: includeResearchCase ? 'failed_on_protocol' : 'not_run',
     limitations: [
       'Compiler replay and stored checks only.',
       'Synthetic fixture is diagnostic only.',
@@ -1313,6 +1327,7 @@ it('opens a scoped partial replay report only for the selected saved activity', 
   const report = compilerReplayReport(
     saved.candidate.candidate_id,
     saved.activity.activity_id,
+    true,
   );
   const correctBundle = {
     schema_version: 'compiler-replay-bundle.v1',
@@ -1380,13 +1395,14 @@ it('opens a scoped partial replay report only for the selected saved activity', 
   await user.click(openReport);
 
   expect(await screen.findByText(
-    'Replay report · not run',
+    'Replay report · failed on protocol',
   )).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Refresh report' }).getAttribute('aria-expanded')).toBe('true');
   expect(screen.getByText(/does not establish general mathematical correctness/i)).toBeTruthy();
   expect(screen.getByText(/Policy decisions · not mathematical verdicts/i)).toBeTruthy();
   expect(screen.getByText(/rerun from frozen policy input/i)).toBeTruthy();
   expect(screen.getByText(/Synthetic diagnostics · not empirical evidence/i)).toBeTruthy();
+  expect(screen.getByText(/Registered CPU research cases/i)).toBeTruthy();
   expect(screen.getByText('Replayed; receipt matched')).toBeTruthy();
   expect(screen.getByText(/rerun from frozen input/i)).toBeTruthy();
   expect(screen.getByRole('link', { name: /Open HTML source/i }).getAttribute('href'))
