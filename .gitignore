@@ -34,6 +34,7 @@ yarn-error.log*
 /.venv/
 /.logs/
 /.services.pids.json
+/docs/
 
 # deployment and generated files
 .vercel
