@@ -18,6 +18,9 @@ from app.paper_artifact_manifest import PERFORMER_COMMIT, PERFORMER_SOURCE_SHA25
 from app.paper_attention_worker import PROTOCOL_VERSION as PERFORMER_PROTOCOL_VERSION
 from app.paper_attention_worker import SEEDS as PERFORMER_SEEDS
 from app.paper_attention_worker import SEQUENCE_LENGTHS as PERFORMER_SEQUENCE_LENGTHS
+from app.research_case_worker import PROTOCOL_VERSION as RESEARCH_CASE_PROTOCOL_VERSION
+from app.research_case_worker import SEEDS as RESEARCH_CASE_SEEDS
+from app.research_case_worker import SEQUENCE_LENGTHS as RESEARCH_CASE_SEQUENCE_LENGTHS
 
 MAX_INPUT_BYTES = 192 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024
@@ -43,7 +46,9 @@ def container_command(
     name: str,
     timeout_ms: int,
     *,
-    worker_kind: Literal["symbolic", "numerical", "experiment", "performer"] = "symbolic",
+    worker_kind: Literal[
+        "symbolic", "numerical", "experiment", "performer", "research_case"
+    ] = "symbolic",
 ) -> list[str]:
     if not IMAGE_ID.fullmatch(image) or not re.fullmatch(r"fgl-check-[0-9a-f]{32}", name):
         raise ValueError("Invalid sandbox identity.")
@@ -54,6 +59,7 @@ def container_command(
         "numerical": "app.numerical_worker",
         "experiment": "app.experiment_worker",
         "performer": "app.paper_attention_worker",
+        "research_case": "app.research_case_worker",
     }
     if worker_kind not in worker_modules:
         raise ValueError("Unknown sandbox worker kind.")
@@ -156,12 +162,22 @@ def run_performer_sandbox(
     return _run_sandbox(payload, timeout_ms=timeout_ms, image=image, worker_kind="performer")
 
 
+def run_research_case_sandbox(
+    payload: dict[str, object], *, timeout_ms: int, image: str,
+) -> dict[str, object]:
+    return _run_sandbox(
+        payload, timeout_ms=timeout_ms, image=image, worker_kind="research_case"
+    )
+
+
 def _run_sandbox(
     payload: dict[str, object],
     *,
     timeout_ms: int,
     image: str,
-    worker_kind: Literal["symbolic", "numerical", "experiment", "performer"],
+    worker_kind: Literal[
+        "symbolic", "numerical", "experiment", "performer", "research_case"
+    ],
 ) -> dict[str, object]:
     raw = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
     if len(raw) > MAX_INPUT_BYTES:
@@ -184,15 +200,14 @@ def _run_sandbox(
             return {"outcome": "timeout", "error_code": "SANDBOX_RESOURCE_OR_TIME_LIMIT"}
         if code:
             return {"outcome": "error", "error_code": "SANDBOX_FAILED"}
-        validator = (
-            validate_worker_result
-            if worker_kind == "symbolic"
-            else validate_numerical_worker_result
-            if worker_kind == "numerical"
-            else validate_experiment_worker_result
-            if worker_kind == "experiment"
-            else validate_performer_worker_result
-        )
+        validators = {
+            "symbolic": validate_worker_result,
+            "numerical": validate_numerical_worker_result,
+            "experiment": validate_experiment_worker_result,
+            "performer": validate_performer_worker_result,
+            "research_case": validate_research_case_worker_result,
+        }
+        validator = validators[worker_kind]
         return validator(output)
     except subprocess.TimeoutExpired:
         return {"outcome": "timeout", "error_code": "WALL_CLOCK_TIMEOUT"}
@@ -467,6 +482,76 @@ def validate_performer_worker_result(output: bytes) -> dict[str, object]:
         not isinstance(value, str) or not 1 <= len(value) <= 100
         for value in environment.values()
     ) or environment["backend"] != "cpu":
+        return invalid
+    if result["outcome"] == "passed_suite" and not all(checks.values()):
+        return invalid
+    if result["outcome"] == "counterexample" and all(checks.values()):
+        return invalid
+    return result
+
+
+def validate_research_case_worker_result(output: bytes) -> dict[str, object]:
+    """Accept only the registered rank-matched research-case result schema."""
+    invalid = {"outcome": "error", "error_code": "INVALID_RESEARCH_CASE_RESPONSE"}
+    try:
+        result = json.loads(output)
+        json.dumps(result, allow_nan=False)
+    except (ValueError, TypeError, UnicodeError):
+        return invalid
+    if result == {"outcome": "error", "error_code": "INVALID_RESEARCH_CASE_INPUT"}:
+        return result
+    if not isinstance(result, dict) or set(result) != {
+        "outcome", "protocol_version", "candidate_hash", "seed", "split", "input_hash",
+        "checks", "measurements", "environment",
+    }:
+        return invalid
+    if (
+        result["outcome"] not in {"passed_suite", "counterexample"}
+        or result["protocol_version"] != RESEARCH_CASE_PROTOCOL_VERSION
+        or not isinstance(result["candidate_hash"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", result["candidate_hash"])
+        or type(result["seed"]) is not int
+        or result["seed"] not in RESEARCH_CASE_SEEDS
+        or result["split"] not in {"search", "validation", "holdout"}
+        or not isinstance(result["input_hash"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", result["input_hash"])
+    ):
+        return invalid
+    checks = result["checks"]
+    if not isinstance(checks, dict) or set(checks) != {
+        "matched_feature_budget", "causal_future_perturbation", "finite_outputs",
+    } or any(type(value) is not bool for value in checks.values()):
+        return invalid
+    metrics = {
+        "feature_budget", "parent_a_mean_abs_error_vs_exact",
+        "parent_b_mean_abs_error_vs_exact", "candidate_mean_abs_error_vs_exact",
+        "candidate_regret_vs_best_parent", "causal_future_perturbation_max_abs_error",
+    }
+    measurements = result["measurements"]
+    if not isinstance(measurements, list) or len(measurements) != len(
+        RESEARCH_CASE_SEQUENCE_LENGTHS
+    ) or any(
+        not isinstance(item, dict)
+        or set(item) != {"sequence_length", *metrics}
+        or item["sequence_length"] != RESEARCH_CASE_SEQUENCE_LENGTHS[index]
+        or type(item["feature_budget"]) is not int
+        or item["feature_budget"] <= 0
+        or any(
+            type(item[name]) not in (int, float) or not math.isfinite(item[name])
+            for name in metrics - {"feature_budget"}
+        )
+        for index, item in enumerate(measurements)
+    ):
+        return invalid
+    environment = result["environment"]
+    if not isinstance(environment, dict) or set(environment) != {
+        "implementation", "python", "backend", "protocol",
+    } or environment.get("backend") != "stdlib-cpu" or environment.get(
+        "protocol"
+    ) != RESEARCH_CASE_PROTOCOL_VERSION or any(
+        not isinstance(value, str) or not 1 <= len(value) <= 100
+        for value in environment.values()
+    ):
         return invalid
     if result["outcome"] == "passed_suite" and not all(checks.values()):
         return invalid
