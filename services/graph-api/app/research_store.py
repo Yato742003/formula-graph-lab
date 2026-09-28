@@ -2859,11 +2859,16 @@ class Neo4jResearchStore:
             if existing is None:
                 await tx.run(
                     f"CREATE (r:{label} {{{identity_field}:$identity, group_id:$group, "
-                    "workspace_id:$workspace, candidate_id:$candidate_id, payload:$payload})",
+                    "workspace_id:$workspace, candidate_id:$candidate_id, "
+                    "created_at:$created_at, payload:$payload})",
                     identity=identity,
                     group=group_id,
                     workspace=workspace_id,
                     candidate_id=candidate_id,
+                    created_at=(
+                        binding.created_at if label == "ResearchImplementationBinding"
+                        else result.created_at
+                    ).isoformat(),
                     payload=payload,
                 )
         await tx.run(
