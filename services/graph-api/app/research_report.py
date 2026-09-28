@@ -17,6 +17,7 @@ from app.replay_bundle import (
     ReplaySourceReference,
     replay_candidate_from_bundle,
 )
+from app.research_case import ResearchCaseReceipt
 
 _HASH = r"^[0-9a-f]{64}$"
 
@@ -55,6 +56,18 @@ class FixtureEvidence(FrozenInput):
     performance_claim: Literal[False] = False
 
 
+class ResearchCaseEvidence(FrozenInput):
+    result_id: str = Field(pattern=r"^exp_[0-9a-f]{32}$")
+    binding_id: str = Field(pattern=r"^bind_[0-9a-f]{32}$")
+    outcome: Literal["supported_on_protocol", "failed_on_protocol", "inconclusive"]
+    holdout_mean: float | None = None
+    holdout_ci95_low: float | None = None
+    holdout_ci95_high: float | None = None
+    claim_scope: Literal["synthetic_operator_only_no_product_claim"]
+    replay_status: Literal["replayed", "stored_only"]
+    performance_claim: Literal[False] = False
+
+
 class CompilerReplayReport(FrozenInput):
     schema_version: Literal["compiler-replay-report.v1"] = "compiler-replay-report.v1"
     report_hash: str = Field(pattern=_HASH)
@@ -76,7 +89,10 @@ class CompilerReplayReport(FrozenInput):
     checks: tuple[CheckEvidence, ...] = Field(max_length=32)
     policy_decisions: tuple[PolicyEvidence, ...] = Field(max_length=32)
     numerical_fixtures: tuple[FixtureEvidence, ...] = Field(max_length=32)
-    empirical_experiment: Literal["not_run"] = "not_run"
+    research_cases: tuple[ResearchCaseEvidence, ...] = Field(max_length=32)
+    empirical_experiment: Literal[
+        "not_run", "supported_on_protocol", "failed_on_protocol", "inconclusive"
+    ] = "not_run"
     limitations: tuple[str, ...] = Field(min_length=3, max_length=3)
 
     @model_validator(mode="after")
@@ -105,6 +121,11 @@ def build_compiler_replay_report(bundle: CompilerReplayBundle) -> CompilerReplay
         for item in bundle.admission_decisions
     )
     fixtures = tuple(_fixture_evidence(item) for item in bundle.numerical_fixtures)
+    research_cases = tuple(
+        _research_case_evidence(item, replayed=item.outcome != "inconclusive")
+        for item in bundle.research_cases
+    )
+    empirical_experiment = _research_case_summary(bundle.research_cases)
     payload = {
         "schema_version": "compiler-replay-report.v1",
         "status": "partial",
@@ -127,7 +148,8 @@ def build_compiler_replay_report(bundle: CompilerReplayBundle) -> CompilerReplay
         "checks": [item.model_dump(mode="json") for item in checks],
         "policy_decisions": [item.model_dump(mode="json") for item in policies],
         "numerical_fixtures": [item.model_dump(mode="json") for item in fixtures],
-        "empirical_experiment": "not_run",
+        "research_cases": [item.model_dump(mode="json") for item in research_cases],
+        "empirical_experiment": empirical_experiment,
         "limitations": [
             (
                 "The compiler is replayed; when present, current-version static checks "
@@ -135,14 +157,14 @@ def build_compiler_replay_report(bundle: CompilerReplayBundle) -> CompilerReplay
                 "are not rerun."
             ),
             (
-                "Admission decisions with frozen server-input snapshots and completed "
-                "current-version numerical fixtures are rerun. Legacy policy records and "
-                "incomplete numerical outcomes remain stored receipts. Bundle and report "
-                "hashes are not signatures; synthetic checks are not performance evidence."
+                "Admission decisions, completed numerical fixtures, and completed registered "
+                "CPU research cases are rerun. Legacy policy records and incomplete outcomes "
+                "remain stored receipts. Bundle and report hashes are not signatures."
             ),
             (
-                "No frozen dataset/model artifact, matched-control evaluator, or "
-                "protected holdout run is bound here."
+                "The registered research case is a deterministic synthetic matched-control "
+                "protocol only; it is not author code, a product benchmark, or a claim of "
+                "real-world model performance."
             ),
         ],
     }
@@ -191,3 +213,32 @@ def _fixture_evidence(item: NumericalFixtureReceipt) -> FixtureEvidence:
         ),
         performance_claim=item.performance_claim,
     )
+
+
+def _research_case_evidence(
+    item: ResearchCaseReceipt, *, replayed: bool
+) -> ResearchCaseEvidence:
+    return ResearchCaseEvidence(
+        result_id=item.result_id,
+        binding_id=item.binding_id,
+        outcome=item.outcome,
+        holdout_mean=item.holdout_mean,
+        holdout_ci95_low=item.holdout_ci95_low,
+        holdout_ci95_high=item.holdout_ci95_high,
+        claim_scope=item.claim_scope,
+        replay_status="replayed" if replayed else "stored_only",
+        performance_claim=False,
+    )
+
+
+def _research_case_summary(
+    items: tuple[ResearchCaseReceipt, ...],
+) -> Literal["not_run", "supported_on_protocol", "failed_on_protocol", "inconclusive"]:
+    if not items:
+        return "not_run"
+    outcomes = {item.outcome for item in items}
+    if outcomes == {"supported_on_protocol"}:
+        return "supported_on_protocol"
+    if outcomes == {"failed_on_protocol"}:
+        return "failed_on_protocol"
+    return "inconclusive"

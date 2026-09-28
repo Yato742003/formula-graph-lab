@@ -4299,8 +4299,30 @@ class Neo4jResearchStore:
             )
             fixtures = [NumericalFixtureReceipt.model_validate_json(item["payload"])
                         async for item in fixture_result]
+            research_case_result = await session.run(
+                "MATCH (:ResearchCandidate {candidate_id:$candidate_id,group_id:$group})-"
+                "[:HAS_IMPLEMENTATION_BINDING]->"
+                "(b:ResearchImplementationBinding {group_id:$group})-"
+                "[:PRODUCED_EXPERIMENT_RESULT]->"
+                "(r:ResearchExperimentResult {group_id:$group}) "
+                "RETURN b.payload AS binding,r.payload AS result "
+                "ORDER BY r.created_at,r.result_id LIMIT 33",
+                candidate_id=candidate_id,
+                group=group_id,
+            )
+            implementation_bindings = []
+            research_cases = []
+            async for item in research_case_result:
+                implementation_bindings.append(
+                    ImplementationBindingReceipt.model_validate_json(item["binding"])
+                )
+                research_cases.append(
+                    ResearchCaseReceipt.model_validate_json(item["result"])
+                )
 
-        if any(len(items) > 32 for items in (checks, admissions, fixtures)):
+        if any(len(items) > 32 for items in (
+            checks, admissions, fixtures, implementation_bindings, research_cases
+        )):
             raise ResearchValidationError("Replay bundle result history exceeds its bounded limit.")
         try:
             return make_compiler_replay_bundle(
@@ -4318,6 +4340,8 @@ class Neo4jResearchStore:
                 admission_decisions=tuple(admissions),
                 admission_replay_inputs=tuple(admission_replay_inputs),
                 numerical_fixtures=tuple(fixtures),
+                implementation_bindings=tuple(implementation_bindings),
+                research_cases=tuple(research_cases),
             )
         except ValueError as exc:
             raise ResearchStoreError(

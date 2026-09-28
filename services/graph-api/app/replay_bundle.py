@@ -26,6 +26,12 @@ from app.numerical_verification import (
 from app.numerical_worker import SUITE_VERSION, _evaluate
 from app.problem_spec import FrozenInput
 from app.proposals import ProposalReviewRecord, ResearchProposal, parse_source_span_id
+from app.research_case import (
+    ImplementationBindingReceipt,
+    ResearchCaseReceipt,
+    run_registered_research_case,
+)
+from app.research_case_worker import evaluate as evaluate_research_case
 from app.research_compiler import (
     CompileContext,
     CompiledCandidate,
@@ -99,6 +105,10 @@ class CompilerReplayBundle(FrozenInput):
         default=(), max_length=32,
     )
     numerical_fixtures: tuple[NumericalFixtureReceipt, ...] = Field(max_length=32)
+    implementation_bindings: tuple[ImplementationBindingReceipt, ...] = Field(
+        default=(), max_length=32,
+    )
+    research_cases: tuple[ResearchCaseReceipt, ...] = Field(default=(), max_length=32)
     bundle_hash: str = Field(pattern=_HASH)
 
     @model_validator(mode="after")
@@ -157,6 +167,37 @@ class CompilerReplayBundle(FrozenInput):
             for item in self.numerical_fixtures
         ):
             raise ValueError("Replay bundle contains a misbound or promotional numerical fixture.")
+
+        bindings_by_id = {item.binding_id: item for item in self.implementation_bindings}
+        if len(bindings_by_id) != len(self.implementation_bindings):
+            raise ValueError("Replay bundle implementation bindings must be unique.")
+        for binding in self.implementation_bindings:
+            if (
+                binding.workspace_id != self.workspace_id
+                or binding.candidate_id != self.candidate.candidate_id
+                or binding.candidate_hash != self.candidate.content_hash
+                or binding.problem_spec_id != self.candidate.problem_spec_id
+                or binding.problem_spec_hash != self.candidate.problem_spec_hash
+                or binding.parent_refs != self.candidate.parents
+            ):
+                raise ValueError("Replay bundle contains a misbound implementation binding.")
+        result_ids = {item.result_id for item in self.research_cases}
+        if len(result_ids) != len(self.research_cases):
+            raise ValueError("Replay bundle research cases must be unique.")
+        for result in self.research_cases:
+            binding = bindings_by_id.get(result.binding_id)
+            if (
+                result.workspace_id != self.workspace_id
+                or result.candidate_id != self.candidate.candidate_id
+                or result.candidate_hash != self.candidate.content_hash
+                or result.problem_spec_id != self.candidate.problem_spec_id
+                or result.problem_spec_hash != self.candidate.problem_spec_hash
+                or result.parent_refs != self.candidate.parents
+                or binding is None
+                or result.binding_hash != binding.binding_hash
+                or result.protocol_hash != binding.protocol_hash
+            ):
+                raise ValueError("Replay bundle contains a misbound research case.")
 
         if self.activity.compiler_context_json is None:
             raise ValueError("Replay bundle requires a versioned compiler context.")
@@ -283,12 +324,23 @@ class CompilerReplayBundle(FrozenInput):
         expected_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
         if self.bundle_hash != expected_hash:
             legacy_identity = self.model_dump(
-                mode="json", exclude={"bundle_hash", "admission_replay_inputs"}
+                mode="json",
+                exclude={
+                    "bundle_hash",
+                    "admission_replay_inputs",
+                    "implementation_bindings",
+                    "research_cases",
+                },
             )
             legacy_hash = hashlib.sha256(
                 canonical_json(legacy_identity).encode("utf-8")
             ).hexdigest()
-            if self.admission_replay_inputs or self.bundle_hash != legacy_hash:
+            if (
+                self.admission_replay_inputs
+                or self.implementation_bindings
+                or self.research_cases
+                or self.bundle_hash != legacy_hash
+            ):
                 raise ValueError("Replay bundle hash does not match its immutable content.")
         return self
 
@@ -308,6 +360,8 @@ def make_compiler_replay_bundle(**values: object) -> CompilerReplayBundle:
     identity = {
         "schema_version": "compiler-replay-bundle.v1",
         "admission_replay_inputs": [],
+        "implementation_bindings": [],
+        "research_cases": [],
         **{key: to_json_value(value) for key, value in values.items()},
     }
     bundle_hash = hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
@@ -361,5 +415,34 @@ def replay_candidate_from_bundle(bundle: CompilerReplayBundle) -> CompiledCandid
         if canonical_json(reproduced) != canonical_json(expected):
             raise ValueError(
                 "Current-version numerical fixture outcome does not reproduce from this bundle."
+            )
+    bindings_by_id = {item.binding_id: item for item in validated.implementation_bindings}
+    replay_context = CompileContext.model_validate_json(validated.activity.compiler_context_json)
+    for receipt in validated.research_cases:
+        if receipt.outcome == "inconclusive":
+            continue
+        binding = bindings_by_id[receipt.binding_id]
+        reproduced = run_registered_research_case(
+            binding,
+            replayed,
+            replay_context.spec,
+            parent_candidate=parent,
+            actor_id=receipt.actor_id,
+            run_id=receipt.run_id,
+            worker_runner=lambda payload, **_kwargs: evaluate_research_case(payload),
+            now=receipt.created_at,
+        )
+        expected = receipt.model_dump(mode="json")
+        actual = reproduced.model_dump(mode="json")
+        # Wall-clock measurements are operational metadata, not scientific evidence.
+        expected["search_cost"].pop("wall_time_ms", None)
+        actual["search_cost"].pop("wall_time_ms", None)
+        expected.pop("result_id", None)
+        expected.pop("result_hash", None)
+        actual.pop("result_id", None)
+        actual.pop("result_hash", None)
+        if canonical_json(actual) != canonical_json(expected):
+            raise ValueError(
+                "Current-version research-case outcome does not reproduce from this bundle."
             )
     return replayed
