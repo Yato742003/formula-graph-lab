@@ -1,0 +1,133 @@
+{
+  "flow_id": "dashboard",
+  "flow_name": "Dashboard",
+  "flow_note": "The candidate evidence panel is the dominant dashboard flow; its no-candidate and unavailable states also use the empty-states checklist.",
+  "metric_target": "retention",
+  "phase": "both",
+  "preflight": {
+    "summary": "5 of 5 questions answered.",
+    "items": [
+      {
+        "id": "pf-1",
+        "question": "What is the primary task users return to complete?",
+        "why": "A dashboard should make one recurring task obvious.",
+        "linked_principle": "cognitive-load",
+        "status": "answered",
+        "evidence": "Review a candidate's source lineage, checker evidence, frozen policy and research-case result.",
+        "recommendation": null
+      },
+      {
+        "id": "pf-2",
+        "question": "Which evidence is authoritative versus exploratory?",
+        "why": "Trust depends on separating receipts from interpretation.",
+        "linked_principle": "visibility-of-system-status",
+        "status": "answered",
+        "evidence": "DSL, checker, policy, numerical fixture and registered research-case evidence are rendered as separate scopes.",
+        "recommendation": null
+      },
+      {
+        "id": "pf-3",
+        "question": "What happens when there is no candidate or result yet?",
+        "why": "Empty states should guide the next safe action.",
+        "linked_principle": "progressive-disclosure",
+        "status": "answered",
+        "evidence": "The panel offers candidate creation; the research-case card stays unavailable until a supported lowering candidate exists.",
+        "recommendation": null
+      },
+      {
+        "id": "pf-4",
+        "question": "How can users recover from an unavailable or failed run?",
+        "why": "Recovery prevents duplicate work and accidental retries.",
+        "linked_principle": "error-prevention",
+        "status": "answered",
+        "evidence": "Errors preserve the candidate, use a deterministic idempotency key and expose a safe retry message.",
+        "recommendation": null
+      },
+      {
+        "id": "pf-5",
+        "question": "Which actions are intentionally excluded from this surface?",
+        "why": "Removing speculative controls keeps the dashboard focused.",
+        "linked_principle": "choice-architecture",
+        "status": "answered",
+        "evidence": "The low-level numerical fixture is history-only; the single actionable research CTA is the frozen CPU protocol.",
+        "recommendation": null
+      }
+    ],
+    "gaps": []
+  },
+  "postflight": {
+    "summary": "7 of 7 checks passing. 0 critical failures.",
+    "ship_ready": true,
+    "items": [
+      {
+        "id": "po-1",
+        "check": "The primary dashboard action is visible without opening unrelated workflows.",
+        "linked_smell": "mystery-navigation",
+        "severity": "critical",
+        "status": "pass",
+        "evidence": "The frozen CPU research case is the only actionable experiment control for a lowering candidate.",
+        "recommendation": null
+      },
+      {
+        "id": "po-2",
+        "check": "Loading, success, failure and unavailable states communicate what changed.",
+        "linked_smell": "silent-errors",
+        "severity": "critical",
+        "status": "pass",
+        "evidence": "The UI uses live outputs, explicit outcome/replay labels and retry-safe notices.",
+        "recommendation": null
+      },
+      {
+        "id": "po-3",
+        "check": "Evidence scope and non-claims remain visible next to results.",
+        "linked_smell": "false-confidence",
+        "severity": "critical",
+        "status": "pass",
+        "evidence": "Every research-case result states synthetic_operator_only_no_product_claim and shows holdout uncertainty.",
+        "recommendation": null
+      },
+      {
+        "id": "po-4",
+        "check": "Empty history does not look like a successful zero-result state.",
+        "linked_smell": "empty-state-ambiguity",
+        "severity": "high",
+        "status": "pass",
+        "evidence": "No-result copy distinguishes no run from unavailable history and points to candidate creation.",
+        "recommendation": null
+      },
+      {
+        "id": "po-5",
+        "check": "The action is keyboard reachable and has a live progress announcement.",
+        "linked_smell": "inaccessible-controls",
+        "severity": "high",
+        "status": "pass",
+        "evidence": "The CTA is a button, the protocol card is labelled and progress uses aria-live output.",
+        "recommendation": null
+      },
+      {
+        "id": "po-6",
+        "check": "Replay and stored-only states are distinguishable.",
+        "linked_smell": "status-blindness",
+        "severity": "medium",
+        "status": "pass",
+        "evidence": "Report entries render replayed from frozen protocol versus stored receipt only.",
+        "recommendation": null
+      },
+      {
+        "id": "po-7",
+        "check": "The dashboard avoids duplicate calls during an in-flight request.",
+        "linked_smell": "double-submit",
+        "severity": "medium",
+        "status": "pass",
+        "evidence": "The researchCaseInFlight ref, disabled CTA and deterministic idempotency key are tested.",
+        "recommendation": null
+      }
+    ],
+    "critical_failures": [],
+    "high_failures": []
+  },
+  "key_principles": ["progressive-disclosure", "visibility-of-system-status", "error-prevention", "choice-architecture"],
+  "common_smells": ["mystery-navigation", "silent-errors", "false-confidence", "double-submit"],
+  "api_enriched": false,
+  "api_note": "Flow checklists require a pro API key for live smell linkage and severity metadata. Internal checklist used."
+}
