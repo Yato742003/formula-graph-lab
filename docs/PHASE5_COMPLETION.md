@@ -50,3 +50,4 @@ feature-flagged and requires explicit model/price configuration.
 - `d00e8b4` record UX flow audit
 - `d7f54af` retain research-case receipt ordering
 - `46bd5ee` bind research replay parents
+- `4a25869` cover research-case report evidence
