@@ -3924,6 +3924,7 @@ class Neo4jResearchStore:
             checks: dict[str, str] = {}
             admissions: dict[str, str] = {}
             numerical_fixtures: dict[str, str] = {}
+            research_cases: dict[str, dict[str, str]] = {}
             if candidate_ids:
                 check_rows = await session.run(
                     "MATCH (c:ResearchCandidate {group_id:$group})-[:HAS_CANDIDATE_CHECK]->"
@@ -3957,6 +3958,23 @@ class Neo4jResearchStore:
                 )
                 numerical_fixtures = {
                     row["candidate_id"]: row["payload"] async for row in fixture_rows
+                }
+                research_case_rows = await session.run(
+                    "MATCH (c:ResearchCandidate {group_id:$group})-"
+                    "[:HAS_IMPLEMENTATION_BINDING]->"
+                    "(b:ResearchImplementationBinding {group_id:$group})-"
+                    "[:PRODUCED_EXPERIMENT_RESULT]->"
+                    "(r:ResearchExperimentResult {group_id:$group}) "
+                    "WHERE c.candidate_id IN $ids WITH c,b,r ORDER BY r.created_at DESC "
+                    "WITH c.candidate_id AS candidate_id, "
+                    "collect({binding:b.payload,result:r.payload})[0] AS payload "
+                    "RETURN candidate_id,payload",
+                    group=group_id,
+                    ids=candidate_ids,
+                )
+                research_cases = {
+                    row["candidate_id"]: row["payload"]
+                    async for row in research_case_rows
                 }
 
         items: list[dict[str, Any]] = []
@@ -4011,6 +4029,27 @@ class Neo4jResearchStore:
                 or numerical_fixture.performance_claim
             ):
                 raise ResearchStoreError("Stored numerical fixture has an invalid scope.")
+            research_case = research_cases.get(candidate.candidate_id)
+            if research_case is not None:
+                if not isinstance(research_case, dict):
+                    raise ResearchStoreError("Stored research case has an invalid payload.")
+                binding = ImplementationBindingReceipt.model_validate_json(
+                    research_case["binding"]
+                )
+                experiment = ResearchCaseReceipt.model_validate_json(
+                    research_case["result"]
+                )
+                if (
+                    binding.workspace_id != workspace_id
+                    or binding.candidate_id != candidate.candidate_id
+                    or binding.candidate_hash != candidate.content_hash
+                    or experiment.workspace_id != workspace_id
+                    or experiment.candidate_id != candidate.candidate_id
+                    or experiment.candidate_hash != candidate.content_hash
+                    or experiment.binding_id != binding.binding_id
+                    or experiment.binding_hash != binding.binding_hash
+                ):
+                    raise ResearchStoreError("Stored research case has an invalid scope.")
 
             candidate_data = candidate.model_dump(mode="json")
             candidate_data.pop("ir_json")
@@ -4042,6 +4081,13 @@ class Neo4jResearchStore:
                     "fixture_scope": numerical_fixture.fixture_scope,
                     "performance_claim": False,
                 }
+            research_case_data = None
+            if research_case is not None:
+                research_case_data = {
+                    "binding": binding.model_dump(mode="json"),
+                    "result": experiment.model_dump(mode="json"),
+                    "replayed": False,
+                }
             items.append(
                 {
                     "candidate": candidate_data,
@@ -4049,6 +4095,7 @@ class Neo4jResearchStore:
                     "check": check_data,
                     "admission": admission.model_dump(mode="json") if admission else None,
                     "numerical_fixture": fixture_data,
+                    "research_case": research_case_data,
                 }
             )
         return items, int(count_row["total"]) if count_row else 0

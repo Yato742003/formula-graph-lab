@@ -458,6 +458,7 @@ type CandidateReceipt = {
   check: CandidateCheckReceipt | null;
   admission: AdmissionReceipt | null;
   numericalFixture: NumericalFixtureReceipt | null;
+  researchCase: ResearchCaseReceipt | null;
 };
 
 type NumericalFixtureReceipt = {
@@ -477,6 +478,21 @@ type NumericalFixtureReceipt = {
   tolerance: number;
   checks: Record<string, boolean>;
   errorCode: string | null;
+};
+
+type ResearchCaseReceipt = {
+  bindingId: string;
+  resultId: string;
+  outcome: 'supported_on_protocol' | 'failed_on_protocol' | 'inconclusive';
+  holdoutMean: number | null;
+  holdoutCi95Low: number | null;
+  holdoutCi95High: number | null;
+  claimScope: 'synthetic_operator_only_no_product_claim';
+  performanceClaim: false;
+};
+
+type ResearchCaseEvidenceView = ResearchCaseReceipt & {
+  replayStatus: 'replayed' | 'stored_only';
 };
 
 type CandidateCheckReceipt = {
@@ -546,6 +562,12 @@ type ReplayReportView = {
     seed: number;
     replayStatus: 'replayed' | 'stored_only';
   }[];
+  researchCases: ResearchCaseEvidenceView[];
+  empiricalExperiment:
+    | 'not_run'
+    | 'supported_on_protocol'
+    | 'failed_on_protocol'
+    | 'inconclusive';
   limitations: string[];
 };
 
@@ -569,13 +591,14 @@ function parseReplayReport(
     !['preserving', 'approximation', 'hypothesis_changing'].includes(String(value.semantics_class)) ||
     !['not_applicable', 'accepted_for_compilation'].includes(String(value.proposal_review_status)) ||
     value.compiler_replay !== 'reproduced' ||
-    value.empirical_experiment !== 'not_run' ||
+    !['not_run', 'supported_on_protocol', 'failed_on_protocol', 'inconclusive'].includes(String(value.empirical_experiment)) ||
     !Array.isArray(value.source_refs) || value.source_refs.length < 1 || value.source_refs.length > 16 ||
     !Array.isArray(value.lineage_assertion_ids) || value.lineage_assertion_ids.length > 200 ||
     value.lineage_assertion_ids.some((item) => typeof item !== 'string' || item.length > 200) ||
     !Array.isArray(value.checks) || value.checks.length > 32 ||
     !Array.isArray(value.policy_decisions) || value.policy_decisions.length > 32 ||
     !Array.isArray(value.numerical_fixtures) || value.numerical_fixtures.length > 32 ||
+    !Array.isArray(value.research_cases) || value.research_cases.length > 32 ||
     !Array.isArray(value.limitations) || value.limitations.length !== 3 ||
     value.limitations.some((item) => typeof item !== 'string' || !item.trim() || item.length > 500)
   ) throw new Error('Replay report did not match the selected candidate and activity.');
@@ -655,6 +678,30 @@ function parseReplayReport(
       replayStatus: item.replay_status as ReplayReportView['numericalFixtures'][number]['replayStatus'],
     };
   });
+  const researchCases = value.research_cases.map((item) => {
+    if (
+      !record(item) || typeof item.result_id !== 'string' || !/^exp_[a-f0-9]{32}$/.test(item.result_id) ||
+      typeof item.binding_id !== 'string' || !/^bind_[a-f0-9]{32}$/.test(item.binding_id) ||
+      !['supported_on_protocol', 'failed_on_protocol', 'inconclusive'].includes(String(item.outcome)) ||
+      item.claim_scope !== 'synthetic_operator_only_no_product_claim' ||
+      item.performance_claim !== false ||
+      !['replayed', 'stored_only'].includes(String(item.replay_status)) ||
+      (item.holdout_mean !== null && item.holdout_mean !== undefined && !Number.isFinite(item.holdout_mean)) ||
+      (item.holdout_ci95_low !== null && item.holdout_ci95_low !== undefined && !Number.isFinite(item.holdout_ci95_low)) ||
+      (item.holdout_ci95_high !== null && item.holdout_ci95_high !== undefined && !Number.isFinite(item.holdout_ci95_high))
+    ) throw new Error('Replay report contains an invalid registered research case.');
+    return {
+      bindingId: item.binding_id,
+      resultId: item.result_id,
+      outcome: item.outcome as ResearchCaseReceipt['outcome'],
+      holdoutMean: typeof item.holdout_mean === 'number' ? item.holdout_mean : null,
+      holdoutCi95Low: typeof item.holdout_ci95_low === 'number' ? item.holdout_ci95_low : null,
+      holdoutCi95High: typeof item.holdout_ci95_high === 'number' ? item.holdout_ci95_high : null,
+      claimScope: item.claim_scope as ResearchCaseReceipt['claimScope'],
+      performanceClaim: false as const,
+      replayStatus: item.replay_status as ResearchCaseEvidenceView['replayStatus'],
+    };
+  });
   return {
     reportHash: value.report_hash,
     bundleHash: value.bundle_hash,
@@ -668,6 +715,8 @@ function parseReplayReport(
     checks,
     policyDecisions,
     numericalFixtures,
+    researchCases,
+    empiricalExperiment: value.empirical_experiment as ReplayReportView['empiricalExperiment'],
     limitations: value.limitations as string[],
   };
 }
@@ -919,6 +968,7 @@ function parseReceipt(
     check: null,
     admission: null,
     numericalFixture: null,
+    researchCase: null,
   };
 }
 
@@ -1063,6 +1113,14 @@ function parseCandidateHistory(value: unknown): {
               base.candidateId,
               entry.candidate.problem_spec_id,
             ),
+      researchCase:
+        entry.research_case === undefined || entry.research_case === null
+          ? null
+          : parseResearchCase(
+              entry.research_case,
+              base.candidateId,
+              entry.candidate.problem_spec_id,
+            ),
     };
   });
   return { items, total: value.total as number };
@@ -1131,6 +1189,47 @@ function parseNumericalFixture(
     tolerance: result.tolerance as number,
     checks: checks as Record<string, boolean>,
     errorCode: typeof result.error_code === 'string' ? result.error_code : null,
+  };
+}
+
+function parseResearchCase(
+  value: unknown,
+  candidateId: string,
+  expectedSpecId?: string,
+): ResearchCaseReceipt {
+  if (!record(value)) throw new Error('Invalid registered research-case receipt.');
+  const result = record(value.result) ? value.result : value;
+  if (
+    typeof result.result_id !== 'string' || !/^exp_[a-f0-9]{32}$/.test(result.result_id) ||
+    typeof result.result_hash !== 'string' || !/^[a-f0-9]{64}$/.test(result.result_hash) ||
+    result.candidate_id !== candidateId ||
+    typeof result.problem_spec_id !== 'string' ||
+    (expectedSpecId !== undefined && result.problem_spec_id !== expectedSpecId) ||
+    typeof result.binding_id !== 'string' || !/^bind_[a-f0-9]{32}$/.test(result.binding_id) ||
+    typeof result.binding_hash !== 'string' || !/^[a-f0-9]{64}$/.test(result.binding_hash) ||
+    !['supported_on_protocol', 'failed_on_protocol', 'inconclusive'].includes(String(result.outcome)) ||
+    result.claim_scope !== 'synthetic_operator_only_no_product_claim' ||
+    result.performance_claim !== false ||
+    !Array.isArray(result.trials) || result.trials.length !== 5 ||
+    (result.holdout_mean !== null && result.holdout_mean !== undefined && !Number.isFinite(result.holdout_mean)) ||
+    (result.holdout_ci95_low !== null && result.holdout_ci95_low !== undefined && !Number.isFinite(result.holdout_ci95_low)) ||
+    (result.holdout_ci95_high !== null && result.holdout_ci95_high !== undefined && !Number.isFinite(result.holdout_ci95_high))
+  ) throw new Error('Registered research-case receipt has invalid scope or content.');
+  const binding = record(value.binding) ? value.binding : null;
+  if (
+    !binding || binding.candidate_id !== candidateId ||
+    binding.binding_id !== result.binding_id ||
+    binding.binding_hash !== result.binding_hash
+  ) throw new Error('Registered research-case binding does not match its result.');
+  return {
+    bindingId: result.binding_id,
+    resultId: result.result_id,
+    outcome: result.outcome as ResearchCaseReceipt['outcome'],
+    holdoutMean: typeof result.holdout_mean === 'number' ? result.holdout_mean : null,
+    holdoutCi95Low: typeof result.holdout_ci95_low === 'number' ? result.holdout_ci95_low : null,
+    holdoutCi95High: typeof result.holdout_ci95_high === 'number' ? result.holdout_ci95_high : null,
+    claimScope: result.claim_scope,
+    performanceClaim: false,
   };
 }
 
@@ -1265,9 +1364,9 @@ export default function ResearchMovePanel({
   const [dialogOpen, setDialogOpen] = useState(false);
   const [notice, setNotice] = useState('Loading frozen ProblemSpecs…');
   const [busy, setBusy] = useState(false);
-  const [fixtureBusy, setFixtureBusy] = useState(false);
+  const [researchCaseBusy, setResearchCaseBusy] = useState(false);
   const inFlight = useRef(false);
-  const fixtureInFlight = useRef(false);
+  const researchCaseInFlight = useRef(false);
   const retry = useRef<{ body: string; key: string } | null>(null);
   const verificationRetry = useRef<{ candidateId: string; key: string } | null>(
     null,
@@ -1302,10 +1401,6 @@ export default function ResearchMovePanel({
   const selectedMapping =
     eligibleMappings.find((mapping) => mapping.mappingId === mappingId) ??
     eligibleMappings[0];
-  const fixtureSpec = receipt
-    ? problems.find((problem) => problem.specId === receipt.specId)
-    : undefined;
-  const fixtureSeed = fixtureSpec?.seeds[0];
   const reportAttempt =
     receipt &&
     replayReportAttempt?.candidateId === receipt.candidateId &&
@@ -1326,7 +1421,7 @@ export default function ResearchMovePanel({
     parsedWeight >= 0 &&
     parsedWeight <= 1 &&
     !busy &&
-    !fixtureBusy,
+    !researchCaseBusy,
   );
   const canLower = Boolean(
     receipt &&
@@ -1336,14 +1431,14 @@ export default function ResearchMovePanel({
       (mapping) => mapping.mappingId === receipt.mappingId,
     ) &&
     !busy &&
-    !fixtureBusy,
+    !researchCaseBusy,
   );
-  const canRunFixture = Boolean(
+  const canRunResearchCase = Boolean(
     receipt &&
-    !receipt.numericalFixture &&
-    fixtureSeed !== undefined &&
+    receipt.operator === 'lower_mixture_to_concatenation' &&
+    !receipt.researchCase &&
     !busy &&
-    !fixtureBusy,
+    !researchCaseBusy,
   );
 
   useEffect(() => {
@@ -1734,31 +1829,30 @@ export default function ResearchMovePanel({
     }
   }
 
-  async function runNumericalFixture() {
+  async function runResearchCase() {
     const activeReceipt = receipt;
-    const seed = fixtureSeed;
     if (
       !activeReceipt ||
-      seed === undefined ||
-      activeReceipt.numericalFixture ||
+      activeReceipt.operator !== 'lower_mixture_to_concatenation' ||
+      activeReceipt.researchCase ||
       busy ||
-      fixtureBusy ||
-      fixtureInFlight.current
+      researchCaseBusy ||
+      researchCaseInFlight.current
     )
       return;
-    fixtureInFlight.current = true;
-    setFixtureBusy(true);
-    const idempotencyKey = `fixture:${activeReceipt.candidateId}:${seed}`;
+    researchCaseInFlight.current = true;
+    setResearchCaseBusy(true);
+    const idempotencyKey = `research-case:${activeReceipt.candidateId}`;
     try {
       const response = await fetch(
-        `/api/research/candidates/${activeReceipt.candidateId}/numerical-fixture`,
+        `/api/research/candidates/${activeReceipt.candidateId}/research-case`,
         {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
             'x-idempotency-key': idempotencyKey,
           },
-          body: JSON.stringify({ seed }),
+          body: JSON.stringify({}),
         },
       );
       if (!response.ok) {
@@ -1769,29 +1863,28 @@ export default function ResearchMovePanel({
             : `server returned ${response.status}`;
         throw new Error(detail);
       }
-      const result = parseNumericalFixture(
+      const result = parseResearchCase(
         await response.json(),
         activeReceipt.candidateId,
         activeReceipt.specId,
-        seed,
       );
       setReceipt((current) =>
         current?.candidateId === activeReceipt.candidateId
-          ? { ...current, numericalFixture: result }
+          ? { ...current, researchCase: result }
           : current,
       );
       setNotice(
-        `Synthetic diagnostic recorded (${result.outcome}). It does not test paper code or establish performance; admission is unchanged.`,
+        `Frozen CPU research case recorded (${result.outcome}). It is synthetic protocol evidence only; no product-performance claim was made.`,
       );
       setCandidateHistoryOffset(0);
       setCandidateHistoryRevision((revision) => revision + 1);
     } catch (error) {
       setNotice(
-        `Synthetic diagnostic unavailable; no result was confirmed and candidate policy is unchanged. ${error instanceof Error ? error.message : 'Retry is safe.'}`,
+        `Research case unavailable; no result was confirmed. ${error instanceof Error ? error.message : 'Retry is safe.'}`,
       );
     } finally {
-      fixtureInFlight.current = false;
-      setFixtureBusy(false);
+      researchCaseInFlight.current = false;
+      setResearchCaseBusy(false);
     }
   }
 
@@ -2565,6 +2658,59 @@ export default function ResearchMovePanel({
                     </li>
                   ))}
                 </ul>
+                {receipt.operator === 'lower_mixture_to_concatenation' ? (
+                  <details className="research-case-panel" open>
+                    <summary>Frozen CPU research case · protocol evidence</summary>
+                    <div>
+                      <p>
+                        Runs the registered synthetic matched-control protocol with
+                        frozen seeds, split assignments, rank-matched parents and a
+                        protected holdout. This is server reference code only; it is
+                        not author code or a product-performance benchmark.
+                      </p>
+                      {receipt.researchCase ? (
+                        <dl>
+                          <div>
+                            <dt>Outcome</dt>
+                            <dd data-state={receipt.researchCase.outcome}>
+                              {receipt.researchCase.outcome.replaceAll('_', ' ')}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>Holdout mean</dt>
+                            <dd>{receipt.researchCase.holdoutMean ?? 'Not available'}</dd>
+                          </div>
+                          <div>
+                            <dt>95% CI</dt>
+                            <dd>
+                              {receipt.researchCase.holdoutCi95Low !== null && receipt.researchCase.holdoutCi95High !== null
+                                ? `${receipt.researchCase.holdoutCi95Low} … ${receipt.researchCase.holdoutCi95High}`
+                                : 'Not available'}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>Result</dt>
+                            <dd><code>{receipt.researchCase.resultId}</code></dd>
+                          </div>
+                        </dl>
+                      ) : (
+                        <button
+                          type="button"
+                          className="research-move-secondary"
+                          disabled={!canRunResearchCase}
+                          onClick={() => void runResearchCase()}
+                        >
+                          {researchCaseBusy ? 'Running frozen protocol…' : 'Run frozen CPU research case'}
+                        </button>
+                      )}
+                      {researchCaseBusy ? (
+                        <output aria-live="polite">
+                          Running frozen seeds and holdout; no model API or paid provider is called…
+                        </output>
+                      ) : null}
+                    </div>
+                  </details>
+                ) : null}
                 {receipt.numericalFixture ? (
                   <details className="research-synthetic-fixture">
                     <summary>Worker fixture · diagnostic only</summary>
@@ -2612,41 +2758,13 @@ export default function ResearchMovePanel({
                       </p>
                     </div>
                   </details>
-                ) : (
-                  <details className="research-synthetic-fixture">
-                    <summary>Optional worker fixture · diagnostic only</summary>
-                    <div>
-                      <p>
-                        Runs only a fixed synthetic suite against the registered
-                        operator. It does not execute candidate-supplied or
-                        paper code, prove the transformation, establish model
-                        quality, or start an empirical experiment. It cannot
-                        change the saved policy decision.
-                      </p>
-                      <button
-                        type="button"
-                        className="research-move-secondary"
-                        disabled={!canRunFixture}
-                        onClick={() => void runNumericalFixture()}
-                      >
-                        {fixtureBusy
-                          ? 'Running diagnostic…'
-                          : fixtureSeed === undefined
-                            ? 'No fixture seed declared'
-                            : `Run synthetic diagnostic · seed ${fixtureSeed}`}
-                      </button>
-                      {fixtureBusy ? (
-                        <output aria-live="polite">
-                          Running the fixed diagnostic; policy is unchanged…
-                        </output>
-                      ) : null}
-                    </div>
-                  </details>
-                )}
+                ) : null}
                 <p className="research-move-note">
-                  {receipt.numericalFixture
-                    ? 'No paper implementation or empirical experiment has been tested.'
-                    : 'No numerical suite or empirical experiment has run.'}
+                  {receipt.researchCase
+                    ? 'The registered CPU research case is synthetic protocol evidence only; no paper implementation or product-performance claim was tested.'
+                    : receipt.numericalFixture
+                      ? 'No paper implementation or empirical experiment has been tested.'
+                      : 'No numerical suite or research case has run.'}
                 </p>
                 {receipt.operator === 'mix_positive_feature_maps' ? (
                   <button
@@ -2708,9 +2826,13 @@ export default function ResearchMovePanel({
                       <header>
                         <div>
                           <small>Compiler replay · {reportAttempt.report.operator} v{reportAttempt.report.operatorVersion}</small>
-                          <strong>Diagnostic replay report · empirical evaluation not run</strong>
+                          <strong>Replay report · {reportAttempt.report.empiricalExperiment.replaceAll('_', ' ')}</strong>
                         </div>
-                        <span data-state="not-run">Not a research result</span>
+                        <span data-state={reportAttempt.report.empiricalExperiment}>
+                          {reportAttempt.report.empiricalExperiment === 'not_run'
+                            ? 'No research case'
+                            : 'Protocol evidence'}
+                        </span>
                       </header>
                       <p>
                         The compiler reproduced this recorded transformation. That does not establish general mathematical correctness, model quality, or performance; each checker result below has its own scope.
@@ -2730,7 +2852,7 @@ export default function ResearchMovePanel({
                         </div>
                         <div>
                           <dt>Experiment</dt>
-                          <dd>Not run · no model or performance claim</dd>
+                          <dd>{reportAttempt.report.empiricalExperiment.replaceAll('_', ' ')} · no product-performance claim</dd>
                         </div>
                       </dl>
                       <section aria-label="Report source references">
@@ -2793,6 +2915,25 @@ export default function ResearchMovePanel({
                                     ? 'rerun from frozen input'
                                     : 'stored receipt only'} · <code>{fixture.resultId}</code>
                                 </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </section>
+                      ) : null}
+                      {reportAttempt.report.researchCases.length ? (
+                        <section aria-label="Registered research cases">
+                          <h4>Registered CPU research cases</h4>
+                          <ul>
+                            {reportAttempt.report.researchCases.map((researchCase) => (
+                              <li key={researchCase.resultId} data-state={researchCase.outcome}>
+                                <strong>{researchCase.outcome.replaceAll('_', ' ')}</strong>
+                                <span>
+                                  {researchCase.replayStatus === 'replayed' ? 'replayed from frozen protocol' : 'stored receipt only'} · <code>{researchCase.resultId}</code>
+                                </span>
+                                <small>
+                                  Holdout {researchCase.holdoutMean ?? 'n/a'} · CI [{researchCase.holdoutCi95Low ?? 'n/a'}, {researchCase.holdoutCi95High ?? 'n/a'}]
+                                </small>
+                                <small>No author-code or product-performance claim</small>
                               </li>
                             ))}
                           </ul>

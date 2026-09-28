@@ -159,6 +159,50 @@ function numericalFixture(
   };
 }
 
+function researchCase(candidateId: string, specId: string, outcome = 'supported_on_protocol') {
+  const bindingId = 'bind_' + 'b'.repeat(32);
+  return {
+    binding: {
+      binding_id: bindingId,
+      binding_hash: 'c'.repeat(64),
+      candidate_id: candidateId,
+      candidate_hash: 'a'.repeat(64),
+      problem_spec_id: specId,
+      problem_spec_hash: 'd'.repeat(64),
+      execution_image: 'sha256:' + 'e'.repeat(64),
+    },
+    result: {
+      result_id: 'exp_' + 'f'.repeat(32),
+      result_hash: '1'.repeat(64),
+      run_id: '00000000-0000-4000-8000-000000000042',
+      actor_id: 'experiment-worker',
+      candidate_id: candidateId,
+      candidate_hash: 'a'.repeat(64),
+      parent_refs: [{ entity_id: 'cand_parent', version: 1, content_hash: 'a'.repeat(64) }],
+      problem_spec_id: specId,
+      problem_spec_hash: 'd'.repeat(64),
+      binding_id: bindingId,
+      binding_hash: 'c'.repeat(64),
+      protocol_version: 'attention-mashup-cpu-synthetic.v1',
+      protocol_hash: '2'.repeat(64),
+      outcome,
+      quality_constraints_met: outcome === 'supported_on_protocol',
+      primary_metric: 'candidate_regret_vs_best_parent',
+      quality_threshold: 0.01,
+      holdout_mean: outcome === 'inconclusive' ? null : 0.001,
+      holdout_ci95_low: outcome === 'inconclusive' ? null : 0,
+      holdout_ci95_high: outcome === 'inconclusive' ? null : 0.002,
+      trials: Array.from({ length: 5 }, (_, index) => ({ seed: 42 + index, split: 'search', outcome: 'passed_suite' })),
+      search_cost: { candidate_count: 1, trial_count: 5, completed_trial_count: 5, wall_time_ms: 1, cost_usd: 0 },
+      claim_scope: 'synthetic_operator_only_no_product_claim',
+      performance_claim: false,
+      created_at: '2026-09-25T04:02:00.000Z',
+      schema_version: 'research-case-result.v1',
+    },
+    replayed: false,
+  };
+}
+
 function requestPath(input: RequestInfo | URL): string {
   if (typeof input === 'string') return input;
   if (input instanceof URL) return input.pathname;
@@ -299,6 +343,7 @@ function compilerReplayReport(candidateId: string, activityId: string) {
       replay_status: 'replayed',
       performance_claim: false,
     }],
+    research_cases: [],
     empirical_experiment: 'not_run',
     limitations: [
       'Compiler replay and stored checks only.',
@@ -369,7 +414,7 @@ it('compiles a hypothesis from a frozen spec and reviewed mapping without callin
 
   expect(
     await screen.findByText(
-      /No numerical suite or empirical experiment has run/i,
+      /No numerical suite or research case has run/i,
     ),
   ).toBeTruthy();
   expect(screen.getByText('Unknown')).toBeTruthy();
@@ -780,7 +825,7 @@ it('does not show an empty proposal count when history is unavailable', async ()
   expect(await screen.findByText(/Existing candidates and checks are unchanged/i)).toBeTruthy();
 });
 
-it('shows the synthetic worker result as a diagnostic, not proof or policy admission', async () => {
+it('runs the registered CPU research case as bounded protocol evidence', async () => {
   const requests: { path: string; body: string; key: string | null }[] = [];
   const fetcher = vi.fn(
     async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -792,9 +837,9 @@ it('shows the synthetic worker result as a diagnostic, not proof or policy admis
         return Response.json(candidateCheck(candidateId));
       }
       if (path.endsWith('/admission')) return Response.json(admission());
-      if (path.endsWith('/numerical-fixture'))
+      if (path.endsWith('/research-case'))
         return Response.json(
-          numericalFixture(
+          researchCase(
             'cand_' + '0'.repeat(31) + '1',
             'spec_0123456789abcdef',
           ),
@@ -808,9 +853,9 @@ it('shows the synthetic worker result as a diagnostic, not proof or policy admis
         candidate(
           '1',
           '1',
-          'mix_positive_feature_maps',
-          'hypothesis_changing',
-          ['eq-a'],
+          'lower_mixture_to_concatenation',
+          'preserving',
+          ['cand_parent'],
           [{ name: 'nonzero_normalization_denominator', status: 'unresolved' }],
         ),
         { status: 201 },
@@ -831,32 +876,26 @@ it('shows the synthetic worker result as a diagnostic, not proof or policy admis
   await user.click(
     await screen.findByRole('button', { name: 'Compile hypothesis' }),
   );
-  await user.click(
-    screen.getByText('Optional worker fixture · diagnostic only'),
-  );
   const run = screen.getByRole('button', {
-    name: 'Run synthetic diagnostic · seed 29',
+    name: 'Run frozen CPU research case',
   });
   await user.click(run);
 
-  expect(await screen.findByText('Recorded outcome:')).toBeTruthy();
-  expect(screen.getByText('passed_suite')).toBeTruthy();
-  expect(screen.getByText(/does not run a paper implementation/i)).toBeTruthy();
-  expect(screen.getAllByText(/Admission is unchanged/i).length).toBeGreaterThan(
-    0,
-  );
+  expect(await screen.findByText('Outcome')).toBeTruthy();
+  expect(screen.getByText('supported on protocol')).toBeTruthy();
+  expect(screen.getByText(/server reference code only/i)).toBeTruthy();
   expect(screen.getByText(/Policy denied · no run/i)).toBeTruthy();
   expect(
     screen.getByText(
-      /No paper implementation or empirical experiment has been tested/i,
+      /registered CPU research case is synthetic protocol evidence only/i,
     ),
   ).toBeTruthy();
-  const fixtureCall = fetcher.mock.calls.find(([input]) =>
-    requestPath(input).endsWith('/numerical-fixture'),
+  const researchCaseCall = fetcher.mock.calls.find(([input]) =>
+    requestPath(input).endsWith('/research-case'),
   );
-  expect(JSON.parse(fixtureCall?.[1]?.body as string)).toEqual({ seed: 29 });
+  expect(JSON.parse(researchCaseCall?.[1]?.body as string)).toEqual({});
   expect(
-    new Headers(fixtureCall?.[1]?.headers).get('x-idempotency-key'),
+    new Headers(researchCaseCall?.[1]?.headers).get('x-idempotency-key'),
   ).toBeTruthy();
   expect(requests).toHaveLength(1);
   expect(JSON.parse(requests[0].body).transform.operator).toBe(
@@ -864,8 +903,8 @@ it('shows the synthetic worker result as a diagnostic, not proof or policy admis
   );
 });
 
-it('keeps fixture failure distinct and reuses the idempotency key on retry', async () => {
-  const fixtureKeys: string[] = [];
+it('keeps research-case failure distinct and reuses the idempotency key on retry', async () => {
+  const researchCaseKeys: string[] = [];
   const fetcher = vi.fn(
     async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = requestPath(input);
@@ -876,8 +915,8 @@ it('keeps fixture failure distinct and reuses the idempotency key on retry', asy
         return Response.json(candidateCheck(candidateId));
       }
       if (path.endsWith('/admission')) return Response.json(admission());
-      if (path.endsWith('/numerical-fixture')) {
-        fixtureKeys.push(
+      if (path.endsWith('/research-case')) {
+        researchCaseKeys.push(
           new Headers(init?.headers).get('x-idempotency-key') ?? '',
         );
         return Response.json({ code: 'UPSTREAM_UNAVAILABLE' }, { status: 502 });
@@ -886,9 +925,9 @@ it('keeps fixture failure distinct and reuses the idempotency key on retry', asy
         candidate(
           '1',
           '1',
-          'mix_positive_feature_maps',
-          'hypothesis_changing',
-          ['eq-a'],
+          'lower_mixture_to_concatenation',
+          'preserving',
+          ['cand_parent'],
           [],
         ),
         { status: 201 },
@@ -908,19 +947,16 @@ it('keeps fixture failure distinct and reuses the idempotency key on retry', asy
   await user.click(
     await screen.findByRole('button', { name: 'Compile hypothesis' }),
   );
-  await user.click(
-    screen.getByText('Optional worker fixture · diagnostic only'),
-  );
   const run = screen.getByRole('button', {
-    name: 'Run synthetic diagnostic · seed 29',
+    name: 'Run frozen CPU research case',
   });
   await user.click(run);
   expect(await screen.findByText(/no result was confirmed/i)).toBeTruthy();
   await user.click(run);
-  await waitFor(() => expect(fixtureKeys).toHaveLength(2));
-  expect(fixtureKeys[0]).toBe(`fixture:cand_${'0'.repeat(31)}1:29`);
-  expect(fixtureKeys[1]).toBe(fixtureKeys[0]);
-  expect(screen.queryByText(/Recorded outcome:/i)).toBeNull();
+  await waitFor(() => expect(researchCaseKeys).toHaveLength(2));
+  expect(researchCaseKeys[0]).toBe(`research-case:cand_${'0'.repeat(31)}1`);
+  expect(researchCaseKeys[1]).toBe(researchCaseKeys[0]);
+  expect(screen.queryByText(/Outcome/i)).toBeNull();
   expect(screen.getByText(/Policy denied · no run/i)).toBeTruthy();
 });
 
@@ -985,7 +1021,7 @@ it('records concatenation lowering as a separate activity linked to the parent',
   expect(second.transform.operator).toBe('lower_mixture_to_concatenation');
   expect(second.transform.bindings.mixture).toBe(second.parent_candidate_id);
   expect(
-    screen.getByText(/No numerical suite or empirical experiment has run/i),
+    screen.getByText(/No numerical suite or research case has run/i),
   ).toBeTruthy();
 });
 
@@ -1344,7 +1380,7 @@ it('opens a scoped partial replay report only for the selected saved activity', 
   await user.click(openReport);
 
   expect(await screen.findByText(
-    'Diagnostic replay report · empirical evaluation not run',
+    'Replay report · not run',
   )).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Refresh report' }).getAttribute('aria-expanded')).toBe('true');
   expect(screen.getByText(/does not establish general mathematical correctness/i)).toBeTruthy();
@@ -1451,6 +1487,6 @@ it('rejects a replay report for another activity and offers a safe retry state',
   expect(screen.getByRole('button', { name: 'Retry report' }).getAttribute('aria-expanded')).toBe('true');
   expect(screen.getByRole('button', { name: 'Retry report' })).toBeTruthy();
   expect(screen.queryByText(
-    'Diagnostic replay report · empirical evaluation not run',
+    'Replay report · not run',
   )).toBeNull();
 });

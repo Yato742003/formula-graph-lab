@@ -575,6 +575,36 @@ it('forwards only a synthetic fixture seed for a persisted candidate', async () 
   expect(fetcher).toHaveBeenCalledOnce();
 });
 
+it('forwards an empty body for the gated registered research case', async () => {
+  mocks.user.mockResolvedValue({ userId: 'user-1' });
+  mocks.owned.mockResolvedValue(true);
+  const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+    Response.json({ result: { outcome: 'failed_on_protocol', performance_claim: false } }, { status: 201 }),
+  );
+  vi.stubGlobal('fetch', fetcher);
+  const candidate = 'cand_' + 'f'.repeat(32);
+  const slug = context(['candidates', candidate, 'research-case']);
+  const response = await POST(
+    new Request('https://app.test/api/research/candidates/research-case', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-idempotency-key': 'research-case-key-1',
+      },
+      body: JSON.stringify({}),
+    }),
+    slug,
+  );
+  expect(response.status).toBe(201);
+  const call = fetcher.mock.calls[0];
+  if (!call) throw new Error('Research-case route was not forwarded.');
+  expect((call[0] as URL).pathname).toBe(
+    `/v1/research/candidates/${candidate}/research-case`,
+  );
+  expect(JSON.parse(call[1]?.body as string)).toEqual({});
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
 it('exports only an authenticated candidate activity replay bundle', async () => {
   mocks.user.mockResolvedValue({ userId: 'user-1' });
   mocks.owned.mockResolvedValue(true);
