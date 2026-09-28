@@ -133,6 +133,14 @@ class CompilerReplayBundle(FrozenInput):
             if parent.workspace_id != self.workspace_id:
                 raise ValueError("Replay bundle parent belongs to another workspace.")
             _verify_candidate_identity(parent)
+        candidate_parent = next(
+            (
+                parent for parent in self.parent_candidates
+                if self.candidate.parents
+                and parent.candidate_id == self.candidate.parents[0].entity_id
+            ),
+            None,
+        )
         for check in self.candidate_checks:
             if (
                 check.workspace_id != self.workspace_id
@@ -179,6 +187,8 @@ class CompilerReplayBundle(FrozenInput):
                 or binding.problem_spec_id != self.candidate.problem_spec_id
                 or binding.problem_spec_hash != self.candidate.problem_spec_hash
                 or binding.parent_refs != self.candidate.parents
+                or candidate_parent is None
+                or binding.source_parent_refs != candidate_parent.parents
             ):
                 raise ValueError("Replay bundle contains a misbound implementation binding.")
         result_ids = {item.result_id for item in self.research_cases}
