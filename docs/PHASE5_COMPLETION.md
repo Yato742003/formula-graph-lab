@@ -30,7 +30,7 @@ implementation is split into reviewable commits; nothing was pushed.
 - TypeScript no-emit and frontend lint: pass.
 - Production build: pass; existing chunk-size and Node deprecation warnings remain.
 - Neo4j integration: 27 passed, 629 deselected.
-- Docker sandbox gate: 8 passed in the main suite and 1 isolation probe passed.
+- Docker sandbox gate: 7 passed in the worker suite and 1 isolation probe passed.
 - `git diff --check`: pass.
 
 ## Scope and exclusions
