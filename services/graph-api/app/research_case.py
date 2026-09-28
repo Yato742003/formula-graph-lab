@@ -205,6 +205,21 @@ class ResearchCaseMeasurement(FrozenInput):
     candidate_regret_vs_best_parent: float
     causal_future_perturbation_max_abs_error: float = Field(ge=0)
 
+    @model_validator(mode="after")
+    def validate_metrics(self) -> ResearchCaseMeasurement:
+        values = self.model_dump()
+        if any(not math.isfinite(value) for value in values.values()):
+            raise ValueError("Research measurements must be finite.")
+        if any(value < 0 for name, value in values.items()
+               if name != "candidate_regret_vs_best_parent"):
+            raise ValueError("Absolute errors cannot be negative.")
+        expected = self.candidate_mean_abs_error_vs_exact - min(
+            self.parent_a_mean_abs_error_vs_exact, self.parent_b_mean_abs_error_vs_exact
+        )
+        if self.candidate_regret_vs_best_parent != expected:
+            raise ValueError("Regret must be derived from the measured parent errors.")
+        return self
+
 
 class ResearchCaseTrial(FrozenInput):
     seed: int = Field(strict=True)
@@ -219,10 +234,21 @@ class ResearchCaseTrial(FrozenInput):
     @model_validator(mode="after")
     def validate_outcome(self) -> ResearchCaseTrial:
         complete = self.outcome in {"passed_suite", "counterexample"}
+        if self.seed not in SEED_SPLITS or self.split != SEED_SPLITS[self.seed]:
+            raise ValueError("Trial split must match the frozen seed assignment.")
         if complete != (self.input_hash is not None and bool(self.measurements)):
             raise ValueError("Completed trials require measurements and input identity.")
         if complete == (self.error_code is not None):
             raise ValueError("Only incomplete trials require an error code.")
+        if complete:
+            if tuple(item.sequence_length for item in self.measurements) != SEQUENCE_LENGTHS:
+                raise ValueError("Trial must contain every frozen sequence length.")
+            if set(self.checks) != {
+                "matched_feature_budget", "causal_future_perturbation", "finite_outputs"
+            } or (self.outcome == "passed_suite") != all(self.checks.values()):
+                raise ValueError("Trial outcome must agree with its required checks.")
+        elif self.measurements or self.checks or self.input_hash or self.environment:
+            raise ValueError("Incomplete trials cannot contain successful measurements.")
         return self
 
 
@@ -230,6 +256,8 @@ class ResearchCaseReceipt(FrozenInput):
     schema_version: Literal["research-case-result.v1"] = "research-case-result.v1"
     result_id: str = Field(pattern=r"^exp_[0-9a-f]{32}$")
     result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    run_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    actor_id: str = Field(min_length=1, max_length=200)
     workspace_id: str = Field(min_length=1, max_length=200)
     candidate_id: str = Field(pattern=r"^cand_[0-9a-f]{32}$")
     candidate_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -260,17 +288,38 @@ class ResearchCaseReceipt(FrozenInput):
         if tuple(item.seed for item in self.trials) != SEEDS:
             raise ValueError("Research case must retain every frozen seed in order.")
         if self.outcome == "inconclusive":
-            if self.quality_constraints_met or self.holdout_mean is not None:
+            if self.quality_constraints_met or any(value is not None for value in (
+                self.holdout_mean, self.holdout_ci95_low, self.holdout_ci95_high
+            )):
                 raise ValueError("Incomplete research cases cannot claim a holdout result.")
         elif None in (self.holdout_mean, self.holdout_ci95_low, self.holdout_ci95_high):
             raise ValueError("Completed research cases require holdout uncertainty.")
         if self.quality_constraints_met != (self.outcome == "supported_on_protocol"):
             raise ValueError("Protocol support must equal the frozen quality decision.")
+        correct = all(item.outcome == "passed_suite" for item in self.trials)
+        if correct != (self.outcome != "inconclusive"):
+            raise ValueError("Protocol outcome must agree with all retained trials.")
+        if correct:
+            means = [statistics.fmean(
+                item.candidate_regret_vs_best_parent for item in trial.measurements
+            ) for trial in self.trials if trial.split == "holdout"]
+            mean = statistics.fmean(means)
+            margin = T95_DF1 * statistics.stdev(means) / math.sqrt(2)
+            if (self.holdout_mean, self.holdout_ci95_low, self.holdout_ci95_high) != (
+                mean, mean - margin, mean + margin
+            ) or self.quality_constraints_met != (mean + margin <= self.quality_threshold):
+                raise ValueError("Holdout summary must reproduce from the frozen trials.")
         payload = self.model_dump(mode="json", exclude={"result_id", "result_hash"})
         digest = _hash(payload)
         if self.result_hash != digest or self.result_id != f"exp_{digest[:32]}":
             raise ValueError("Research case identity does not match its content.")
         return self
+
+
+class ResearchCaseReceiptResponse(FrozenInput):
+    binding: ImplementationBindingReceipt
+    result: ResearchCaseReceipt
+    replayed: bool
 
 
 def make_implementation_binding(
@@ -391,6 +440,8 @@ def run_registered_research_case(
     spec: ProblemSpecSnapshot,
     *,
     parent_candidate: CompiledCandidate,
+    actor_id: str,
+    run_id: str,
     worker_runner: Callable[..., dict[str, Any]] = run_research_case_sandbox,
     now: datetime | None = None,
 ) -> ResearchCaseReceipt:
@@ -459,6 +510,8 @@ def run_registered_research_case(
     )
     payload = {
         "schema_version": "research-case-result.v1",
+        "run_id": run_id,
+        "actor_id": actor_id,
         "workspace_id": candidate.workspace_id,
         "candidate_id": candidate.candidate_id,
         "candidate_hash": candidate.content_hash,

@@ -97,6 +97,14 @@ from app.replay_bundle import (
     ReplaySourceReference,
     make_compiler_replay_bundle,
 )
+from app.research_case import (
+    ImplementationBindingReceipt,
+    ResearchCaseReceipt,
+    ResearchCaseReceiptResponse,
+    make_implementation_binding,
+    validate_registered_spec,
+)
+from app.research_case_worker import SEEDS as RESEARCH_CASE_SEEDS
 from app.research_compiler import (
     CompileCandidateRequest,
     CompileCandidateResponse,
@@ -2653,6 +2661,231 @@ class Neo4jResearchStore:
         response_payload = canonical_json({"result": result.model_dump(mode="json")})
         await self._save_create_receipt(tx, receipt_key, group_id, intent_hash, response_payload)
         return NumericalFixtureReceiptResponse(result=result, replayed=False)
+
+    async def prepare_registered_research_case(
+        self,
+        *,
+        workspace_id: str,
+        candidate_id: str,
+    ) -> tuple[CompiledCandidate, ProblemSpecSnapshot, CompiledCandidate]:
+        """Resolve the one registered V3 protocol from immutable server records."""
+        candidate, spec, parent = await self.prepare_candidate_numerical_fixture(
+            workspace_id=workspace_id,
+            candidate_id=candidate_id,
+            seed=RESEARCH_CASE_SEEDS[0],
+        )
+        try:
+            validate_registered_spec(spec)
+        except ValueError as exc:
+            raise ResearchValidationError(str(exc)) from exc
+        if parent is None:
+            raise ResearchValidationError(
+                "The registered research case requires a lowered mixture candidate."
+            )
+        return candidate, spec, parent
+
+    def research_case_receipt_identity(
+        self,
+        *,
+        workspace_id: str,
+        candidate_id: str,
+        actor_id: str,
+        idempotency_key: str,
+        binding: ImplementationBindingReceipt,
+        result: ResearchCaseReceipt,
+    ) -> tuple[str, str, str]:
+        group_id = workspace_group_id(workspace_id)
+        key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()
+        receipt_key = f"{group_id}:research-case:{key_hash}"
+        intent_hash = self._stable_hash([
+            workspace_id,
+            candidate_id,
+            actor_id,
+            binding.binding_hash,
+            result.result_hash,
+        ])
+        return group_id, receipt_key, intent_hash
+
+    async def append_registered_research_case(
+        self,
+        *,
+        workspace_id: str,
+        candidate_id: str,
+        actor_id: str,
+        idempotency_key: str,
+        binding: ImplementationBindingReceipt,
+        result: ResearchCaseReceipt,
+    ) -> ResearchCaseReceiptResponse:
+        if self.driver is None:
+            raise ResearchStoreError("Research-case receipts require durable storage.")
+        if not idempotency_key or len(idempotency_key) > 200 or not idempotency_key.isascii():
+            raise ResearchValidationError("A bounded ASCII idempotency key is required.")
+        binding = ImplementationBindingReceipt.model_validate(
+            binding.model_dump(mode="python")
+        )
+        result = ResearchCaseReceipt.model_validate(result.model_dump(mode="python"))
+        group_id, receipt_key, intent_hash = self.research_case_receipt_identity(
+            workspace_id=workspace_id,
+            candidate_id=candidate_id,
+            actor_id=actor_id,
+            idempotency_key=idempotency_key,
+            binding=binding,
+            result=result,
+        )
+        async with self.driver.session(database=self.database) as session:
+            return await session.execute_write(
+                self._tx_append_registered_research_case,
+                group_id,
+                workspace_id,
+                candidate_id,
+                actor_id,
+                receipt_key,
+                intent_hash,
+                binding,
+                result,
+            )
+
+    async def _tx_append_registered_research_case(
+        self,
+        tx,
+        group_id: str,
+        workspace_id: str,
+        candidate_id: str,
+        actor_id: str,
+        receipt_key: str,
+        intent_hash: str,
+        binding: ImplementationBindingReceipt,
+        result: ResearchCaseReceipt,
+    ) -> ResearchCaseReceiptResponse:
+        await lock_research_workspace(tx, group_id)
+        saved = await self._read_create_receipt(tx, receipt_key, group_id, intent_hash)
+        if saved is not None:
+            payload = json.loads(saved)
+            return ResearchCaseReceiptResponse(
+                binding=payload["binding"], result=payload["result"], replayed=True
+            )
+
+        candidate_result = await tx.run(
+            "MATCH (c:ResearchCandidate {candidate_id:$candidate_id, group_id:$group}) "
+            "RETURN c.payload AS payload LIMIT 1",
+            candidate_id=candidate_id,
+            group=group_id,
+        )
+        candidate_row = await candidate_result.single()
+        if candidate_row is None:
+            raise ResearchReferenceNotFoundError("Candidate was not found in this workspace.")
+        candidate = CompiledCandidate.model_validate_json(candidate_row["payload"])
+        _verify_candidate_identity(candidate)
+        if candidate.workspace_id != workspace_id or len(candidate.parents) != 1:
+            raise ResearchValidationError("Research case does not match its workspace candidate.")
+
+        spec_result = await tx.run(
+            "MATCH (s:ProblemSpec {spec_id:$spec_id, group_id:$group}) "
+            "RETURN s.payload AS payload LIMIT 1",
+            spec_id=candidate.problem_spec_id,
+            group=group_id,
+        )
+        spec_row = await spec_result.single()
+        parent_result = await tx.run(
+            "MATCH (p:ResearchCandidate {candidate_id:$parent_id, group_id:$group}) "
+            "RETURN p.payload AS payload LIMIT 1",
+            parent_id=candidate.parents[0].entity_id,
+            group=group_id,
+        )
+        parent_row = await parent_result.single()
+        if spec_row is None or parent_row is None:
+            raise ResearchReferenceNotFoundError(
+                "Research-case ProblemSpec or candidate parent was not found."
+            )
+        spec = ProblemSpecSnapshot.model_validate_json(spec_row["payload"])
+        parent = CompiledCandidate.model_validate_json(parent_row["payload"])
+        _verify_candidate_identity(parent)
+        try:
+            expected_binding = make_implementation_binding(
+                candidate,
+                spec,
+                parent_candidate=parent,
+                execution_image=binding.execution_image,
+                now=binding.created_at,
+            )
+        except ValueError as exc:
+            raise ResearchValidationError(str(exc)) from exc
+        if expected_binding != binding:
+            raise ResearchValidationError(
+                "Implementation binding does not match current server-owned inputs."
+            )
+        if (
+            result.workspace_id != workspace_id
+            or result.actor_id != actor_id
+            or result.candidate_id != candidate.candidate_id
+            or result.candidate_hash != candidate.content_hash
+            or result.parent_refs != candidate.parents
+            or result.problem_spec_id != spec.spec_id
+            or result.problem_spec_hash != spec.content_hash
+            or result.binding_id != binding.binding_id
+            or result.binding_hash != binding.binding_hash
+            or result.protocol_hash != binding.protocol_hash
+        ):
+            raise ResearchValidationError("Research-case result does not match its binding.")
+        freshness, usable = await self._candidate_mapping_admission_status(
+            tx, group_id=group_id, candidate=candidate
+        )
+        if freshness != "current" or not usable:
+            raise ResearchValidationError(
+                "Candidate compatibility mapping is not current and usable."
+            )
+
+        binding_payload = canonical_json(binding.model_dump(mode="json"))
+        result_payload = canonical_json(result.model_dump(mode="json"))
+        for label, identity, payload in (
+            ("ResearchImplementationBinding", binding.binding_id, binding_payload),
+            ("ResearchExperimentResult", result.result_id, result_payload),
+        ):
+            identity_field = (
+                "binding_id" if label == "ResearchImplementationBinding" else "result_id"
+            )
+            existing_result = await tx.run(
+                f"MATCH (r:{label} {{{identity_field}:$identity}}) "
+                "RETURN r.group_id AS group_id, r.payload AS payload LIMIT 1",
+                identity=identity,
+            )
+            existing = await existing_result.single()
+            if existing is not None and (
+                existing["group_id"] != group_id or existing["payload"] != payload
+            ):
+                raise IdempotencyConflictError(
+                    "Research-case evidence identity conflicts with stored data."
+                )
+            if existing is None:
+                await tx.run(
+                    f"CREATE (r:{label} {{{identity_field}:$identity, group_id:$group, "
+                    "workspace_id:$workspace, candidate_id:$candidate_id, payload:$payload})",
+                    identity=identity,
+                    group=group_id,
+                    workspace=workspace_id,
+                    candidate_id=candidate_id,
+                    payload=payload,
+                )
+        await tx.run(
+            "MATCH (c:ResearchCandidate {candidate_id:$candidate_id, group_id:$group}) "
+            "MATCH (b:ResearchImplementationBinding {binding_id:$binding_id, group_id:$group}) "
+            "MATCH (r:ResearchExperimentResult {result_id:$result_id, group_id:$group}) "
+            "MERGE (c)-[:HAS_IMPLEMENTATION_BINDING]->(b) "
+            "MERGE (b)-[:PRODUCED_EXPERIMENT_RESULT]->(r) "
+            "MERGE (c)-[:HAS_EXPERIMENT_RESULT]->(r)",
+            candidate_id=candidate_id,
+            binding_id=binding.binding_id,
+            result_id=result.result_id,
+            group=group_id,
+        )
+        response_payload = canonical_json({
+            "binding": binding.model_dump(mode="json"),
+            "result": result.model_dump(mode="json"),
+        })
+        await self._save_create_receipt(tx, receipt_key, group_id, intent_hash, response_payload)
+        return ResearchCaseReceiptResponse(
+            binding=binding, result=result, replayed=False
+        )
 
     async def record_proposal(
         self,

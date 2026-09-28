@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -5,9 +6,11 @@ from datetime import UTC, datetime
 
 import pytest
 
+from app.analysis_versions import canonical_json
 from app.problem_spec import ProblemDefinition, ProblemSpecSnapshot, definition_hash
 from app.research_case import (
     PRIMARY_METRIC,
+    ResearchCaseReceipt,
     make_implementation_binding,
     registered_protocol_descriptor,
     run_registered_research_case,
@@ -20,6 +23,35 @@ from tests.test_research_compiler import MIX, _context
 
 IMAGE = "sha256:" + "a" * 64
 NOW = datetime(2026, 9, 28, tzinfo=UTC)
+RUN_ID = "00000000-0000-4000-8000-000000000042"
+
+
+@pytest.mark.parametrize("mutation", ["split", "summary", "regret", "checks"])
+def test_rehashed_receipt_cannot_invent_scientific_support(mutation):
+    spec, mixture, candidate = _candidates()
+    binding = make_implementation_binding(
+        candidate, spec, parent_candidate=mixture, execution_image=IMAGE, now=NOW
+    )
+    result = run_registered_research_case(
+        binding, candidate, spec, parent_candidate=mixture,
+        actor_id="experiment-worker", run_id=RUN_ID,
+        worker_runner=lambda payload, **_kwargs: evaluate(payload), now=NOW,
+    )
+    raw = result.model_dump(mode="json")
+    if mutation == "split":
+        raw["trials"][0]["split"] = "holdout"
+    elif mutation == "summary":
+        raw["holdout_mean"] = -100.0
+    elif mutation == "regret":
+        raw["trials"][0]["measurements"][0]["candidate_regret_vs_best_parent"] = -100.0
+    else:
+        raw["trials"][0]["checks"] = {}
+    identity = {key: value for key, value in raw.items()
+                if key not in {"result_id", "result_hash"}}
+    digest = hashlib.sha256(canonical_json(identity).encode()).hexdigest()
+    raw.update(result_id="exp_" + digest[:32], result_hash=digest)
+    with pytest.raises(ValueError):
+        ResearchCaseReceipt.model_validate(raw)
 
 
 def _spec() -> ProblemSpecSnapshot:
@@ -110,6 +142,8 @@ def test_registered_case_binds_exact_candidate_and_completes_all_frozen_splits()
         candidate,
         spec,
         parent_candidate=mixture,
+        actor_id="experiment-worker",
+        run_id=RUN_ID,
         worker_runner=lambda payload, **_kwargs: evaluate(payload),
         now=NOW,
     )
@@ -146,7 +180,14 @@ def test_failed_worker_is_retained_and_cannot_become_protocol_support():
         return evaluate(payload)
 
     receipt = run_registered_research_case(
-        binding, candidate, spec, parent_candidate=mixture, worker_runner=runner, now=NOW
+        binding,
+        candidate,
+        spec,
+        parent_candidate=mixture,
+        actor_id="experiment-worker",
+        run_id=RUN_ID,
+        worker_runner=runner,
+        now=NOW,
     )
 
     assert receipt.outcome == "inconclusive"
@@ -176,6 +217,8 @@ def test_spec_or_candidate_drift_fails_before_execution():
             candidate,
             changed_spec,
             parent_candidate=mixture,
+            actor_id="experiment-worker",
+            run_id=RUN_ID,
             worker_runner=lambda payload, **_kwargs: evaluate(payload),
             now=NOW,
         )

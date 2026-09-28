@@ -10,10 +10,13 @@ from fastapi import HTTPException
 from app.research_jobs import (
     JobEnvelope,
     JobRejected,
+    JobTicket,
     ResearchQueue,
     digest,
+    research_case_job_payload,
     signature,
     validate_numerical_fixture_payload,
+    validate_research_case_payload,
     verify_envelope,
 )
 from app.worker_auth import WorkerPrincipal
@@ -32,6 +35,43 @@ NUMERICAL_PAYLOAD = {
     "right_rank": 24,
 }
 ACTOR = WorkerPrincipal("v1", "verifier", frozenset({"w1"}))
+
+
+@pytest.mark.asyncio
+async def test_experiment_completion_rejects_a_different_reserved_image_before_storage():
+    from app.research_case import make_implementation_binding, run_registered_research_case
+    from app.research_case_worker import evaluate
+    from tests.test_research_case import NOW, RUN_ID, _candidates
+
+    spec, parent, candidate = _candidates()
+    binding = make_implementation_binding(
+        candidate, spec, parent_candidate=parent, execution_image=IMAGE, now=NOW
+    )
+    result = run_registered_research_case(
+        binding, candidate, spec, parent_candidate=parent,
+        actor_id="experiment-worker", run_id=RUN_ID,
+        worker_runner=lambda payload, **_kwargs: evaluate(payload), now=NOW,
+    )
+    payload = research_case_job_payload(binding)
+    envelope = JobEnvelope(
+        job_id=RUN_ID, workspace_id=candidate.workspace_id,
+        target_uuid=candidate.candidate_id, actor_id="experiment-worker",
+        operation="research_case:run", request_hash=digest(payload),
+        source_hash=digest([candidate.candidate_id, candidate.content_hash, binding.binding_hash]),
+        payload_hash=digest(payload), image_id="sha256:" + "f" * 64,
+        issued_at=1000, expires_at=1120, reserved_ms=30_000,
+    )
+    ticket = JobTicket(envelope, signature(envelope, KEY))
+    # No driver: a storage access before rejecting the mismatch would fail this test.
+    queue = ResearchQueue(SimpleNamespace(), KEY)
+    with pytest.raises(JobRejected, match="JOB_RESULT_MISMATCH"):
+        await queue.finish_research_case(
+            ticket, research_store=None, idempotency_key="trial",
+            binding=binding, result=result,
+        )
+    for timestamp in ("", "not-a-date", "2026-09-29T10:00:00"):
+        with pytest.raises(JobRejected, match="INVALID_RESEARCH_CASE_INPUT"):
+            validate_research_case_payload(payload | {"binding_created_at": timestamp})
 
 
 def envelope():

@@ -106,8 +106,18 @@ from app.proposals import (
     parse_source_span_id,
     validate_model_proposal,
 )
+from app.research_case import (
+    ResearchCaseReceiptResponse,
+    make_implementation_binding,
+    run_registered_research_case,
+)
 from app.research_compiler import CompileCandidateRequest, CompileCandidateResponse
-from app.research_jobs import JobRejected, ResearchQueue, configured_queue_key
+from app.research_jobs import (
+    JobRejected,
+    ResearchQueue,
+    configured_queue_key,
+    research_case_job_payload,
+)
 from app.research_report import build_compiler_replay_report
 from app.research_store import (
     IdempotencyConflictError,
@@ -150,6 +160,7 @@ from app.worker_auth import (
     require_numerical_fixture_enabled,
     require_proposal_generation_enabled,
     require_proposals_enabled,
+    require_research_case_enabled,
     require_research_checks_enabled,
     require_research_compiler_enabled,
     require_worker,
@@ -1522,6 +1533,84 @@ async def run_research_numerical_fixture(
         raise HTTPException(
             status_code=503,
             detail="Numerical fixture service is unavailable or misconfigured.",
+        ) from exc
+    return JSONResponse(
+        content=persisted.model_dump(mode="json"),
+        status_code=200 if persisted.replayed else 201,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post(
+    "/v1/research/candidates/{candidate_id}/research-case",
+    response_model=ResearchCaseReceiptResponse,
+    dependencies=[Depends(require_research_case_enabled)],
+)
+async def run_research_case(
+    candidate_id: Annotated[str, Path(pattern=r"^cand_[a-f0-9]{32}$")],
+    auth_ctx: Annotated[tuple[ServiceActor, str], Depends(require_research_service_actor)],
+    x_idempotency_key: Annotated[str | None, Header()] = None,
+    r_store: Annotated[Neo4jResearchStore, Depends(get_research_store)] = None,
+):
+    _request_actor, workspace_id = auth_ctx
+    idempotency_key = (x_idempotency_key or "").strip()
+    if not idempotency_key or len(idempotency_key) > 200 or not idempotency_key.isascii():
+        raise HTTPException(status_code=400, detail="A bounded ASCII idempotency key is required.")
+    try:
+        image = configured_image()
+        worker = configured_worker_principal("experiment", workspace_id)
+        candidate, spec, parent_candidate = await r_store.prepare_registered_research_case(
+            workspace_id=workspace_id, candidate_id=candidate_id
+        )
+        binding = make_implementation_binding(
+            candidate,
+            spec,
+            parent_candidate=parent_candidate,
+            execution_image=image,
+        )
+        queue = ResearchQueue(r_store, configured_queue_key())
+        payload = research_case_job_payload(binding)
+        reserved_ms = 30_000
+        ticket = await queue.admit_research_case(
+            worker,
+            workspace_id=workspace_id,
+            candidate_id=candidate_id,
+            idempotency_key=idempotency_key,
+            binding=binding,
+            reserved_ms=reserved_ms,
+        )
+        if ticket.result is not None:
+            saved = ResearchCaseReceiptResponse.model_validate_json(ticket.result)
+            persisted = saved.model_copy(update={"replayed": True})
+        else:
+            await queue.claim(ticket, worker, payload, image)
+            result = await run_in_threadpool(
+                run_registered_research_case,
+                binding,
+                candidate,
+                spec,
+                parent_candidate=parent_candidate,
+                actor_id=worker.identity,
+                run_id=ticket.envelope.job_id,
+            )
+            persisted = await queue.finish_research_case(
+                ticket,
+                research_store=r_store,
+                idempotency_key=idempotency_key,
+                binding=binding,
+                result=result,
+            )
+    except JobRejected as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    except ResearchReferenceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except IdempotencyConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ResearchValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (ValueError, ResearchStoreError, Neo4jError, ServiceUnavailable, OSError) as exc:
+        raise HTTPException(
+            status_code=503, detail="Research-case service is unavailable or misconfigured."
         ) from exc
     return JSONResponse(
         content=persisted.model_dump(mode="json"),

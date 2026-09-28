@@ -121,6 +121,11 @@ async def require_numerical_fixture_enabled() -> None:
         raise HTTPException(status_code=503, detail="Numerical fixture execution is disabled.")
 
 
+async def require_research_case_enabled() -> None:
+    if os.getenv("FGL_ENABLE_RESEARCH_CASE", "false") != "true":
+        raise HTTPException(status_code=503, detail="Research-case execution is disabled.")
+
+
 async def require_proposals_enabled() -> None:
     if os.getenv("FGL_ENABLE_PROPOSALS", "false") != "true":
         raise HTTPException(status_code=503, detail="Model proposal ingestion is disabled.")

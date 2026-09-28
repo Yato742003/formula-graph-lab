@@ -47,6 +47,9 @@ async function forward(request: Request, { params }: Context) {
   const isNumericalFixture = !isRead && collection === 'candidates' &&
     Boolean(identifier && /^cand_[a-f0-9]{32}$/.test(identifier)) &&
     action === 'numerical-fixture' && slug.length === 3;
+  const isResearchCase = !isRead && collection === 'candidates' &&
+    Boolean(identifier && /^cand_[a-f0-9]{32}$/.test(identifier)) &&
+    action === 'research-case' && slug.length === 3;
   const isReplayBundle = isRead && collection === 'candidates' &&
     Boolean(identifier && /^cand_[a-f0-9]{32}$/.test(identifier)) &&
     slug[2] === 'activities' && Boolean(slug[3] && /^act_[a-f0-9]{32}$/.test(slug[3])) &&
@@ -62,7 +65,7 @@ async function forward(request: Request, { params }: Context) {
     action === 'finalists' && slug.length === 3;
   const isEvolutionStop = !isRead && collection === 'evolution' && isEvolutionId &&
     action === 'stop' && slug.length === 3;
-  const validRoute = isCompile || isProposalReview || isProposalGenerate || isProposalCapabilities || isAdmission || isVerification || isNumericalFixture || isReplayBundle || isReplayReport || isEvolutionReport || isEvolutionFinalists || isEvolutionStop || (
+  const validRoute = isCompile || isProposalReview || isProposalGenerate || isProposalCapabilities || isAdmission || isVerification || isNumericalFixture || isResearchCase || isReplayBundle || isReplayReport || isEvolutionReport || isEvolutionFinalists || isEvolutionStop || (
     collection === 'proposals'
       ? (isRead && slug.length === 1) || isProposalReview || isProposalGenerate || isProposalCapabilities
       : collection === 'evolution'
@@ -115,6 +118,7 @@ async function forward(request: Request, { params }: Context) {
         : isEvolutionStop ? []
         : isVerification ? []
         : isNumericalFixture ? ['seed']
+        : isResearchCase ? []
         : isAdmission ? ['action', 'claim_scope']
         : isProposalGenerate ? ['spec_id', 'parent_ids', 'source_span_ids', 'research_question']
         : collection === 'lineage' && identifier === 'coverage'
@@ -162,7 +166,7 @@ async function forward(request: Request, { params }: Context) {
       },
       body: upstreamBody,
       redirect: 'manual',
-      signal: AbortSignal.timeout(isProposalGenerate ? 100_000 : isNumericalFixture ? 45_000 : 20_000),
+      signal: AbortSignal.timeout(isProposalGenerate ? 100_000 : isResearchCase ? 45_000 : isNumericalFixture ? 45_000 : 20_000),
     });
     if (response.status < 200 || response.status >= 300 && response.status < 400) {
       await response.body?.cancel();

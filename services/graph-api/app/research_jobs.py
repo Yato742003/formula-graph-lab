@@ -6,8 +6,10 @@ import hmac
 import json
 import math
 import os
+import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
@@ -20,6 +22,12 @@ from app.numerical_verification import (
     build_numerical_suite_input,
 )
 from app.problem_spec import ProblemSpecSnapshot, definition_hash
+from app.research_case import (
+    ImplementationBindingReceipt,
+    ResearchCaseReceipt,
+    ResearchCaseReceiptResponse,
+    make_implementation_binding,
+)
 from app.research_compiler import CompiledCandidate, _verify_candidate_identity
 from app.sandbox import IMAGE_ID
 from app.worker_auth import WorkerPrincipal, configured_credentials
@@ -37,7 +45,9 @@ class JobEnvelope(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=200)
     target_uuid: str = Field(min_length=1, max_length=200)
     actor_id: str = Field(min_length=1, max_length=200)
-    operation: Literal["checks:run", "numerical_fixture:run"] = "checks:run"
+    operation: Literal[
+        "checks:run", "numerical_fixture:run", "research_case:run"
+    ] = "checks:run"
     request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -95,6 +105,45 @@ def validate_numerical_fixture_payload(payload: dict[str, object]) -> None:
         raise JobRejected("INVALID_NUMERICAL_FIXTURE_INPUT", 422)
 
 
+def validate_research_case_payload(payload: dict[str, object]) -> None:
+    if (
+        set(payload) != {
+            "candidate_id", "candidate_hash", "binding_id", "binding_hash", "protocol_hash",
+            "binding_created_at",
+        }
+        or not isinstance(payload.get("candidate_id"), str)
+        or not re.fullmatch(r"cand_[0-9a-f]{32}", payload["candidate_id"])
+        or not isinstance(payload.get("candidate_hash"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", payload["candidate_hash"])
+        or not isinstance(payload.get("binding_id"), str)
+        or not re.fullmatch(r"bind_[0-9a-f]{32}", payload["binding_id"])
+        or not isinstance(payload.get("binding_hash"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", payload["binding_hash"])
+        or not isinstance(payload.get("protocol_hash"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", payload["protocol_hash"])
+        or not isinstance(payload.get("binding_created_at"), str)
+        or len(payload["binding_created_at"]) > 100
+    ):
+        raise JobRejected("INVALID_RESEARCH_CASE_INPUT", 422)
+    try:
+        created_at = datetime.fromisoformat(payload["binding_created_at"].replace("Z", "+00:00"))
+        if created_at.utcoffset() is None:
+            raise ValueError("Timezone is required.")
+    except ValueError as exc:
+        raise JobRejected("INVALID_RESEARCH_CASE_INPUT", 422) from exc
+
+
+def research_case_job_payload(binding: ImplementationBindingReceipt) -> dict[str, object]:
+    return {
+        "candidate_id": binding.candidate_id,
+        "candidate_hash": binding.candidate_hash,
+        "binding_id": binding.binding_id,
+        "binding_hash": binding.binding_hash,
+        "protocol_hash": binding.protocol_hash,
+        "binding_created_at": binding.created_at.isoformat().replace("+00:00", "Z"),
+    }
+
+
 def verify_envelope(
     raw: str, mac: str, key: bytes, actor: WorkerPrincipal,
     payload: dict[str, object], image: str, *, now: int | None = None,
@@ -107,10 +156,14 @@ def verify_envelope(
         raise JobRejected("INVALID_JOB_ENVELOPE", 422) from exc
     if not hmac.compare_digest(signature(envelope, key), mac):
         raise JobRejected("INVALID_JOB_SIGNATURE", 403)
-    actor.require(
-        "checks:run" if envelope.operation == "numerical_fixture:run" else envelope.operation,
-        envelope.workspace_id,
+    permission = (
+        "checks:run"
+        if envelope.operation == "numerical_fixture:run"
+        else "experiments:run"
+        if envelope.operation == "research_case:run"
+        else envelope.operation
     )
+    actor.require(permission, envelope.workspace_id)
     if envelope.actor_id != actor.identity:
         raise JobRejected("JOB_ACTOR_MISMATCH", 403)
     now = int(time.time()) if now is None else now
@@ -129,6 +182,16 @@ def verify_envelope(
         if (
             envelope.target_uuid != payload["candidate_id"]
             or envelope.source_hash != digest([payload["candidate_id"], payload["candidate_hash"]])
+        ):
+            raise JobRejected("JOB_SOURCE_MISMATCH", 422)
+    elif envelope.operation == "research_case:run":
+        validate_research_case_payload(payload)
+        if (
+            envelope.target_uuid != payload["candidate_id"]
+            or envelope.source_hash
+            != digest([
+                payload["candidate_id"], payload["candidate_hash"], payload["binding_hash"]
+            ])
         ):
             raise JobRejected("JOB_SOURCE_MISMATCH", 422)
     return envelope
@@ -272,6 +335,67 @@ class ResearchQueue:
             raise JobRejected("INVALID_RESULT_SIGNATURE", 403)
         return ticket
 
+    async def admit_research_case(
+        self,
+        actor: WorkerPrincipal,
+        *,
+        workspace_id: str,
+        candidate_id: str,
+        idempotency_key: str,
+        binding: ImplementationBindingReceipt,
+        reserved_ms: int,
+    ) -> JobTicket:
+        actor.require("experiments:run", workspace_id)
+        payload = research_case_job_payload(binding)
+        validate_research_case_payload(payload)
+        if (
+            candidate_id != binding.candidate_id
+            or binding.workspace_id != workspace_id
+            or type(reserved_ms) is not int
+            or not 10 <= reserved_ms <= 30_000
+            or not IMAGE_ID.fullmatch(binding.execution_image)
+            or not idempotency_key
+            or len(idempotency_key) > 200
+            or not idempotency_key.isascii()
+        ):
+            raise JobRejected("INVALID_RESEARCH_CASE_INPUT", 422)
+        await self._validate_research_case_source(
+            workspace_id=workspace_id,
+            candidate_id=candidate_id,
+            binding=binding,
+            reserved_ms=reserved_ms,
+        )
+        now = int(time.time())
+        job_id = str(uuid5(NAMESPACE_URL, json.dumps(
+            [workspace_id, "research_case:run", candidate_id, idempotency_key]
+        )))
+        envelope = JobEnvelope(
+            job_id=job_id,
+            workspace_id=workspace_id,
+            target_uuid=candidate_id,
+            actor_id=actor.identity,
+            operation="research_case:run",
+            request_hash=digest([payload, binding.execution_image, reserved_ms]),
+            source_hash=digest([candidate_id, binding.candidate_hash, binding.binding_hash]),
+            payload_hash=digest(payload),
+            image_id=binding.execution_image,
+            issued_at=now,
+            expires_at=now + 120,
+            reserved_ms=reserved_ms,
+        )
+        async with self.store.driver.session(database=self.store.database) as session:
+            raw, mac, result, result_mac = await session.execute_write(
+                self._admit, envelope, now
+            )
+        ticket = JobTicket(JobEnvelope.model_validate_json(raw), mac, result)
+        if not hmac.compare_digest(signature(ticket.envelope, self.key), mac):
+            raise JobRejected("INVALID_JOB_SIGNATURE", 403)
+        if result is not None and not hmac.compare_digest(
+            self._result_mac(envelope.job_id, result), result_mac or ""
+        ):
+            raise JobRejected("INVALID_RESULT_SIGNATURE", 403)
+        return ticket
+
     @staticmethod
     async def _lock(tx):
         await (await tx.run("MERGE (q:ResearchQueueLock {id:'admission.v1'}) "
@@ -323,8 +447,18 @@ class ResearchQueue:
             )
             if digest(source.get("latex")) != envelope.source_hash:
                 raise JobRejected("JOB_SOURCE_MISMATCH", 422)
-        else:
+        elif envelope.operation == "numerical_fixture:run":
             await self._resolve_numerical_fixture_source(envelope, payload)
+        else:
+            binding = await self._research_case_binding(
+                envelope.workspace_id, payload, image
+            )
+            await self._validate_research_case_source(
+                workspace_id=envelope.workspace_id,
+                candidate_id=envelope.target_uuid,
+                binding=binding,
+                reserved_ms=envelope.reserved_ms,
+            )
         async with self.store.driver.session(database=self.store.database) as session:
             await session.execute_write(self._claim, ticket)
 
@@ -414,6 +548,61 @@ class ResearchQueue:
         if payload != expected_payload or reserved_ms != expected_reservation:
             raise JobRejected("JOB_INPUT_MISMATCH", 422)
 
+    async def _research_case_binding(
+        self,
+        workspace_id: str,
+        payload: dict[str, object],
+        image: str,
+    ) -> ImplementationBindingReceipt:
+        rows, _, _ = await self.store.driver.execute_query(
+            "MATCH (c:ResearchCandidate {candidate_id:$candidate_id, group_id:$group}) "
+            "RETURN c.payload AS payload LIMIT 1",
+            candidate_id=payload["candidate_id"],
+            group=workspace_group_id(workspace_id),
+            database_=self.store.database,
+        )
+        if not rows:
+            raise JobRejected("JOB_SOURCE_NOT_FOUND", 404)
+        candidate = CompiledCandidate.model_validate_json(rows[0]["payload"])
+        candidate, spec, parent = await self.store.prepare_registered_research_case(
+            workspace_id=workspace_id, candidate_id=candidate.candidate_id
+        )
+        binding = make_implementation_binding(
+            candidate,
+            spec,
+            parent_candidate=parent,
+            execution_image=image,
+            now=datetime.fromisoformat(str(payload["binding_created_at"]).replace("Z", "+00:00")),
+        )
+        if (
+            binding.binding_id != payload["binding_id"]
+            or binding.binding_hash != payload["binding_hash"]
+            or binding.protocol_hash != payload["protocol_hash"]
+        ):
+            raise JobRejected("JOB_SOURCE_MISMATCH", 422)
+        return binding
+
+    async def _validate_research_case_source(
+        self,
+        *,
+        workspace_id: str,
+        candidate_id: str,
+        binding: ImplementationBindingReceipt,
+        reserved_ms: int,
+    ) -> None:
+        candidate, spec, parent = await self.store.prepare_registered_research_case(
+            workspace_id=workspace_id, candidate_id=candidate_id
+        )
+        expected = make_implementation_binding(
+            candidate,
+            spec,
+            parent_candidate=parent,
+            execution_image=binding.execution_image,
+            now=binding.created_at,
+        )
+        if expected != binding or reserved_ms != 30_000:
+            raise JobRejected("JOB_INPUT_MISMATCH", 422)
+
     async def _claim(self, tx, ticket):
         await self._lock(tx)
         row = await (await tx.run(
@@ -495,6 +684,105 @@ class ResearchQueue:
             result,
         )
         result_json = result.model_dump_json()
+        updated = await (await tx.run(
+            "MATCH (j:ResearchJob {id:$id, state:'running', envelope:$envelope, mac:$mac}) "
+            "WHERE j.expires_at>$now SET j.state='finished', j.result=$result, "
+            "j.result_mac=$result_mac RETURN j.id AS id",
+            id=envelope.job_id,
+            envelope=envelope.model_dump_json(),
+            mac=ticket.mac,
+            now=int(time.time()),
+            result=result_json,
+            result_mac=self._result_mac(envelope.job_id, result_json),
+        )).single()
+        if updated is None:
+            raise JobRejected("JOB_RESULT_REQUIRES_RECONCILIATION")
+        return appended
+
+    async def finish_research_case(
+        self,
+        ticket: JobTicket,
+        *,
+        research_store,
+        idempotency_key: str,
+        binding: ImplementationBindingReceipt,
+        result: ResearchCaseReceipt,
+    ) -> ResearchCaseReceiptResponse:
+        envelope = ticket.envelope
+        binding = ImplementationBindingReceipt.model_validate(binding.model_dump(mode="python"))
+        result = ResearchCaseReceipt.model_validate(result.model_dump(mode="python"))
+        payload = research_case_job_payload(binding)
+        if (
+            envelope.operation != "research_case:run"
+            or result.run_id != envelope.job_id
+            or result.workspace_id != envelope.workspace_id
+            or result.candidate_id != envelope.target_uuid
+            or result.actor_id != envelope.actor_id
+            or result.binding_id != binding.binding_id
+            or result.binding_hash != binding.binding_hash
+            or result.candidate_hash != binding.candidate_hash
+            or result.protocol_hash != binding.protocol_hash
+            or envelope.image_id != binding.execution_image
+            or envelope.payload_hash != digest(payload)
+            or envelope.source_hash != digest([
+                binding.candidate_id, binding.candidate_hash, binding.binding_hash
+            ])
+            or not hmac.compare_digest(signature(envelope, self.key), ticket.mac)
+        ):
+            raise JobRejected("JOB_RESULT_MISMATCH", 422)
+        async with self.store.driver.session(database=self.store.database) as session:
+            return await session.execute_write(
+                self._finish_research_case,
+                ticket,
+                research_store,
+                idempotency_key,
+                binding,
+                result,
+            )
+
+    async def _finish_research_case(
+        self,
+        tx,
+        ticket: JobTicket,
+        research_store,
+        idempotency_key: str,
+        binding: ImplementationBindingReceipt,
+        result: ResearchCaseReceipt,
+    ) -> ResearchCaseReceiptResponse:
+        await self._lock(tx)
+        envelope = ticket.envelope
+        row = await (await tx.run(
+            "MATCH (j:ResearchJob {id:$id, state:'running', envelope:$envelope, mac:$mac}) "
+            "WHERE j.expires_at>$now RETURN j.id AS id",
+            id=envelope.job_id,
+            envelope=envelope.model_dump_json(),
+            mac=ticket.mac,
+            now=int(time.time()),
+        )).single()
+        if row is None:
+            raise JobRejected("JOB_RESULT_REQUIRES_RECONCILIATION")
+        group_id, receipt_key, intent_hash = research_store.research_case_receipt_identity(
+            workspace_id=envelope.workspace_id,
+            candidate_id=envelope.target_uuid,
+            actor_id=envelope.actor_id,
+            idempotency_key=idempotency_key,
+            binding=binding,
+            result=result,
+        )
+        appended = await research_store._tx_append_registered_research_case(
+            tx,
+            group_id,
+            envelope.workspace_id,
+            envelope.target_uuid,
+            envelope.actor_id,
+            receipt_key,
+            intent_hash,
+            binding,
+            result,
+        )
+        result_json = ResearchCaseReceiptResponse(
+            binding=binding, result=result, replayed=False
+        ).model_dump_json()
         updated = await (await tx.run(
             "MATCH (j:ResearchJob {id:$id, state:'running', envelope:$envelope, mac:$mac}) "
             "WHERE j.expires_at>$now SET j.state='finished', j.result=$result, "
