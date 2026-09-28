@@ -35,18 +35,28 @@ const CONTRACT_FIELDS = new Set([
   'name',
   'category',
   'shape',
+  'feature_rank',
   'domain',
   'constraints',
   'scope',
+  'normalization',
+  'mask',
+  'causal',
+  'resource_class',
 ]);
 
 export type ReviewedContractInput = {
   name: string;
   category: string;
   shape: Array<number | string> | null;
+  feature_rank?: number | null;
   domain: string;
   constraints: string[];
   scope?: string;
+  normalization?: string;
+  mask?: string;
+  causal?: boolean | null;
+  resource_class?: 'unknown' | 'not_applicable' | 'cpu' | 'gpu';
 };
 
 export type ContractReviewInput = {
@@ -216,17 +226,50 @@ function parseReviewedContract(
         });
   if (shape !== null && shape.length > 16)
     throw new TypeError('Shape is too large.');
+  const featureRank = contract.feature_rank;
+  if (featureRank !== undefined && featureRank !== null &&
+      (typeof featureRank !== 'number' || !Number.isInteger(featureRank) ||
+        featureRank < 1 || featureRank > 100000 || category !== 'vector')) {
+    throw new TypeError('Feature rank must be a bounded positive integer on a vector contract.');
+  }
   const scope =
-    contract.scope === undefined
+    contract.scope == null
       ? undefined
       : boundedString(contract.scope, 500);
+  const normalization = contract.normalization;
+  if (normalization !== undefined && (
+    typeof normalization !== 'string' ||
+    !['none', 'l1', 'l2', 'softmax', 'layer_norm', 'rms_norm', 'batch_norm', 'unknown'].includes(normalization)
+  )) throw new TypeError('Invalid normalization.');
+  const mask = contract.mask;
+  if (mask !== undefined && (
+    typeof mask !== 'string' ||
+    !['none', 'causal', 'padding', 'sliding_window', 'custom', 'missing'].includes(mask)
+  )) throw new TypeError('Invalid mask.');
+  const causal = contract.causal;
+  if (causal !== undefined && causal !== null && typeof causal !== 'boolean') {
+    throw new TypeError('Invalid causality.');
+  }
+  const resourceClass = contract.resource_class;
+  if (resourceClass !== undefined &&
+      resourceClass !== 'unknown' &&
+      resourceClass !== 'not_applicable' &&
+      resourceClass !== 'cpu' &&
+      resourceClass !== 'gpu') {
+    throw new TypeError('Invalid resource class.');
+  }
   return {
     name,
     category,
     shape,
+    ...(featureRank !== undefined ? { feature_rank: featureRank as number | null } : {}),
     domain,
     constraints: boundedStringArray(contract.constraints, 50, 500),
     ...(scope ? { scope } : {}),
+    ...(normalization !== undefined ? { normalization } : {}),
+    ...(mask !== undefined ? { mask } : {}),
+    ...(causal !== undefined ? { causal } : {}),
+    ...(resourceClass !== undefined ? { resource_class: resourceClass } : {}),
   };
 }
 

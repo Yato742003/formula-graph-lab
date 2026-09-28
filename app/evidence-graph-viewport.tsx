@@ -5,6 +5,7 @@ import {
   BackgroundVariant,
   Controls,
   Handle,
+  MarkerType,
   MiniMap,
   Panel,
   Position,
@@ -14,11 +15,12 @@ import {
   type Edge,
   type Node,
   type NodeProps,
-  type OnSelectionChangeParams,
 } from '@xyflow/react';
 import katex from 'katex';
 import {
   Compass,
+  Eye,
+  LayoutGrid,
   Maximize2,
   Minimize2,
   Orbit,
@@ -51,8 +53,27 @@ export type GraphViewportEdge = {
   relation: EvidenceRelationType;
 };
 
-type EvidenceNodeData = GraphViewportNode & Record<string, unknown>;
-type EvidenceFlowNode = Node<EvidenceNodeData, 'evidence'>;
+export type InCardSymbol = {
+  id: string;
+  label: string;
+  expression: string;
+};
+
+type EvidenceNodeData = GraphViewportNode & {
+  symbols?: InCardSymbol[];
+  onSelectSymbol?: (id: string) => void;
+  isCompact?: boolean;
+  isDimmed?: boolean;
+} & Record<string, unknown>;
+export type EvidenceFlowNode = Node<EvidenceNodeData, 'evidence'>;
+
+export type SectionGroupData = {
+  title: string;
+  count: number;
+  sectionId?: string;
+};
+export type SectionGroupFlowNode = Node<SectionGroupData, 'sectionGroup'>;
+export type AnyFlowNode = EvidenceFlowNode | SectionGroupFlowNode;
 
 type EvidenceGraphViewportProps = {
   nodes: GraphViewportNode[];
@@ -60,6 +81,9 @@ type EvidenceGraphViewportProps = {
   selectedId: string | null;
   onSelect: (nodeId: string) => void;
   loading?: boolean;
+  hasSnapshot?: boolean;
+  isZenMode?: boolean;
+  onToggleZen?: () => void;
 };
 
 const kindColumns: Record<EvidenceEntityType, number> = {
@@ -158,15 +182,45 @@ export function renderFormulaHtml(rawExpr: string): string | null {
 
 function EvidenceNodeCard({ data, selected }: NodeProps<EvidenceFlowNode>) {
   const isEquation = data.kind === 'Equation';
-  const latexHtml = isEquation ? renderFormulaHtml(data.expression) : null;
+  const isCompact = Boolean(data.isCompact);
+  const latexHtml = isEquation && !isCompact ? renderFormulaHtml(data.expression) : null;
   const displayExpression =
     isEquation ? cleanFormula(data.expression) : data.expression;
 
+  const isDimmed = Boolean(data.isDimmed);
+
+  if (isCompact) {
+    return (
+      <article
+        className={`flow-evidence-node is-compact ${kindTone[data.kind]} ${selected ? 'is-selected' : ''} ${isDimmed ? 'is-dimmed' : ''}`}
+        title={`${data.kind}: ${data.label}\n${displayExpression}`}
+      >
+        <Handle id="top" type="target" position={Position.Top} isConnectable={false} />
+        <Handle id="left" type="target" position={Position.Left} isConnectable={false} />
+        <div className="compact-node-content">
+          <span className="compact-node-badge">{data.kind.slice(0, 3)}</span>
+          <strong className="compact-node-label truncate">{data.label}</strong>
+          {data.symbols && data.symbols.length > 0 ? (
+            <span
+              className="compact-node-sym-count"
+              title={`${data.symbols.length} defined symbols: ${data.symbols.map((s) => s.label).join(', ')}`}
+            >
+              {data.symbols.length}s
+            </span>
+          ) : null}
+        </div>
+        <Handle id="bottom" type="source" position={Position.Bottom} isConnectable={false} />
+        <Handle id="right" type="source" position={Position.Right} isConnectable={false} />
+      </article>
+    );
+  }
+
   return (
     <article
-      className={`flow-evidence-node ${kindTone[data.kind]} ${selected ? 'is-selected' : ''}`}
+      className={`flow-evidence-node ${kindTone[data.kind]} ${selected ? 'is-selected' : ''} ${isDimmed ? 'is-dimmed' : ''}`}
     >
-      <Handle type="target" position={Position.Left} isConnectable={false} />
+      <Handle id="top" type="target" position={Position.Top} isConnectable={false} />
+      <Handle id="left" type="target" position={Position.Left} isConnectable={false} />
       <span>{data.kind}</span>
       <strong>{data.label}</strong>
       {latexHtml ? (
@@ -178,23 +232,84 @@ function EvidenceNodeCard({ data, selected }: NodeProps<EvidenceFlowNode>) {
         <code>{displayExpression}</code>
       )}
       <small>{data.meta}</small>
-      <Handle type="source" position={Position.Right} isConnectable={false} />
+      {data.symbols && data.symbols.length > 0 ? (
+        <div className="node-symbol-chips" aria-label="Defined symbols">
+          <span className="symbol-chips-title">SYMBOLS</span>
+          <div className="symbol-chips-list">
+            {data.symbols.slice(0, 4).map((sym) => (
+              <button
+                key={sym.id}
+                type="button"
+                className="node-symbol-chip"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  data.onSelectSymbol?.(sym.id);
+                }}
+                title={`${sym.label}: ${sym.expression}`}
+              >
+                <span className="symbol-chip-sym">{sym.label}</span>
+                {sym.expression ? (
+                  <span className="symbol-chip-def">{sym.expression}</span>
+                ) : null}
+              </button>
+            ))}
+            {data.symbols.length > 4 ? (
+              <span
+                className="node-symbol-more"
+                title={data.symbols.slice(4).map((s) => s.label).join(', ')}
+              >
+                +{data.symbols.length - 4}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+      <Handle id="bottom" type="source" position={Position.Bottom} isConnectable={false} />
+      <Handle id="right" type="source" position={Position.Right} isConnectable={false} />
     </article>
   );
 }
 
+function SectionGroupCard({
+  data,
+}: NodeProps<SectionGroupFlowNode>) {
+  return (
+    <div className="section-swimlane-card" aria-hidden="true">
+      <div className="section-swimlane-header">
+        <div className="section-swimlane-title-group">
+          <span className="section-swimlane-pill">SECTION</span>
+          <strong className="section-swimlane-title" title={data.title}>
+            {data.title}
+          </strong>
+        </div>
+        {data.count > 0 ? (
+          <span className="section-swimlane-badge">
+            {data.count} {data.count === 1 ? 'formula' : 'formulas'}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 const MemoEvidenceNodeCard = memo(EvidenceNodeCard);
-const nodeTypes = { evidence: MemoEvidenceNodeCard };
+const MemoSectionGroupCard = memo(SectionGroupCard);
+
+const nodeTypes = {
+  evidence: MemoEvidenceNodeCard,
+  sectionGroup: MemoSectionGroupCard,
+};
 
 function relationLabel(relation: EvidenceRelationType): string {
   return relation.replaceAll('_', ' ');
 }
 
-function layoutNodes(
+// Fallback multi-column wrapping grid for papers without equations or section-only test suites
+function layoutGridFallback(
   nodes: GraphViewportNode[],
   edges: GraphViewportEdge[] = [],
-): EvidenceFlowNode[] {
-  // Build parent mapping for paper clustering
+  isCompact = false,
+): AnyFlowNode[] {
   const parentMap = new Map<string, string>();
   for (const edge of edges) {
     if (
@@ -218,7 +333,6 @@ function layoutNodes(
     return 'standalone';
   };
 
-  // Group nodes by paper cluster
   const clusters = new Map<string, GraphViewportNode[]>();
   for (const node of nodes) {
     const root = findPaperRoot(node.id);
@@ -234,17 +348,14 @@ function layoutNodes(
   });
 
   let currentY = 36;
-  const flowNodes: EvidenceFlowNode[] = [];
-
-  const MAX_ROWS_PER_COL = 8;
+  const flowNodes: AnyFlowNode[] = [];
+  const MAX_ROWS_PER_COL = isCompact ? 10 : 8;
 
   for (const [, clusterNodes] of clusterEntries) {
     const activeKindsInCluster = [...new Set(clusterNodes.map((node) => node.kind))].sort(
       (left, right) => (kindColumns[left] ?? 0) - (kindColumns[right] ?? 0),
     );
 
-    // Compute column offsets per kind with multi-column wrapping for large node counts
-    // ponytail: fixed grid packing layout, ceiling: 8 rows per sub-column, upgrade: container-height-aware packing if viewport height becomes user-resizable
     const kindBaseCol = new Map<EvidenceEntityType, number>();
     let totalClusterCols = 0;
     for (const kind of activeKindsInCluster) {
@@ -265,9 +376,9 @@ function layoutNodes(
       );
     });
 
-    const colWidth = totalClusterCols <= 2 ? 340 : 380;
-    const rowHeight = 150;
-    const clusterGap = 48;
+    const colWidth = isCompact ? (totalClusterCols <= 2 ? 205 : 225) : (totalClusterCols <= 2 ? 340 : 380);
+    const rowHeight = isCompact ? 58 : 150;
+    const clusterGap = isCompact ? 28 : 48;
 
     for (const node of sortedNodes) {
       const baseCol = kindBaseCol.get(node.kind) ?? 0;
@@ -284,7 +395,7 @@ function layoutNodes(
         id: node.id,
         type: 'evidence',
         position: { x: 36 + colIndex * colWidth, y: currentY + row * rowHeight },
-        data: node,
+        data: { ...node, isCompact },
         draggable: false,
         selectable: true,
         focusable: true,
@@ -294,6 +405,256 @@ function layoutNodes(
     }
 
     currentY += maxRowInCluster * rowHeight + clusterGap;
+  }
+
+  return flowNodes;
+}
+
+// Option 3: Section Swimlanes / Sub-flow Groups (Obsidian Canvas / Open Design)
+function layoutNodes(
+  nodes: GraphViewportNode[],
+  edges: GraphViewportEdge[] = [],
+  isCompact = false,
+): AnyFlowNode[] {
+  const hasEquations = nodes.some((n) => n.kind === 'Equation');
+  if (!hasEquations) {
+    return layoutGridFallback(nodes, edges, isCompact);
+  }
+
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+
+  // 1. Map equations to parent section
+  const eqParentSection = new Map<string, string>();
+  for (const edge of edges) {
+    if (edge.relation === 'contains') {
+      const src = nodeMap.get(edge.source);
+      const tgt = nodeMap.get(edge.target);
+      if (src?.kind === 'Section' && tgt?.kind === 'Equation') {
+        eqParentSection.set(tgt.id, src.id);
+      }
+    }
+  }
+
+  // 2. Map symbols defined by equations
+  const eqDefinedSymbols = new Map<string, GraphViewportNode[]>();
+  for (const edge of edges) {
+    if (edge.relation === 'defines') {
+      const src = nodeMap.get(edge.source);
+      const tgt = nodeMap.get(edge.target);
+      if (src?.kind === 'Equation' && tgt?.kind === 'Symbol') {
+        const list = eqDefinedSymbols.get(src.id) ?? [];
+        list.push(tgt);
+        eqDefinedSymbols.set(src.id, list);
+      }
+    }
+  }
+
+  // 3. Group equations by Section
+  const sectionEquations = new Map<string, GraphViewportNode[]>();
+  for (const node of nodes) {
+    if (node.kind === 'Equation') {
+      let secId = eqParentSection.get(node.id);
+      if (!secId && node.meta) {
+        const secMatch = node.meta.match(/#?(S\d+)/i);
+        if (secMatch) {
+          const matchedSec = nodes.find(
+            (n) => n.kind === 'Section' && (n.id.includes(secMatch[1]) || n.label.includes(secMatch[1]))
+          );
+          if (matchedSec) secId = matchedSec.id;
+        }
+      }
+      secId = secId ?? 'core-derivations';
+      const list = sectionEquations.get(secId) ?? [];
+      list.push(node);
+      sectionEquations.set(secId, list);
+    }
+  }
+
+  // Order sections by natural appearance in nodes
+  const orderedSections = [...sectionEquations.keys()].sort((a, b) => {
+    if (a === 'core-derivations') return 1;
+    if (b === 'core-derivations') return -1;
+    const idxA = nodes.findIndex((n) => n.id === a);
+    const idxB = nodes.findIndex((n) => n.id === b);
+    return idxA - idxB;
+  });
+
+  const flowNodes: AnyFlowNode[] = [];
+  const assignedNodeIds = new Set<string>();
+
+  const cardWidth = isCompact ? 205 : 280;
+  const cardHeight = isCompact ? 58 : 150;
+  const cardGap = isCompact ? 14 : 22;
+  const swimlanePadX = 18;
+  const swimlanePadTop = 64;
+  const swimlanePadBottom = 22;
+  const swimlaneGap = isCompact ? 36 : 56;
+
+  const rootNodes = nodes.filter((n) => n.kind === 'Paper' || n.kind === 'PaperVersion');
+  const hasPaperRoot = rootNodes.length > 0;
+  const paperColWidth = isCompact ? 205 : 250;
+  const laneInnerWidth = cardWidth;
+  const laneTotalWidth = laneInnerWidth + swimlanePadX * 2;
+
+  // Maximum columns per row to maintain a balanced 16:9 ratio and prevent canvas stretching
+  const MAX_LANES_PER_ROW = 4;
+  const row0Lanes = hasPaperRoot ? 3 : MAX_LANES_PER_ROW;
+
+  const getSectionGridPos = (idx: number) => {
+    if (hasPaperRoot) {
+      if (idx < row0Lanes) {
+        return { row: 0, col: idx };
+      }
+      const adj = idx - row0Lanes;
+      return {
+        row: 1 + Math.floor(adj / MAX_LANES_PER_ROW),
+        col: adj % MAX_LANES_PER_ROW,
+      };
+    }
+    return {
+      row: Math.floor(idx / MAX_LANES_PER_ROW),
+      col: idx % MAX_LANES_PER_ROW,
+    };
+  };
+
+  // Precalculate height for each row
+  const rowMaxHeights = new Map<number, number>();
+  orderedSections.forEach((secId, idx) => {
+    const eqs = sectionEquations.get(secId) ?? [];
+    const laneTotalHeight = swimlanePadTop + eqs.length * (cardHeight + cardGap) + swimlanePadBottom;
+    const { row } = getSectionGridPos(idx);
+    const currMax = rowMaxHeights.get(row) ?? 0;
+    if (laneTotalHeight > currMax) {
+      rowMaxHeights.set(row, laneTotalHeight);
+    }
+  });
+
+  // Calculate rowStartY for each row
+  const totalRows = orderedSections.length > 0 ? getSectionGridPos(orderedSections.length - 1).row + 1 : 0;
+  const rowStartY = new Map<number, number>();
+  let cumY = 40;
+  for (let r = 0; r < Math.max(1, totalRows); r++) {
+    rowStartY.set(r, cumY);
+    cumY += (rowMaxHeights.get(r) ?? 380) + swimlaneGap;
+  }
+
+  // 4. Preceding Column: Paper / PaperVersion node (anchor at left of Row 0)
+  if (hasPaperRoot) {
+    rootNodes.forEach((node, idx) => {
+      assignedNodeIds.add(node.id);
+      flowNodes.push({
+        id: node.id,
+        type: 'evidence',
+        position: { x: 36, y: (rowStartY.get(0) ?? 40) + idx * (cardHeight + cardGap) },
+        data: { ...node, isCompact: true },
+        draggable: false,
+        selectable: true,
+        focusable: true,
+        ariaRole: 'button',
+        ariaLabel: `${node.kind}: ${node.label}. ${node.expression}`,
+      });
+    });
+  }
+
+  // 5. Section Swimlanes for Equations & Embedded Symbol Chips
+  orderedSections.forEach((secId, idx) => {
+    const eqs = sectionEquations.get(secId) ?? [];
+    const secNode = nodeMap.get(secId);
+    let title = 'Core Derivations';
+    if (secNode) {
+      title = secNode.label || secNode.expression || 'Section';
+      assignedNodeIds.add(secNode.id);
+    }
+
+    const { row, col } = getSectionGridPos(idx);
+    const startY = rowStartY.get(row) ?? 40;
+    const xBase = 36 + (row === 0 && hasPaperRoot ? paperColWidth + swimlaneGap : 0);
+    const startX = xBase + col * (laneTotalWidth + swimlaneGap);
+
+    eqs.forEach((eq, curRow) => {
+      assignedNodeIds.add(eq.id);
+      const syms = (eqDefinedSymbols.get(eq.id) ?? []).filter((s) => nodeMap.has(s.id));
+      syms.forEach((s) => assignedNodeIds.add(s.id));
+
+      const inCardSymbols: InCardSymbol[] = syms.map((s) => ({
+        id: s.id,
+        label: s.label,
+        expression: s.expression,
+      }));
+
+      const eqY = startY + swimlanePadTop + curRow * (cardHeight + cardGap);
+      flowNodes.push({
+        id: eq.id,
+        type: 'evidence',
+        position: {
+          x: startX + swimlanePadX,
+          y: eqY,
+        },
+        data: {
+          ...eq,
+          isCompact,
+          symbols: inCardSymbols,
+        },
+        draggable: false,
+        selectable: true,
+        focusable: true,
+        ariaRole: 'button',
+        ariaLabel: `${eq.kind}: ${eq.label}. ${eq.expression}`,
+      });
+    });
+
+    const laneTotalHeight = swimlanePadTop + eqs.length * (cardHeight + cardGap) + swimlanePadBottom;
+
+    flowNodes.unshift({
+      id: `swimlane-${secId}`,
+      type: 'sectionGroup',
+      position: { x: startX, y: startY },
+      style: { width: laneTotalWidth, height: laneTotalHeight },
+      data: {
+        title,
+        count: eqs.length,
+        sectionId: secId,
+      },
+      draggable: false,
+      selectable: false,
+      focusable: false,
+      zIndex: -1,
+    } as AnyFlowNode);
+  });
+
+  // Rule 11 (ui-craft): Empty sections earn no canvas space.
+  // They are fully browsable in the Left Sidebar ("Extracted Structure").
+  for (const node of nodes) {
+    if (node.kind === 'Section') {
+      assignedNodeIds.add(node.id);
+    }
+  }
+
+  // 6. Remaining unassigned nodes (Assumptions, Claims, Hypotheses, etc.)
+  const remainingNodes = nodes.filter((n) => !assignedNodeIds.has(n.id));
+  if (remainingNodes.length > 0) {
+    let maxX = 36;
+    for (const fn of flowNodes) {
+      const w = fn.type === 'sectionGroup' ? ((fn.style?.width as number) || laneTotalWidth) : cardWidth;
+      if (fn.position.x + w > maxX) {
+        maxX = fn.position.x + w;
+      }
+    }
+    const rightClusterX = maxX + swimlaneGap;
+    remainingNodes.forEach((node, idx) => {
+      const y = 40 + idx * (cardHeight + cardGap);
+      flowNodes.push({
+        id: node.id,
+        type: 'evidence',
+        position: { x: rightClusterX, y },
+        data: { ...node, isCompact },
+        draggable: false,
+        selectable: true,
+        focusable: true,
+        ariaRole: 'button',
+        ariaLabel: `${node.kind}: ${node.label}. ${node.expression}`,
+      });
+    });
   }
 
   return flowNodes;
@@ -314,17 +675,43 @@ function FitViewWatcher({
     if (!nodesInitialized || nodeCount === 0) return;
 
     const timer = setTimeout(() => {
+      const stage = typeof document !== 'undefined' ? document.querySelector('.react-flow-stage') : null;
+      if (stage && (stage.clientWidth === 0 || stage.clientHeight === 0)) return;
+
       void fitView({
         padding: 0.12,
         maxZoom: 1.05,
         minZoom: 0.25,
-        duration: hasFittedRef.current ? 320 : 0,
+        duration: hasFittedRef.current ? 300 : 0,
       });
       hasFittedRef.current = true;
-    }, 40);
+    }, 200);
 
     return () => clearTimeout(timer);
   }, [nodesInitialized, nodeCount, filterKey, fitView]);
+
+  useEffect(() => {
+    let resizeTimer: ReturnType<typeof setTimeout>;
+    const handleResize = () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        const stage = typeof document !== 'undefined' ? document.querySelector('.react-flow-stage') : null;
+        if (stage && (stage.clientWidth === 0 || stage.clientHeight === 0)) return;
+
+        void fitView({
+          padding: 0.12,
+          maxZoom: 1.05,
+          minZoom: 0.25,
+          duration: 250,
+        });
+      }, 150);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => {
+      clearTimeout(resizeTimer);
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [fitView]);
 
   return null;
 }
@@ -335,9 +722,13 @@ export default function EvidenceGraphViewport({
   selectedId,
   onSelect,
   loading = false,
+  hasSnapshot = false,
+  isZenMode = false,
+  onToggleZen,
 }: EvidenceGraphViewportProps) {
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d');
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isCompactMode, setIsCompactMode] = useState(false);
 
   useEffect(() => {
     if (!isFullscreen) return;
@@ -351,7 +742,10 @@ export default function EvidenceGraphViewport({
   }, [isFullscreen]);
 
   useEffect(() => {
-    window.dispatchEvent(new Event('resize'));
+    const rafId = requestAnimationFrame(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    return () => cancelAnimationFrame(rafId);
   }, [isFullscreen]);
   const relations = useMemo(
     () => [...new Set(edges.map((edge) => edge.relation))].sort(),
@@ -364,15 +758,9 @@ export default function EvidenceGraphViewport({
   const [disabledRelations, setDisabledRelations] = useState<
     Set<EvidenceRelationType>
   >(() => new Set());
-  // Focus view: defaults to Equations and Papers for clean mathematical lineage; user can toggle Sections/Symbols or switch to 3D Galaxy
-  const [disabledKinds, setDisabledKinds] = useState<Set<EvidenceEntityType>>(() => {
-    const hasEq = nodes.some((n) => n.kind === 'Equation');
-    const hasSec = nodes.some((n) => n.kind === 'Section');
-    if (hasEq && hasSec) {
-      return new Set<EvidenceEntityType>(['Section', 'Symbol']);
-    }
-    return new Set<EvidenceEntityType>();
-  });
+  const [disabledKinds, setDisabledKinds] = useState<Set<EvidenceEntityType>>(
+    () => new Set<EvidenceEntityType>(),
+  );
   const activeFilterCount = disabledKinds.size + disabledRelations.size;
 
   const toggleKind = useCallback(
@@ -401,6 +789,16 @@ export default function EvidenceGraphViewport({
   const [isMinimapOpen, setIsMinimapOpen] = useState(false);
 
   const activeFocusId = hoveredNodeId ?? selectedId;
+  const activeNeighborNodeIds = useMemo(() => {
+    if (!activeFocusId) return null;
+    const set = new Set<string>([activeFocusId]);
+    for (const edge of edges) {
+      if (edge.source === activeFocusId) set.add(edge.target);
+      if (edge.target === activeFocusId) set.add(edge.source);
+    }
+    return set;
+  }, [activeFocusId, edges]);
+
   const activeEdgeIds = useMemo(() => {
     if (!activeFocusId) return null;
     const set = new Set<string>();
@@ -423,78 +821,320 @@ export default function EvidenceGraphViewport({
     [edges, disabledRelations, visibleNodeIds],
   );
 
-  const flowNodes = useMemo(
-    () => layoutNodes(visibleNodes, edges),
-    [visibleNodes, edges],
+  const baseLayoutNodes = useMemo(
+    () => layoutNodes(visibleNodes, edges, isCompactMode),
+    [visibleNodes, edges, isCompactMode],
   );
-  const flowEdges = useMemo<Edge[]>(
-    () =>
-      visibleEdges.map((edge) => {
-        const isHierarchical =
-          edge.relation === 'contains' ||
-          edge.relation === 'defines' ||
-          edge.relation === 'has_version' ||
-          edge.relation === 'uses';
-        const isHighlighted = activeEdgeIds !== null && activeEdgeIds.has(edge.id);
-        const isDimmed = activeEdgeIds !== null && !isHighlighted;
-        const stroke = edgeColors[edge.relation] ?? '#94a3b8';
 
+  const flowNodes = useMemo(
+    () =>
+      baseLayoutNodes.map((node) => {
+        if (node.type === 'sectionGroup') {
+          return node;
+        }
+        const isSelected = node.id === selectedId;
+        const isDimmed =
+          activeNeighborNodeIds !== null &&
+          !activeNeighborNodeIds.has(node.id);
+        if (
+          node.selected === isSelected &&
+          Boolean(node.data.isDimmed) === isDimmed &&
+          node.data.onSelectSymbol === onSelect
+        ) {
+          return node;
+        }
         return {
-          id: edge.id,
-            source: edge.source,
-            target: edge.target,
-            label: isDimmed ? undefined : relationLabel(edge.relation),
-            type: isHierarchical ? 'smoothstep' : 'default',
-            pathOptions: isHierarchical ? { borderRadius: 16, offset: 20 } : undefined,
-            selectable: true,
-            focusable: true,
-            animated: edge.relation === 'supersedes' || isHighlighted,
-            zIndex: isHighlighted ? 20 : isDimmed ? 1 : 10,
-            style: {
-              stroke,
-              strokeWidth: isHighlighted ? 2.5 : isDimmed ? 0.9 : 1.8,
-              opacity: isDimmed ? 0.08 : 1.0,
-              transition: 'opacity 0.2s ease, stroke-width 0.2s ease',
-            },
-            labelStyle: {
-              fill: isHighlighted ? '#0f172a' : '#374151',
-              fontSize: 10,
-              fontWeight: isHighlighted ? 700 : 600,
-            },
-            labelBgStyle: {
-              fill: '#ffffff',
-              fillOpacity: isHighlighted ? 1.0 : 0.95,
-              stroke: isHighlighted ? stroke : '#dce2ed',
-              strokeWidth: isHighlighted ? 1.5 : 1,
-            },
-            labelBgPadding: [3, 7] as [number, number],
-            labelBgBorderRadius: 6,
-            ariaLabel: `${relationLabel(edge.relation)} relation`,
-          };
-        }),
-    [visibleEdges, activeEdgeIds],
+          ...node,
+          selected: isSelected,
+          data: {
+            ...node.data,
+            isDimmed,
+            onSelectSymbol: onSelect,
+          },
+        };
+      }),
+    [baseLayoutNodes, selectedId, activeNeighborNodeIds, onSelect],
   );
+  const flowEdges = useMemo<Edge[]>(() => {
+    const isSwimlaneLayout = baseLayoutNodes.some((n) => n.type === 'sectionGroup');
+    const nodePosMap = new Map<string, { x: number; y: number }>();
+    const nodeKindMap = new Map<string, EvidenceEntityType>();
+
+    for (const fn of baseLayoutNodes) {
+      if (fn.type !== 'sectionGroup') {
+        nodePosMap.set(fn.id, fn.position);
+        nodeKindMap.set(fn.id, (fn.data as EvidenceNodeData).kind);
+      }
+    }
+
+    const resultEdges: Edge[] = [];
+    const connectedPairs = new Set<string>();
+
+    for (const edge of visibleEdges) {
+      const srcPos = nodePosMap.get(edge.source);
+      const tgtPos = nodePosMap.get(edge.target);
+
+      // If either node is not rendered on canvas (e.g. empty section or in-card symbol),
+      // omit canvas edge to prevent dangling lines or React Flow warnings.
+      if (!srcPos || !tgtPos) {
+        continue;
+      }
+
+      const isContainment = edge.relation === 'contains' || edge.relation === 'has_version';
+      const isHighlighted = activeEdgeIds !== null && activeEdgeIds.has(edge.id);
+      const isDimmed = activeEdgeIds !== null && !isHighlighted;
+
+      // In Section Swimlanes view, structural containment edges (paper->section, section->eq)
+      // are represented by the physical swimlane containers.
+      // Omit unhighlighted containment edges to eliminate 76+ crossing wires!
+      if (isSwimlaneLayout && isContainment && !isHighlighted) {
+        continue;
+      }
+
+      connectedPairs.add(`${edge.source}->${edge.target}`);
+
+      const stroke = edgeColors[edge.relation] ?? '#94a3b8';
+      let sourceHandle: string | undefined = undefined;
+      let targetHandle: string | undefined = undefined;
+      let edgeType: string = 'default';
+
+      if (srcPos && tgtPos) {
+        const dx = tgtPos.x - srcPos.x;
+        const dy = tgtPos.y - srcPos.y;
+
+        if (edge.relation === 'defines' || nodeKindMap.get(edge.target) === 'Symbol') {
+          sourceHandle = 'right';
+          targetHandle = 'left';
+          edgeType = 'smoothstep';
+        } else if (Math.abs(dx) < 60) {
+          if (dy >= 0) {
+            sourceHandle = 'bottom';
+            targetHandle = 'top';
+          } else {
+            sourceHandle = 'top';
+            targetHandle = 'bottom';
+          }
+          edgeType = 'smoothstep';
+        } else if (dx > 0) {
+          sourceHandle = 'right';
+          targetHandle = 'left';
+          edgeType = 'default';
+        } else {
+          sourceHandle = 'left';
+          targetHandle = 'right';
+          edgeType = 'default';
+        }
+      }
+
+      resultEdges.push({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        sourceHandle,
+        targetHandle,
+        type: edgeType,
+        label: isHighlighted ? relationLabel(edge.relation) : undefined,
+        markerEnd: isContainment
+          ? undefined
+          : {
+              type: MarkerType.ArrowClosed,
+              color: stroke,
+              width: 14,
+              height: 14,
+            },
+        selectable: true,
+        focusable: true,
+        animated: edge.relation === 'supersedes' || (isHighlighted && !isContainment),
+        zIndex: isHighlighted ? 20 : isDimmed ? 1 : 10,
+        style: {
+          stroke,
+          strokeWidth: isHighlighted ? 2.5 : isDimmed ? 0.9 : 1.8,
+          strokeDasharray: isContainment ? '4 4' : undefined,
+          opacity: isDimmed ? 0.08 : isContainment ? 0.5 : 1.0,
+          transition: 'opacity 0.2s ease, stroke-width 0.2s ease',
+        },
+        labelStyle: {
+          fill: '#0f172a',
+          fontSize: 10,
+          fontWeight: 700,
+        },
+        labelBgStyle: {
+          fill: '#ffffff',
+          fillOpacity: 1.0,
+          stroke,
+          strokeWidth: 1.5,
+        },
+        labelBgPadding: [3, 7] as [number, number],
+        labelBgBorderRadius: 6,
+        ariaLabel: `${relationLabel(edge.relation)} relation`,
+      });
+    }
+
+    // In Section Swimlanes view: Synthesize the clean intra-section and cross-section
+    // derivation flow matching Option Section Swimlanes
+    if (isSwimlaneLayout) {
+      const secEqMap = new Map<string, string[]>();
+      for (const fn of baseLayoutNodes) {
+        if (fn.type === 'sectionGroup') {
+          const secId = (fn.data as SectionGroupData).sectionId;
+          if (secId) secEqMap.set(secId, []);
+        }
+      }
+      for (const fn of baseLayoutNodes) {
+        if (fn.type === 'evidence' && (fn.data as EvidenceNodeData).kind === 'Equation') {
+          for (const sg of baseLayoutNodes) {
+            if (sg.type === 'sectionGroup') {
+              const secId = (sg.data as SectionGroupData).sectionId;
+              const sgW = (sg.style?.width as number) || 300;
+              if (secId && fn.position.x >= sg.position.x && fn.position.x < sg.position.x + sgW) {
+                const list = secEqMap.get(secId) ?? [];
+                list.push(fn.id);
+                secEqMap.set(secId, list);
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      const activeSectionIds = [...secEqMap.keys()].filter(
+        (sid) => (secEqMap.get(sid)?.length ?? 0) > 0,
+      );
+      const derivationColor = '#059669'; // Emerald derivation line
+
+      // Intra-swimlane sequential derivation: Eq 0 -> Eq 1 -> Eq 2 (vertical straight down)
+      activeSectionIds.forEach((secId) => {
+        const eqIds = secEqMap.get(secId) ?? [];
+        for (let i = 0; i < eqIds.length - 1; i++) {
+          const srcId = eqIds[i];
+          const tgtId = eqIds[i + 1];
+          const pairKey = `${srcId}->${tgtId}`;
+          const revKey = `${tgtId}->${srcId}`;
+          if (!connectedPairs.has(pairKey) && !connectedPairs.has(revKey)) {
+            connectedPairs.add(pairKey);
+            const edgeId = `swimlane-seq-${srcId}-${tgtId}`;
+            const isHighlighted =
+              activeEdgeIds !== null &&
+              (activeEdgeIds.has(srcId) || activeEdgeIds.has(tgtId));
+            const isDimmed = activeEdgeIds !== null && !isHighlighted;
+
+            resultEdges.push({
+              id: edgeId,
+              source: srcId,
+              target: tgtId,
+              sourceHandle: 'bottom',
+              targetHandle: 'top',
+              type: 'smoothstep',
+              markerEnd: {
+                type: MarkerType.ArrowClosed,
+                color: derivationColor,
+                width: 14,
+                height: 14,
+              },
+              selectable: true,
+              focusable: true,
+              zIndex: isHighlighted ? 20 : isDimmed ? 1 : 10,
+              style: {
+                stroke: derivationColor,
+                strokeWidth: isHighlighted ? 2.5 : isDimmed ? 0.9 : 2.0,
+                opacity: isDimmed ? 0.08 : 0.95,
+                transition: 'opacity 0.2s ease, stroke-width 0.2s ease',
+              },
+              ariaLabel: 'intra-section derivation',
+            });
+          }
+        }
+      });
+
+      // Cross-swimlane pipeline bridge: last Eq of Section K -> first Eq of Section K+1 (smooth horizontal bezier)
+      for (let s = 0; s < activeSectionIds.length - 1; s++) {
+        const currEqs = secEqMap.get(activeSectionIds[s]) ?? [];
+        const nextEqs = secEqMap.get(activeSectionIds[s + 1]) ?? [];
+        if (currEqs.length > 0 && nextEqs.length > 0) {
+          const lastEqId = currEqs[currEqs.length - 1];
+          const firstNextEqId = nextEqs[0];
+          const bridgeKey = `${lastEqId}->${firstNextEqId}`;
+          if (!connectedPairs.has(bridgeKey)) {
+            connectedPairs.add(bridgeKey);
+            const edgeId = `swimlane-bridge-${lastEqId}-${firstNextEqId}`;
+            const bridgeColor = '#0d9488'; // Teal
+            const isHighlighted =
+              activeEdgeIds !== null &&
+              (activeEdgeIds.has(lastEqId) || activeEdgeIds.has(firstNextEqId));
+            const isDimmed = activeEdgeIds !== null && !isHighlighted;
+
+            const lastPos = nodePosMap.get(lastEqId);
+            const nextPos = nodePosMap.get(firstNextEqId);
+            const isRowWrap = Boolean(lastPos && nextPos && nextPos.x < lastPos.x);
+
+            resultEdges.push({
+              id: edgeId,
+              source: lastEqId,
+              target: firstNextEqId,
+              sourceHandle: isRowWrap ? 'bottom' : 'right',
+              targetHandle: isRowWrap ? 'top' : 'left',
+              type: isRowWrap ? 'smoothstep' : 'default',
+              markerEnd: {
+                type: MarkerType.ArrowClosed,
+                color: bridgeColor,
+                width: 15,
+                height: 15,
+              },
+              selectable: true,
+              focusable: true,
+              zIndex: isHighlighted ? 20 : isDimmed ? 1 : 12,
+              style: {
+                stroke: bridgeColor,
+                strokeWidth: isHighlighted ? 2.8 : isDimmed ? 0.9 : 2.2,
+                opacity: isDimmed ? 0.08 : 0.95,
+                transition: 'opacity 0.2s ease, stroke-width 0.2s ease',
+              },
+              ariaLabel: 'cross-section derivation bridge',
+            });
+          }
+        }
+      }
+    }
+
+    return resultEdges;
+  }, [baseLayoutNodes, visibleEdges, activeEdgeIds]);
 
   const handleNodeClick = useCallback(
-    (_event: React.MouseEvent, node: EvidenceFlowNode) => onSelect(node.id),
+    (_event: React.MouseEvent, node: AnyFlowNode) => {
+      if (node.type === 'sectionGroup') {
+        const secId = (node as SectionGroupFlowNode).data?.sectionId;
+        if (secId) onSelect(secId);
+        return;
+      }
+      onSelect(node.id);
+    },
     [onSelect],
   );
+
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const handleNodeMouseEnter = useCallback(
-    (_event: React.MouseEvent, node: EvidenceFlowNode) => {
-      setHoveredNodeId(node.id);
+    (_event: React.MouseEvent, node: AnyFlowNode) => {
+      if (node.type === 'sectionGroup') return;
+      if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = setTimeout(() => {
+        setHoveredNodeId(node.id);
+      }, 50);
     },
     [],
   );
   const handleNodeMouseLeave = useCallback(() => {
-    setHoveredNodeId(null);
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = setTimeout(() => {
+      setHoveredNodeId(null);
+    }, 50);
   }, []);
-  const handleSelectionChange = useCallback(
-    ({ nodes: selectedNodes }: OnSelectionChangeParams<EvidenceFlowNode, Edge>) => {
-      const selected = selectedNodes.at(-1);
-      if (selected && selected.id !== selectedId) onSelect(selected.id);
-    },
-    [onSelect, selectedId],
-  );
+
+  useEffect(() => {
+    return () => {
+      if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+    };
+  }, []);
   const toggleRelation = useCallback(
     (relation: EvidenceRelationType, checked: boolean) => {
       setDisabledRelations((current) => {
@@ -535,8 +1175,10 @@ export default function EvidenceGraphViewport({
   if (nodes.length === 0) {
     return (
       <div className="persisted-graph-empty">
-        <strong>No persisted graph yet</strong>
-        <span>Import an arXiv HTML paper to create the first evidence snapshot.</span>
+        <strong>{hasSnapshot ? 'No equation evidence in this snapshot' : 'No persisted graph yet'}</strong>
+        <span>{hasSnapshot
+          ? 'This paper has no extracted equations. Its source and lineage records remain available.'
+          : 'Import an arXiv HTML paper to create the first evidence snapshot.'}</span>
       </div>
     );
   }
@@ -574,7 +1216,7 @@ export default function EvidenceGraphViewport({
         <output className="graph-scope" aria-live="polite">
           <strong>{visibleNodes.length}</strong> nodes
           <i aria-hidden="true" />
-          <strong>{flowEdges.length}</strong> relations
+          <strong>{visibleEdges.length}</strong> relations
         </output>
         <div className="graph-toolbar-spacer" />
         {/* ponytail: native disclosure avoids a popover dependency, ceiling: one non-nested filter panel, upgrade: anchored popover when filters gain commands */}
@@ -594,8 +1236,10 @@ export default function EvidenceGraphViewport({
                 <legend>Entities</legend>
                 <div className="graph-filter-options">
                   {kinds.map((kind) => (
-                    <label key={kind}>
+                    <label key={kind} htmlFor={`filter-kind-${kind}`}>
                       <Checkbox
+                        id={`filter-kind-${kind}`}
+                        name={`filter_kind_${kind}`}
                         checked={!disabledKinds.has(kind)}
                         onCheckedChange={(checked) =>
                           toggleKind(kind, checked === true)
@@ -611,8 +1255,10 @@ export default function EvidenceGraphViewport({
               <legend>Relations</legend>
               <div className="graph-filter-options">
                 {relations.map((relation) => (
-                  <label key={relation}>
+                  <label key={relation} htmlFor={`filter-rel-${relation}`}>
                     <Checkbox
+                      id={`filter-rel-${relation}`}
+                      name={`filter_rel_${relation}`}
                       checked={!disabledRelations.has(relation)}
                       onCheckedChange={(checked) =>
                         toggleRelation(relation, checked === true)
@@ -626,7 +1272,7 @@ export default function EvidenceGraphViewport({
             </fieldset>
             <div className="graph-filter-footer">
               <span>
-                {visibleNodes.length}/{nodes.length} nodes · {flowEdges.length}/{edges.length} relations
+                {visibleNodes.length}/{nodes.length} nodes · {visibleEdges.length}/{edges.length} relations
               </span>
               <Button
                 type="button"
@@ -644,6 +1290,32 @@ export default function EvidenceGraphViewport({
             </div>
           </div>
         </details>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className={`density-toggle-btn ${isCompactMode ? 'is-active' : ''}`}
+          onClick={() => setIsCompactMode((prev) => !prev)}
+          title={isCompactMode ? 'Switch to Detailed Formula Cards' : 'Switch to Compact Nodes (Fits 72 nodes in view)'}
+          aria-label={isCompactMode ? 'Detailed Cards' : 'Compact Nodes'}
+        >
+          <LayoutGrid size={13} className="mr-1 text-indigo-500" />
+          <span>{isCompactMode ? 'Compact' : 'Detailed'}</span>
+        </Button>
+        {onToggleZen ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className={`zen-toggle-btn ${isZenMode ? 'is-active' : ''}`}
+            onClick={onToggleZen}
+            title={isZenMode ? 'Exit Zen Mode (Press Z)' : 'Zen Focus Mode: Hide Sidebars (Press Z)'}
+            aria-label={isZenMode ? 'Exit Zen Mode' : 'Zen Focus Mode'}
+          >
+            <Eye size={13} className="mr-1 text-sky-500" />
+            <span>{isZenMode ? 'Exit Zen' : 'Zen (Z)'}</span>
+          </Button>
+        ) : null}
         <Button
           type="button"
           variant="ghost"
@@ -688,14 +1360,14 @@ export default function EvidenceGraphViewport({
               Use arrow keys to move selection between evidence nodes. Press Enter or
               Space on a focused node to select it.
             </span>
-            <ReactFlow<EvidenceFlowNode, Edge>
+            <ReactFlow<AnyFlowNode, Edge>
               nodes={flowNodes}
               edges={flowEdges}
               nodeTypes={nodeTypes}
               onNodeClick={handleNodeClick}
+              onPaneClick={() => onSelect('')}
               onNodeMouseEnter={handleNodeMouseEnter}
               onNodeMouseLeave={handleNodeMouseLeave}
-              onSelectionChange={handleSelectionChange}
               nodesDraggable={false}
               nodesConnectable={false}
               nodesFocusable
@@ -704,7 +1376,7 @@ export default function EvidenceGraphViewport({
               deleteKeyCode={null}
               minZoom={0.25}
               maxZoom={2}
-              fitView
+              defaultViewport={{ x: 0, y: 0, zoom: 1 }}
               fitViewOptions={{ padding: 0.12, maxZoom: 1.05 }}
               autoPanOnNodeFocus
               aria-describedby="graph-keyboard-help"
@@ -722,7 +1394,7 @@ export default function EvidenceGraphViewport({
             >
               <FitViewWatcher
                 nodeCount={flowNodes.length}
-                filterKey={`${disabledKinds.size}-${disabledRelations.size}-${flowNodes.length}`}
+                filterKey={`${disabledKinds.size}-${disabledRelations.size}-${flowNodes.length}-${isCompactMode ? 'c' : 'd'}-${isZenMode ? 'z' : 'n'}`}
               />
               <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} />
               <Panel position="bottom-right" className="minimap-panel">
@@ -756,7 +1428,7 @@ export default function EvidenceGraphViewport({
                   </div>
                 ) : null}
               </Panel>
-              <Controls showInteractive={false} />
+              <Controls position="top-left" showInteractive={false} />
             </ReactFlow>
           </>
         )}

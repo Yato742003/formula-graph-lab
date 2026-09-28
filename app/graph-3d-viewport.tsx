@@ -750,8 +750,13 @@ export default function Graph3DViewport({
       targetCamPosRef.current = new THREE.Vector3(boxCenter.x, 0, newDist);
     };
 
+    let resizeRafId: number | null = null;
     const resizeObserver = new ResizeObserver(() => {
-      onResize();
+      if (resizeRafId !== null) cancelAnimationFrame(resizeRafId);
+      resizeRafId = requestAnimationFrame(() => {
+        onResize();
+        resizeRafId = null;
+      });
     });
     resizeObserver.observe(container);
 
@@ -808,6 +813,7 @@ export default function Graph3DViewport({
 
     return () => {
       cancelAnimationFrame(animId);
+      if (resizeRafId !== null) cancelAnimationFrame(resizeRafId);
       resizeObserver.disconnect();
       domElement.removeEventListener('pointerdown', onPointerDown);
       domElement.removeEventListener('pointermove', onPointerMove);

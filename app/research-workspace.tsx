@@ -1,12 +1,30 @@
 'use client';
 
+import ProblemSpecPanel from './problem-spec-panel';
+import ResearchCreatePanel from './research-create-panel';
+import ResearchMovePanel from './research-move-panel';
+
 import {
+  type CompatibilityView,
+  type LineageView,
+  type CoverageView,
+  type ResearchSourceContext,
+  parseCompatibilityView,
+  parseLineageView,
+  parseCoverageView,
+  parseResearchSourceContext,
+} from '@/lib/research-view';
+
+import {
+  AlertTriangle,
+  ArrowRight,
   BookOpenText,
   Braces,
   Check,
   ChevronDown,
   CircleDot,
-  FlaskConical,
+  Copy,
+  FileCode2,
   GitBranch,
   History,
   Link2,
@@ -18,7 +36,6 @@ import {
   Plus,
   Search,
   ShieldCheck,
-  Sparkles,
   X,
 } from 'lucide-react';
 import {
@@ -26,6 +43,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import EvidenceGraphViewport, {
@@ -53,7 +71,6 @@ type FormulaNode = {
   type: 'evidence' | 'concept' | 'hypothesis';
   x: number;
   y: number;
-  confidence: number;
   source: string;
   relation: string;
 };
@@ -71,7 +88,7 @@ type InspectorRecord = {
   expression: string;
   tone: FormulaNode['type'];
   kind: string;
-  confidence: number;
+  confidence: number | null;
   source: string;
   relation: string;
   paperLabel: string;
@@ -118,7 +135,6 @@ const demoNodes: FormulaNode[] = [
     type: 'evidence',
     x: 10,
     y: 42,
-    confidence: 1,
     source: 'Section 3.2 · Eq. 1',
     relation: 'baseline',
   },
@@ -129,7 +145,6 @@ const demoNodes: FormulaNode[] = [
     type: 'evidence',
     x: 39,
     y: 18,
-    confidence: 0.99,
     source: 'Section 3.2 · Eq. 1',
     relation: 'stabilizes',
   },
@@ -140,7 +155,6 @@ const demoNodes: FormulaNode[] = [
     type: 'evidence',
     x: 69,
     y: 38,
-    confidence: 0.98,
     source: 'Section 3.2 · Eq. 2',
     relation: 'generalizes',
   },
@@ -151,7 +165,6 @@ const demoNodes: FormulaNode[] = [
     type: 'concept',
     x: 31,
     y: 68,
-    confidence: 0.91,
     source: 'Cross-paper concept',
     relation: 'approximates',
   },
@@ -162,7 +175,6 @@ const demoNodes: FormulaNode[] = [
     type: 'hypothesis',
     x: 67,
     y: 76,
-    confidence: 0.72,
     source: 'Hypothesis H-004',
     relation: 'combines',
   },
@@ -352,7 +364,7 @@ export function buildEvidenceInspector(
   const confidence =
     typeof confidenceValue === 'number' && Number.isFinite(confidenceValue)
       ? Math.min(1, Math.max(0, confidenceValue))
-      : 1;
+      : null;
   const matchingEdges = edges.filter(
     (edge) => edge.source_uuid === node.uuid || edge.target_uuid === node.uuid,
   );
@@ -429,7 +441,7 @@ function demoInspector(node: FormulaNode): InspectorRecord {
     expression: node.formula,
     tone: node.type,
     kind: node.type,
-    confidence: node.confidence,
+    confidence: null,
     source: node.source,
     relation: node.relation,
     paperLabel: '1706.03762v7',
@@ -524,6 +536,109 @@ function searchHitExcerpt(hit: EvidenceSearchHit): string {
   return `${hit.paper_id}${hit.version ? `v${hit.version}` : ''}`;
 }
 
+function LineageSourceRefs({
+  refs,
+}: {
+  refs: LineageView['evidence']['refs'];
+}) {
+  const [selected, setSelected] = useState(0);
+  const [context, setContext] = useState<ResearchSourceContext | null>(null);
+  const [notice, setNotice] = useState('Loading source context…');
+  const source = refs[selected];
+
+  useEffect(() => {
+    if (!source) return;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch(
+          `/api/research/lineage/sources?source_id=${encodeURIComponent(source.id)}`,
+          { signal: controller.signal },
+        );
+        if (!response.ok) throw new Error('Source unavailable');
+        const resolved = parseResearchSourceContext(
+          await response.json(),
+          source,
+        );
+        if (!controller.signal.aborted) {
+          setContext(resolved);
+          setNotice('Source context resolved from this workspace.');
+        }
+      } catch {
+        if (!controller.signal.aborted) {
+          setContext(null);
+          setNotice(
+            'Source context unavailable; assertion remains unverified.',
+          );
+        }
+      }
+    })();
+    return () => controller.abort();
+  }, [source]);
+
+  let sourceHref: string | null = null;
+  if (context && source) {
+    try {
+      sourceHref = `${normalizeArxivHtmlUrl(`https://arxiv.org/html/${context.paperId}v${context.version}`)}#${encodeURIComponent(source.anchor)}`;
+    } catch {
+      /* An authorized context may lack a supported public HTML URL. */
+    }
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <p className="font-medium">Source evidence</p>
+      <div className="flex flex-wrap gap-1">
+        {refs.map((ref, index) => (
+          <button
+            key={ref.id}
+            type="button"
+            aria-pressed={index === selected}
+            className="rounded border border-border/60 px-2 py-1 text-[10px] hover:bg-muted/50"
+            onClick={() => {
+              setSelected(index);
+              setContext(null);
+              setNotice('Loading source context…');
+            }}
+          >
+            {ref.anchor} · {ref.id}
+          </button>
+        ))}
+      </div>
+      <output className="block text-muted-foreground" aria-live="polite">
+        {notice}
+      </output>
+      {context ? (
+        <div className="rounded bg-muted/30 p-2 space-y-1">
+          <p>
+            {context.paperId} v{context.version} · {context.kind} ·{' '}
+            {source?.anchor}
+          </p>
+          <p className="whitespace-pre-wrap break-words">
+            {context.text ||
+              context.latex ||
+              'No extracted text in this source node.'}
+          </p>
+          {sourceHref ? (
+            <a
+              href={sourceHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
+            >
+              Open HTML anchor ↗
+            </a>
+          ) : (
+            <p>
+              Public HTML link unavailable; inspect the stored context above.
+            </p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   const [selectedId, setSelectedId] = useState<string | null>('scaled');
   const [isImporting, setIsImporting] = useState(false);
@@ -550,12 +665,324 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   );
   const [isLeftCollapsed, setIsLeftCollapsed] = useState(false);
   const [isRightCollapsed, setIsRightCollapsed] = useState(false);
+  const [isZenMode, setIsZenMode] = useState(false);
+  const [isImportExpanded, setIsImportExpanded] = useState(false);
+
+  const toggleZenMode = useCallback(() => {
+    setIsZenMode((prev) => {
+      const next = !prev;
+      setIsLeftCollapsed(next);
+      setIsRightCollapsed(next);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
-    window.dispatchEvent(new Event('resize'));
-  }, [isLeftCollapsed, isRightCollapsed]);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isInput =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable);
+
+      if (e.key === 'Escape') {
+        if (isSearchOpen) {
+          setIsSearchOpen(false);
+        } else if (selectedId) {
+          setSelectedId(null);
+        }
+        return;
+      }
+
+      if (isInput) return;
+
+      if (
+        (e.key.toLowerCase() === 'k' && (e.ctrlKey || e.metaKey)) ||
+        e.key === '/'
+      ) {
+        e.preventDefault();
+        setIsSearchOpen((open) => !open);
+        return;
+      }
+
+      if (
+        e.key.toLowerCase() === 'z' &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        toggleZenMode();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [toggleZenMode, isSearchOpen, selectedId]);
+
+  useEffect(() => {
+    const rafId = requestAnimationFrame(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [isLeftCollapsed, isRightCollapsed, isZenMode]);
+
+  // Suppress benign ResizeObserver loop notifications in dev overlays
+  useEffect(() => {
+    const handleResizeObserverError = (e: ErrorEvent) => {
+      if (
+        e.message?.includes(
+          'ResizeObserver loop completed with undelivered notifications',
+        ) ||
+        e.message?.includes('ResizeObserver loop limit exceeded')
+      ) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('error', handleResizeObserverError, true);
+    return () =>
+      window.removeEventListener('error', handleResizeObserverError, true);
+  }, []);
+
+  // --- Sprint 5A State & Handlers ---
+  const [activeViewTab, setActiveViewTab] = useState<
+    'lineage' | 'spec' | 'compat'
+  >('spec');
+  const activePrimaryView =
+    activeViewTab !== 'lineage'
+      ? 'research'
+      : isLeftCollapsed
+        ? 'graph'
+        : 'papers';
+
+  function selectPrimaryView(view: 'papers' | 'graph' | 'research') {
+    if (view === 'research') {
+      setActiveViewTab('spec');
+      setIsImportExpanded(false);
+      return;
+    }
+
+    setActiveViewTab('lineage');
+    setIsImportExpanded(false);
+    setIsLeftCollapsed(view === 'graph');
+  }
+
+  const [copiedLatex, setCopiedLatex] = useState(false);
+
+  const [compatMappings, setCompatMappings] = useState<CompatibilityView[]>([]);
+  const [lineageRelations, setLineageRelations] = useState<LineageView[]>([]);
+  const [multiPaperCoverage, setMultiPaperCoverage] = useState<CoverageView[]>(
+    [],
+  );
+  const [selectedLineageId, setSelectedLineageId] = useState<string | null>(
+    null,
+  );
+  const [isReviewingCompatId, setIsReviewingCompatId] = useState<string | null>(
+    null,
+  );
+  const [isReviewingLineageId, setIsReviewingLineageId] = useState<
+    string | null
+  >(null);
+  const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({});
+  const [researchLoadNotice, setResearchLoadNotice] = useState(
+    'Loading research records…',
+  );
+  const [researchRecordsState, setResearchRecordsState] = useState<
+    'loading' | 'loaded' | 'unavailable'
+  >('loading');
+  const [researchRecordsPartial, setResearchRecordsPartial] = useState(false);
+  const [researchRevision, setResearchRevision] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    async function loadResearch() {
+      try {
+        const responses = await Promise.all([
+          fetch('/api/research/compatibility?limit=100', {
+            signal: controller.signal,
+          }),
+          fetch('/api/research/lineage?limit=100', {
+            signal: controller.signal,
+          }),
+          fetch('/api/research/lineage/coverage', {
+            signal: controller.signal,
+          }),
+        ]);
+        if (responses.some((response) => !response.ok))
+          throw new Error('Research unavailable');
+        const [compatibility, lineage, coverage] = await Promise.all(
+          responses.map((r) => r.json()),
+        );
+        const mappings = parseCompatibilityView(compatibility);
+        const relations = parseLineageView(lineage);
+        const papers = parseCoverageView(coverage);
+        if (controller.signal.aborted) return;
+        setCompatMappings(mappings);
+        setLineageRelations(relations);
+        setMultiPaperCoverage(papers);
+        setResearchRecordsState('loaded');
+        const partial =
+          (isRecord(compatibility) &&
+            Number(compatibility.total) > mappings.length) ||
+          (isRecord(lineage) && Number(lineage.total) > relations.length);
+        setResearchRecordsPartial(partial);
+        setResearchLoadNotice(
+          partial
+            ? 'Partial research view: showing the first 100 records per list.'
+            : mappings.length || relations.length || papers.length
+              ? 'Research records loaded from the workspace.'
+              : 'No saved research records in this workspace.',
+        );
+      } catch {
+        if (!controller.signal.aborted) {
+          setResearchRecordsState('unavailable');
+          setResearchLoadNotice(
+            'Saved research records could not be loaded. The curated demo remains illustrative only.',
+          );
+        }
+      }
+    }
+    void loadResearch();
+    return () => controller.abort();
+  }, [researchRevision]);
+
+  const [researchNotice, setResearchNotice] = useState<string | null>(null);
+  const reviewRequests = useRef(
+    new Map<string, { body: string; key: string }>(),
+  );
+  const reviewInFlight = useRef(new Set<string>());
+
+  function reviewRequest(
+    url: string,
+    payload: { decision: string; notes: string },
+  ) {
+    const body = JSON.stringify(payload);
+    const previous = reviewRequests.current.get(url);
+    const request =
+      previous?.body === body ? previous : { body, key: crypto.randomUUID() };
+    reviewRequests.current.set(url, request);
+    return fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-idempotency-key': request.key,
+      },
+      body: request.body,
+    });
+  }
+
+  const handleReviewBinding = async (mappingId: string) => {
+    const notes = reviewNotes[mappingId]?.trim();
+    if (!notes) {
+      setResearchNotice('Enter the binding and evidence scope before review.');
+      return;
+    }
+    if (reviewInFlight.current.has('compatibility')) return;
+    reviewInFlight.current.add('compatibility');
+    setIsReviewingCompatId(mappingId);
+    setResearchNotice(null);
+    try {
+      const url =
+        '/api/research/compatibility/' + encodeURIComponent(mappingId);
+      const response = await reviewRequest(url + '/reviews', {
+        decision: 'reviewed',
+        notes,
+      });
+      if (!response.ok) throw new Error('Review rejected');
+      const receipt = await response.json();
+      if (
+        !isRecord(receipt) ||
+        receipt.mapping_id !== mappingId ||
+        receipt.decision !== 'reviewed' ||
+        typeof receipt.review_id !== 'string'
+      )
+        throw new Error('Invalid review receipt');
+      const refreshed = await fetch(url);
+      if (!refreshed.ok) throw new Error('Could not reload assessment');
+      const [updated] = parseCompatibilityView({
+        items: [await refreshed.json()],
+      });
+      if (updated.mappingId !== mappingId)
+        throw new Error('Invalid assessment');
+      setCompatMappings((prev) =>
+        prev.map((item) =>
+          item.mappingId === mappingId
+            ? {
+                ...updated,
+              }
+            : item,
+        ),
+      );
+      setResearchNotice('Review saved and assessment reloaded.');
+    } catch {
+      setResearchNotice(
+        'Could not confirm the review. Displayed assessment is unchanged; retry.',
+      );
+    } finally {
+      reviewInFlight.current.delete('compatibility');
+      setIsReviewingCompatId(null);
+    }
+  };
+
+  const handleReviewLineage = async (
+    lineageId: string,
+    decision: 'reviewed' | 'rejected',
+  ) => {
+    const notes = reviewNotes[lineageId]?.trim();
+    if (!notes) {
+      setResearchNotice('Enter the source evidence and review rationale.');
+      return;
+    }
+    if (reviewInFlight.current.has('lineage')) return;
+    reviewInFlight.current.add('lineage');
+    setIsReviewingLineageId(lineageId);
+    setResearchNotice(null);
+    try {
+      const response = await reviewRequest(
+        '/api/research/lineage/' + encodeURIComponent(lineageId) + '/reviews',
+        {
+          decision,
+          notes,
+        },
+      );
+      if (!response.ok) throw new Error('Review rejected');
+      const receipt = await response.json();
+      if (
+        !isRecord(receipt) ||
+        receipt.assertion_id !== lineageId ||
+        receipt.status !== decision ||
+        !isRecord(receipt.review) ||
+        typeof receipt.review.review_id !== 'string'
+      ) {
+        throw new Error('Invalid review receipt');
+      }
+      setLineageRelations((prev) =>
+        prev.map((item) =>
+          item.id === lineageId
+            ? {
+                ...item,
+                status: decision,
+              }
+            : item,
+        ),
+      );
+      setResearchNotice('Source review saved.');
+    } catch {
+      setResearchNotice(
+        'Could not confirm the source review. Displayed status is unchanged; retry.',
+      );
+    } finally {
+      reviewInFlight.current.delete('lineage');
+      setIsReviewingLineageId(null);
+    }
+  };
 
   const hasPersistedGraph = Boolean(graphSnapshot?.paper);
+  const importNotice =
+    hasPersistedGraph && notice.startsWith('Curated demo')
+      ? 'Saved paper evidence loaded.'
+      : notice;
   const evidenceNodes = useMemo(
     () => graphSnapshot?.nodes ?? [],
     [graphSnapshot],
@@ -932,7 +1359,15 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   }
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" suppressHydrationWarning>
+      <output className="sr-only" aria-live="polite">
+        {researchLoadNotice}
+      </output>
+      {researchNotice ? (
+        <output className="sr-only" aria-live="polite">
+          {researchNotice}
+        </output>
+      ) : null}
       <header className="topbar">
         <div className="brand-lockup">
           <div className="brand-mark" aria-hidden="true">
@@ -945,17 +1380,29 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
         </div>
 
         <nav className="top-nav" aria-label="Primary navigation">
-          <button type="button" className="nav-item">
-            Library
+          <button
+            type="button"
+            className={`nav-item ${activePrimaryView === 'papers' ? 'nav-item-active' : ''}`}
+            aria-current={activePrimaryView === 'papers' ? 'page' : undefined}
+            onClick={() => selectPrimaryView('papers')}
+          >
+            Papers
           </button>
           <button
             type="button"
-            className="nav-item nav-item-active"
+            className={`nav-item ${activePrimaryView === 'graph' ? 'nav-item-active' : ''}`}
+            aria-current={activePrimaryView === 'graph' ? 'page' : undefined}
+            onClick={() => selectPrimaryView('graph')}
           >
             Graph
           </button>
-          <button type="button" className="nav-item">
-            Experiments
+          <button
+            type="button"
+            className={`nav-item ${activePrimaryView === 'research' ? 'nav-item-active' : ''}`}
+            aria-current={activePrimaryView === 'research' ? 'page' : undefined}
+            onClick={() => selectPrimaryView('research')}
+          >
+            Research
           </button>
         </nav>
 
@@ -964,9 +1411,11 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
             type="button"
             className={`icon-button ${isSearchOpen ? 'icon-button-active' : ''}`}
             aria-label={isSearchOpen ? 'Close graph search' : 'Search graph'}
+            title="Search graph (Ctrl+K or /)"
             aria-expanded={isSearchOpen}
             aria-controls="graph-search-panel"
             onClick={() => setIsSearchOpen((open) => !open)}
+            suppressHydrationWarning
           >
             <Search size={18} />
           </button>
@@ -979,147 +1428,209 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
       </header>
 
       {isSearchOpen ? (
-        <section
-          className="search-command"
-          id="graph-search-panel"
-          aria-label="Search evidence graph"
-        >
-          <div className="search-command-heading">
-            <div className="search-command-icon" aria-hidden="true">
-              <Search size={17} />
-            </div>
-            <div>
-              <p className="eyebrow">Hybrid retrieval</p>
-              <h2>Find evidence across papers</h2>
-            </div>
-            <button
-              className="search-close"
-              type="button"
-              aria-label="Close graph search"
-              onClick={() => setIsSearchOpen(false)}
-            >
-              <X size={17} />
-            </button>
-          </div>
-          <div className="search-command-body">
-            <form className="search-form" onSubmit={handleSearch}>
-              <Input
-                aria-label="Formula or research concept"
-                value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Try d_model, scaled similarity, or convergence…"
-                maxLength={500}
-              />
-              <Button type="submit" disabled={isSearching}>
-                <Search size={15} />
-                {isSearching ? 'Searching…' : 'Search evidence'}
-              </Button>
-            </form>
-            <p className="search-notice" aria-live="polite">
-              <CircleDot size={12} />
-              {searchNotice}
-            </p>
-            {searchResult ? (
-              <div
-                className="search-results"
-                aria-label="Evidence search results"
-              >
-                {searchResult.hits.map((hit) => (
-                  <button
-                    className="search-result"
-                    key={hit.uuid}
-                    type="button"
-                    onClick={() => selectSearchHit(hit)}
-                  >
-                    <span className="search-result-topline">
-                      <b>{hit.kind}</b>
-                      <span>
-                        {hit.paper_id}
-                        {hit.version ? `v${hit.version}` : ''}
-                      </span>
-                    </span>
-                    <strong>{searchHitTitle(hit)}</strong>
-                    <code>{searchHitExcerpt(hit)}</code>
-                    <span className="search-result-signals">
-                      {hit.match_sources.map((source) => (
-                        <i key={source}>{source}</i>
-                      ))}
-                      <small>score {hit.score}</small>
-                    </span>
-                  </button>
-                ))}
-                {searchResult.hits.length === 0 ? (
-                  <div className="search-empty">
-                    <Braces size={19} />
-                    <span>No evidence matched this workspace yet.</span>
-                  </div>
-                ) : null}
-                {searchResult.next_cursor ? (
-                  <Button
-                    variant="outline"
-                    className="search-more"
-                    type="button"
-                    disabled={isSearching}
-                    onClick={() =>
-                      void runSearch(searchResult.next_cursor ?? undefined)
-                    }
-                  >
-                    Load more evidence
-                  </Button>
-                ) : null}
+        <div className="command-palette-backdrop">
+          <dialog
+            open
+            className="search-command"
+            id="graph-search-panel"
+            aria-label="Search evidence graph"
+            aria-modal="true"
+          >
+            <div className="search-command-heading">
+              <div className="search-command-icon" aria-hidden="true">
+                <Search size={17} />
               </div>
-            ) : (
-              <div
-                className="search-suggestions"
-                aria-label="Search suggestions"
+              <div>
+                <p className="eyebrow">Hybrid retrieval</p>
+                <h2>Find evidence across papers</h2>
+              </div>
+              <button
+                className="search-close"
+                type="button"
+                aria-label="Close graph search"
+                onClick={() => setIsSearchOpen(false)}
               >
-                {['scaled attention', 'd_model', 'convergence'].map(
-                  (suggestion) => (
+                <X size={17} />
+              </button>
+            </div>
+            <div className="search-command-body">
+              <form className="search-form" onSubmit={handleSearch}>
+                <Input
+                  id="search-evidence-query"
+                  name="query"
+                  aria-label="Formula or research concept"
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Try d_model, scaled similarity, or convergence…"
+                  maxLength={500}
+                />
+                <Button type="submit" disabled={isSearching}>
+                  <Search size={15} />
+                  {isSearching ? 'Searching…' : 'Search evidence'}
+                </Button>
+              </form>
+              <p className="search-notice" aria-live="polite">
+                <CircleDot size={12} />
+                {searchNotice}
+              </p>
+              {searchResult ? (
+                <div
+                  className="search-results"
+                  aria-label="Evidence search results"
+                >
+                  {searchResult.hits.map((hit) => (
                     <button
-                      key={suggestion}
+                      className="search-result"
+                      key={hit.uuid}
                       type="button"
-                      onClick={() => setSearchQuery(suggestion)}
+                      onClick={() => selectSearchHit(hit)}
                     >
-                      {suggestion}
+                      <span className="search-result-topline">
+                        <b>{hit.kind}</b>
+                        <span>
+                          {hit.paper_id}
+                          {hit.version ? `v${hit.version}` : ''}
+                        </span>
+                      </span>
+                      <strong>{searchHitTitle(hit)}</strong>
+                      <code>{searchHitExcerpt(hit)}</code>
+                      <span className="search-result-signals">
+                        {hit.match_sources.map((source) => (
+                          <i key={source}>{source}</i>
+                        ))}
+                        <small>score {hit.score}</small>
+                      </span>
                     </button>
-                  ),
-                )}
-              </div>
-            )}
+                  ))}
+                  {searchResult.hits.length === 0 ? (
+                    <div className="search-empty">
+                      <Braces size={19} />
+                      <span>No evidence matched this workspace yet.</span>
+                    </div>
+                  ) : null}
+                  {searchResult.next_cursor ? (
+                    <Button
+                      variant="outline"
+                      className="search-more"
+                      type="button"
+                      disabled={isSearching}
+                      onClick={() =>
+                        void runSearch(searchResult.next_cursor ?? undefined)
+                      }
+                    >
+                      Load more evidence
+                    </Button>
+                  ) : null}
+                </div>
+              ) : (
+                <div
+                  className="search-suggestions"
+                  aria-label="Search suggestions"
+                >
+                  {['scaled attention', 'd_model', 'convergence'].map(
+                    (suggestion) => (
+                      <button
+                        key={suggestion}
+                        type="button"
+                        onClick={() => setSearchQuery(suggestion)}
+                      >
+                        {suggestion}
+                      </button>
+                    ),
+                  )}
+                </div>
+              )}
+            </div>
+          </dialog>
+        </div>
+      ) : null}
+
+      {activeViewTab !== 'spec' ? (
+        <section
+          className={`import-strip ${hasPersistedGraph && !isImportExpanded ? 'is-compact' : ''}`}
+          aria-label="Import a paper"
+        >
+        {hasPersistedGraph && !isImportExpanded ? (
+          <div className="import-compact-row">
+            <div className="import-compact-info">
+              <Link2 size={14} className="text-primary shrink-0" />
+              <span className="font-semibold text-xs text-foreground">
+                Active:
+              </span>
+              <span className="text-xs text-muted-foreground truncate font-medium">
+                arXiv:{paperId} &mdash; {paperTitle}
+              </span>
+              <Badge
+                variant="outline"
+                className="text-[10px] py-0 h-4 border-emerald-500/40 text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 shrink-0"
+              >
+                v{paperVersion} · {evidenceNodes.length} nodes
+              </Badge>
+              <span
+                className="import-compact-notice text-xs text-muted-foreground/80 truncate hidden md:inline"
+                aria-live="polite"
+              >
+                · {importNotice}
+              </span>
+            </div>
+            <div className="import-compact-actions flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 text-xs text-muted-foreground hover:text-foreground px-2"
+                onClick={() => setIsImportExpanded(true)}
+              >
+                Change Paper
+              </Button>
+            </div>
           </div>
+        ) : (
+          <>
+            <div className="import-label">
+              <Link2 size={16} />
+              HTML source
+            </div>
+            <form className="import-form" onSubmit={handleImport}>
+              <Input
+                id="arxiv-paper-url"
+                name="paper_url"
+                aria-label="arXiv HTML paper URL"
+                value={paperUrl}
+                onChange={(event) => setPaperUrl(event.target.value)}
+                className="paper-url-input"
+                spellCheck={false}
+              />
+              <Button
+                className="import-button"
+                type="submit"
+                disabled={isImporting}
+              >
+                <Plus size={16} />
+                {isImporting ? 'Importing…' : 'Import paper'}
+              </Button>
+              {hasPersistedGraph ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  type="button"
+                  className="h-10 px-3 text-xs shrink-0"
+                  onClick={() => setIsImportExpanded(false)}
+                >
+                  Collapse
+                </Button>
+              ) : null}
+            </form>
+            <p className="import-notice" aria-live="polite">
+              <CircleDot size={13} />
+              {importNotice}
+            </p>
+          </>
+        )}
         </section>
       ) : null}
 
-      <section className="import-strip" aria-label="Import a paper">
-        <div className="import-label">
-          <Link2 size={16} />
-          HTML source
-        </div>
-        <form className="import-form" onSubmit={handleImport}>
-          <Input
-            aria-label="arXiv HTML paper URL"
-            value={paperUrl}
-            onChange={(event) => setPaperUrl(event.target.value)}
-            className="paper-url-input"
-            spellCheck={false}
-          />
-          <Button
-            className="import-button"
-            type="submit"
-            disabled={isImporting}
-          >
-            <Plus size={16} />
-            {isImporting ? 'Importing…' : 'Import paper'}
-          </Button>
-        </form>
-        <p className="import-notice" aria-live="polite">
-          <CircleDot size={13} />
-          {notice}
-        </p>
-      </section>
-
       <div
-        className={`research-grid ${isLeftCollapsed ? 'is-left-collapsed' : ''} ${isRightCollapsed ? 'is-right-collapsed' : ''}`}
+        className={`research-grid ${activeViewTab === 'spec' ? 'is-spec-view' : ''} ${activeViewTab === 'compat' ? 'is-compat-view' : ''} ${isLeftCollapsed ? 'is-left-collapsed' : ''} ${isRightCollapsed ? 'is-right-collapsed' : ''}`}
       >
         <aside
           className={`source-panel ${isLeftCollapsed ? 'is-collapsed' : ''}`}
@@ -1177,6 +1688,49 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
             </div>
           </article>
 
+          <div className="section-list mb-4">
+            <p className="list-label">
+              Multi-paper lineage ({multiPaperCoverage.length} indexed)
+            </p>
+            <div className="space-y-1.5 px-2">
+              {multiPaperCoverage.map((p, idx) => (
+                <div
+                  key={p.id}
+                  className="p-2 rounded border border-border/40 bg-card/50 text-xs space-y-1"
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="font-semibold text-[11px] truncate">
+                      P–0{idx + 1} · arXiv:{p.id}
+                    </span>
+                    {p.hasHtml ? (
+                      <Badge
+                        variant="outline"
+                        className="text-[9px] py-0 h-4 border-emerald-500/40 text-emerald-600 dark:text-emerald-400 shrink-0"
+                      >
+                        HTML ({p.eqCount} eq)
+                      </Badge>
+                    ) : (
+                      <Badge
+                        variant="outline"
+                        className="text-[9px] py-0 h-4 border-amber-500/40 text-amber-600 dark:text-amber-400 bg-amber-500/10 shrink-0 font-medium"
+                      >
+                        Metadata Only
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground line-clamp-1">
+                    {p.title}
+                  </p>
+                  {!p.hasHtml ? (
+                    <p className="text-[10px] text-muted-foreground/70 italic">
+                      arXiv metadata only — equations not extracted
+                    </p>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+
           <div className="section-list">
             <p className="list-label">Extracted structure</p>
             {paperSections.map((section) => (
@@ -1218,7 +1772,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
         >
           <div className="graph-header">
             <div className="graph-header-left">
-              {isLeftCollapsed ? (
+              {isLeftCollapsed && activeViewTab !== 'spec' ? (
                 <Button
                   type="button"
                   variant="outline"
@@ -1233,30 +1787,106 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                 </Button>
               ) : null}
               <div>
-                <p className="eyebrow">Temporal formula graph</p>
+                <p className="eyebrow">
+                  {activeViewTab === 'spec'
+                    ? 'Research setup'
+                    : activeViewTab === 'compat'
+                      ? 'Candidate validation'
+                      : 'Temporal formula graph'}
+                </p>
                 <h1>
-                  {hasPersistedGraph
-                    ? 'Exact evidence snapshot'
-                    : 'Attention lineage'}
+                  {activeViewTab === 'spec'
+                    ? 'Start with your research question'
+                    : activeViewTab === 'compat'
+                      ? 'Check candidate compatibility'
+                      : hasPersistedGraph
+                        ? equationCount > 0
+                          ? 'Exact evidence snapshot'
+                          : 'Paper snapshot'
+                        : 'Attention lineage'}
                 </h1>
+              </div>
+              <div
+                className="flex flex-wrap items-center gap-1 ml-0 sm:ml-4 bg-muted/60 p-1 rounded-xl border border-border/60 max-w-full min-h-9 shadow-inner"
+                role="tablist"
+                aria-label="Research Workspace Views"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeViewTab === 'lineage'}
+                  className={`px-3 h-7 text-xs font-medium rounded-lg transition-all whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
+                    activeViewTab === 'lineage'
+                      ? 'bg-background text-foreground shadow-xs font-semibold'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-background/40'
+                  }`}
+                  onClick={() => selectPrimaryView('papers')}
+                >
+                  <Network size={13} className={activeViewTab === 'lineage' ? 'text-primary' : 'text-muted-foreground'} />
+                  <span>Lineage Graph</span>
+                  <span className="ml-1 px-1.5 py-0.5 text-[10px] font-mono rounded-full bg-muted text-muted-foreground">
+                    {evidenceNodes.length}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeViewTab === 'spec'}
+                  className={`px-3 h-7 text-xs font-medium rounded-lg transition-all inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                    activeViewTab === 'spec'
+                      ? 'bg-background text-foreground shadow-xs font-semibold'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-background/40'
+                  }`}
+                  onClick={() => selectPrimaryView('research')}
+                >
+                  <FileCode2 size={13} className={activeViewTab === 'spec' ? 'text-primary' : 'text-muted-foreground'} />
+                  <span>Problem Spec (G1)</span>
+                  <span className="ml-1 px-1.5 py-0.5 text-[10px] font-mono rounded-full bg-primary/10 text-primary font-medium">
+                    G1
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeViewTab === 'compat'}
+                  className={`px-3 h-7 text-xs font-medium rounded-lg transition-all inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                    activeViewTab === 'compat'
+                      ? 'bg-background text-foreground shadow-xs font-semibold'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-background/40'
+                  }`}
+                  onClick={() => {
+                    setActiveViewTab('compat');
+                    setIsLeftCollapsed(false);
+                  }}
+                >
+                  <ShieldCheck size={13} className={activeViewTab === 'compat' ? 'text-primary' : 'text-muted-foreground'} />
+                  <span>Compatibility (G3)</span>
+                  <span className="ml-1 px-1.5 py-0.5 text-[10px] font-mono rounded-full bg-muted text-muted-foreground">
+                    {compatMappings.length}
+                  </span>
+                </button>
               </div>
             </div>
             <div className="graph-header-right">
-              <div className="legend" aria-label="Graph legend">
-                <span>
-                  <i className="legend-dot evidence-dot" />
-                  Evidence
-                </span>
-                <span>
-                  <i className="legend-dot concept-dot" />
-                  Concept
-                </span>
-                <span>
-                  <i className="legend-dot hypothesis-dot" />
-                  Hypothesis
-                </span>
-              </div>
-              {isRightCollapsed ? (
+              {activeViewTab === 'lineage' ? (
+                <div className="legend" aria-label="Graph legend">
+                  <span title="Evidence nodes">
+                    <i className="legend-dot evidence-dot" />
+                    Evidence
+                  </span>
+                  <span title="Citation edges (dashed line)">
+                    <i className="legend-dot concept-dot" />
+                    Citation
+                  </span>
+                  <span title="Derivation edges (solid line)">
+                    <i className="legend-dot hypothesis-dot" />
+                    Derivation
+                  </span>
+                </div>
+              ) : null}
+              {isRightCollapsed &&
+              activeViewTab !== 'spec' &&
+              activeViewTab !== 'compat' ? (
                 <Button
                   type="button"
                   variant="outline"
@@ -1273,41 +1903,326 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
             </div>
           </div>
 
-          <div className="graph-stage">
-            <EvidenceGraphViewport
-              nodes={graphNodes}
-              edges={graphConnections}
-              selectedId={selectedId}
-              onSelect={selectGraphNode}
-              loading={isGraphLoading}
+          <div
+            hidden={activeViewTab !== 'spec'}
+            className="flex-1 overflow-y-auto"
+          >
+            <ProblemSpecPanel />
+          </div>
+          <div hidden={activeViewTab === 'spec'} className="shrink-0 mb-2">
+            <ResearchCreatePanel
+              onCreated={() => setResearchRevision((value) => value + 1)}
             />
-            <div className="graph-status">
-              <span className="pulse-dot" />
-              {hasPersistedGraph
-                ? 'Exact graph persisted'
-                : 'Version-aware demo'}
-              <span>{graphNotice}</span>
-            </div>
           </div>
+          {activeViewTab === 'lineage' ? (
+            <>
+              <div className="graph-stage">
+                <EvidenceGraphViewport
+                  nodes={graphNodes}
+                  edges={graphConnections}
+                  selectedId={selectedId}
+                  onSelect={selectGraphNode}
+                  loading={isGraphLoading}
+                  hasSnapshot={hasPersistedGraph}
+                  isZenMode={isZenMode}
+                  onToggleZen={toggleZenMode}
+                />
+                <output
+                  className="graph-status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
+                  <span className="pulse-dot" />
+                  {hasPersistedGraph
+                    ? 'Paper snapshot persisted'
+                    : 'Version-aware demo'}
+                  <span>{graphNotice}</span>
+                </output>
+              </div>
 
-          <div className="hypothesis-dock">
-            <div className="hypothesis-icon">
-              <Sparkles size={18} />
+              <div className="hypothesis-dock shrink-0">
+                <div className="hypothesis-icon">
+                  <Braces size={18} />
+                </div>
+                <div>
+                  <p>Research move</p>
+                  <strong>
+                    A candidate is a hypothesis—not a verification result
+                  </strong>
+                </div>
+                <ResearchMovePanel
+                  mappings={compatMappings}
+                  mappingsState={researchRecordsState}
+                  mappingsPartial={researchRecordsPartial}
+                />
+              </div>
+            </>
+          ) : activeViewTab === 'spec' ? null : (
+            <div className="flex-1 p-6 overflow-y-auto bg-card/20 space-y-4">
+              <div className="flex items-center justify-between p-4 rounded-xl border border-border/50 bg-card shadow-xs">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-lg font-semibold tracking-tight">
+                      Port Compatibility (G3)
+                    </h2>
+                    <Badge variant="outline" className="text-xs">
+                      Versioned policy
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Scoped checks for shape, domain, normalization, masks,
+                    causality and reviewed symbol bindings.
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                {compatMappings.length === 0 ? (
+                  <div className="space-y-4">
+                    <output className="block rounded-lg border border-border/60 bg-card p-3 text-sm text-muted-foreground">
+                      {researchLoadNotice ===
+                        'Research records loaded from the workspace.' ||
+                      researchLoadNotice ===
+                        'No saved research records in this workspace.'
+                        ? 'No saved port mappings in this workspace.'
+                        : researchLoadNotice}
+                    </output>
+
+                    <div className="rounded-xl border border-border/60 bg-card/60 backdrop-blur-xs p-5 space-y-4 shadow-xs">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <ShieldCheck size={18} className="text-primary" />
+                          <h3 className="text-sm font-semibold text-foreground">
+                            6-Gate Semantic Compatibility Protocol
+                          </h3>
+                        </div>
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                          Automated cross-formula tensor port verification ensures mathematically sound synthesis before generating speculative hypothesis moves.
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                        <div className="p-3 rounded-lg border border-border/40 bg-background/50 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-foreground">1. Tensor Shape Gate</span>
+                            <Badge variant="outline" className="text-[10px] font-mono">Rank & Dim</Badge>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">Validates broadcasting rules and dimension alignment across ports.</p>
+                        </div>
+                        <div className="p-3 rounded-lg border border-border/40 bg-background/50 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-foreground">2. Domain Value Gate</span>
+                            <Badge variant="outline" className="text-[10px] font-mono">Bounds</Badge>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">Ensures producer codomain is a valid subset of consumer domain.</p>
+                        </div>
+                        <div className="p-3 rounded-lg border border-border/40 bg-background/50 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-foreground">3. Normalization Gate</span>
+                            <Badge variant="outline" className="text-[10px] font-mono">Scale</Badge>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">Checks softmax temperature, layer-norm variance, and scaling factors.</p>
+                        </div>
+                        <div className="p-3 rounded-lg border border-border/40 bg-background/50 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-foreground">4. Attention Mask Gate</span>
+                            <Badge variant="outline" className="text-[10px] font-mono">Sparsity</Badge>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">Verifies causal masking and padding mask compatibility.</p>
+                        </div>
+                        <div className="p-3 rounded-lg border border-border/40 bg-background/50 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-foreground">5. Causality DAG Gate</span>
+                            <Badge variant="outline" className="text-[10px] font-mono">No Cycle</Badge>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">Guarantees acyclic temporal ordering across paper derivations.</p>
+                        </div>
+                        <div className="p-3 rounded-lg border border-border/40 bg-background/50 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-foreground">6. Reviewed Binding Gate</span>
+                            <Badge variant="outline" className="text-[10px] font-mono">Human-in-Loop</Badge>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">Enforces cryptographic sign-off for ambiguous symbol names.</p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-2 border-t border-border/40">
+                        <span className="text-xs text-muted-foreground">
+                          Ready to assess candidate ports? Select formulas in the Lineage Graph.
+                        </span>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-8 text-xs gap-1.5"
+                          onClick={() => selectPrimaryView('papers')}
+                        >
+                          <Network size={13} />
+                          <span>View Lineage Graph</span>
+                          <ArrowRight size={13} />
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+                {compatMappings.map((m) => (
+                  <div
+                    key={m.mappingId}
+                    className="p-4 rounded-xl border border-border/50 bg-card space-y-3 shadow-xs"
+                  >
+                    {m.freshness === 'stale' ? (
+                      <div
+                        className="p-2.5 rounded-lg bg-destructive/10 border border-destructive/30 text-destructive text-xs font-medium flex items-center gap-2"
+                        role="alert"
+                      >
+                        <AlertTriangle size={15} />
+                        Dependency changed since assessment — re-verification
+                        required
+                      </div>
+                    ) : null}
+
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs font-semibold">
+                          {m.mappingId}
+                        </span>
+                        <Badge
+                          variant={
+                            m.freshness === 'stale'
+                              ? 'secondary'
+                              : m.status === 'compatible'
+                                ? 'default'
+                                : m.status === 'incompatible'
+                                  ? 'destructive'
+                                  : 'secondary'
+                          }
+                          className={`text-[10px] font-semibold uppercase ${
+                            m.freshness === 'current' &&
+                            m.status === 'compatible'
+                              ? 'bg-emerald-600 text-white'
+                              : m.status === 'unknown'
+                                ? 'bg-amber-500/20 text-amber-700 dark:text-amber-300 border-amber-500/40'
+                                : ''
+                          }`}
+                        >
+                          {m.freshness === 'stale'
+                            ? `historical ${m.status}`
+                            : m.status}
+                        </Badge>
+                        <Badge variant="outline" className="text-[10px]">
+                          {m.freshness}
+                        </Badge>
+                        <span className="text-[10px] text-muted-foreground">
+                          {m.policyVersion}
+                        </span>
+                      </div>
+
+                      {m.freshness === 'current' &&
+                      m.status === 'unknown' &&
+                      !m.isReviewed ? (
+                        <Button
+                          size="sm"
+                          className="h-7 text-xs flex items-center gap-1"
+                          disabled={isReviewingCompatId === m.mappingId}
+                          onClick={() => {
+                            void handleReviewBinding(m.mappingId);
+                          }}
+                        >
+                          <Check size={13} />
+                          {isReviewingCompatId === m.mappingId
+                            ? 'Reviewing…'
+                            : 'Review Binding'}
+                        </Button>
+                      ) : null}
+                    </div>
+
+                    {m.freshness === 'current' &&
+                    m.status === 'unknown' &&
+                    !m.isReviewed ? (
+                      <label className="block text-xs mt-2">
+                        Binding review rationale and evidence scope
+                        <textarea
+                          maxLength={1000}
+                          value={reviewNotes[m.mappingId] ?? ''}
+                          onChange={(e) =>
+                            setReviewNotes((previous) => ({
+                              ...previous,
+                              [m.mappingId]: e.target.value,
+                            }))
+                          }
+                          className="block w-full border rounded p-2 mt-1"
+                        />
+                      </label>
+                    ) : null}
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs bg-muted/20 p-3 rounded-lg border border-border/40 font-mono">
+                      <div>
+                        <span className="text-muted-foreground block font-sans text-[11px] mb-1">
+                          PRODUCER PORT:
+                        </span>
+                        <p className="font-semibold text-foreground">
+                          {m.producer.equation} · {m.producer.symbol}
+                        </p>
+                        <p className="text-muted-foreground text-[11px] mt-0.5">
+                          Domain: {m.producer.domain} | Shape:{' '}
+                          {m.producer.shape}
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground block font-sans text-[11px] mb-1">
+                          CONSUMER PORT:
+                        </span>
+                        <p className="font-semibold text-foreground">
+                          {m.consumer.equation} · {m.consumer.symbol}
+                        </p>
+                        <p className="text-muted-foreground text-[11px] mt-0.5">
+                          Domain: {m.consumer.domain} | Shape:{' '}
+                          {m.consumer.shape}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                      <span className="text-[11px] text-muted-foreground">
+                        Reasons:
+                      </span>
+                      {m.reasons.length > 0 ? (
+                        m.reasons.map((r) => (
+                          <Badge
+                            key={r}
+                            variant="outline"
+                            className="text-[10px] font-mono"
+                          >
+                            {r}
+                          </Badge>
+                        ))
+                      ) : (
+                        <span className="text-[11px] text-muted-foreground italic">
+                          none
+                        </span>
+                      )}
+                      {m.unresolved.length > 0 ? (
+                        <>
+                          <span className="text-[11px] text-amber-600 dark:text-amber-400 ml-2">
+                            Unresolved:
+                          </span>
+                          {m.unresolved.map((u) => (
+                            <Badge
+                              key={u}
+                              variant="outline"
+                              className="text-[10px] font-mono border-amber-500/40 text-amber-600 dark:text-amber-400"
+                            >
+                              {u}
+                            </Badge>
+                          ))}
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div>
-              <p>Research move</p>
-              <strong>Combine selected formulas under typed constraints</strong>
-            </div>
-            <Button
-              variant="outline"
-              className="mashup-button"
-              disabled
-              title="Typed formulas are ready; hypothesis mashup begins in Sprint 5"
-            >
-              <FlaskConical size={16} />
-              Mashup in Sprint 5
-            </Button>
-          </div>
+          )}
         </section>
 
         <aside
@@ -1340,14 +2255,48 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               </div>
 
               <div className="formula-display">
-                <p>
-                  {hasPersistedGraph
-                    ? 'Extracted expression'
-                    : 'Canonical expression'}
-                </p>
+                <div className="flex items-center justify-between pb-1">
+                  <p className="m-0">
+                    {hasPersistedGraph
+                      ? 'Extracted expression'
+                      : 'Canonical expression'}
+                  </p>
+                  {inspector.expression ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-[11px] gap-1 text-muted-foreground hover:text-foreground hover:bg-background/80"
+                      onClick={() => {
+                        navigator.clipboard?.writeText(inspector.expression)
+                          .then(() => {
+                            setCopiedLatex(true);
+                            setTimeout(() => setCopiedLatex(false), 1500);
+                          })
+                          .catch(() => setCopiedLatex(false));
+                      }}
+                      title="Copy LaTeX / expression to clipboard"
+                    >
+                      {copiedLatex ? (
+                        <>
+                          <Check size={12} className="text-emerald-500" />
+                          <span className="text-emerald-500 font-medium">Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy size={12} />
+                          <span>Copy LaTeX</span>
+                        </>
+                      )}
+                    </Button>
+                  ) : null}
+                </div>
                 {(() => {
-                  const isMath = inspector.kind === 'Equation' || !hasPersistedGraph;
-                  const latexHtml = isMath ? renderFormulaHtml(inspector.expression) : null;
+                  const isMath =
+                    inspector.kind === 'Equation' || !hasPersistedGraph;
+                  const latexHtml = isMath
+                    ? renderFormulaHtml(inspector.expression)
+                    : null;
                   return latexHtml ? (
                     <div
                       className="inspector-latex-math"
@@ -1403,8 +2352,10 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               <section className="inspector-section">
                 <div className="section-title">
                   <h3>Relation</h3>
-                  <span>
-                    {Math.round(inspector.confidence * 100)}% confidence
+                  <span title="Extraction confidence is not type confidence, human review, or verification.">
+                    {inspector.confidence === null
+                      ? 'Extraction confidence not reported'
+                      : `Extraction confidence ${Math.round(inspector.confidence * 100)}%`}
                   </span>
                 </div>
                 <div className="relation-card">
@@ -1590,6 +2541,122 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               </div>
             </>
           )}
+          {activeViewTab === 'lineage' ? (
+            <section className="inspector-section lineage-evidence-drawer">
+              <div className="section-title">
+                <h3>Lineage & Derivations</h3>
+                <Badge variant="outline" className="text-[10px]">
+                  Multi-paper Evidence
+                </Badge>
+              </div>
+              <div className="space-y-2 mt-2">
+                {lineageRelations.map((edge) => (
+                  <div
+                    key={edge.id}
+                    className={`p-2.5 rounded-lg border text-xs transition-colors ${
+                      selectedLineageId === edge.id
+                        ? 'border-primary/60 bg-primary/5'
+                        : 'border-border/40 hover:bg-muted/20'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      className="w-full text-left focus:outline-hidden"
+                      onClick={() => setSelectedLineageId(edge.id)}
+                    >
+                      <div className="flex items-center justify-between font-medium">
+                        <span className="capitalize">
+                          {edge.relationType.replaceAll('_', ' ')}
+                        </span>
+                        <Badge
+                          variant={
+                            edge.status === 'reviewed'
+                              ? 'default'
+                              : edge.status === 'rejected'
+                                ? 'destructive'
+                                : 'secondary'
+                          }
+                          className={`text-[9px] py-0 h-4 ${
+                            edge.status === 'reviewed'
+                              ? 'bg-emerald-600 text-white'
+                              : ''
+                          }`}
+                        >
+                          {edge.status}
+                        </Badge>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground mt-0.5 font-mono">
+                        {edge.source} &rarr; {edge.target}
+                      </p>
+                    </button>
+                    {selectedLineageId === edge.id ? (
+                      <div className="mt-2 pt-2 border-t border-border/40 space-y-2 text-[11px]">
+                        <p className="italic text-muted-foreground bg-muted/30 p-2 rounded">
+                          Assertion rationale: {edge.evidence.quote}
+                        </p>
+                        <div className="text-[10px] text-muted-foreground space-y-0.5">
+                          <p>
+                            <strong>Source Paper:</strong> {edge.evidence.paper}
+                          </p>
+                          <p>
+                            <strong>Section Anchor:</strong>{' '}
+                            {edge.evidence.section}
+                          </p>
+                        </div>
+                        <LineageSourceRefs refs={edge.evidence.refs} />
+                        {edge.status !== 'reviewed' ? (
+                          <div className="space-y-2 pt-1">
+                            <label className="block">
+                              Source review rationale and scope
+                              <textarea
+                                maxLength={1000}
+                                value={reviewNotes[edge.id] ?? ''}
+                                onChange={(e) =>
+                                  setReviewNotes((previous) => ({
+                                    ...previous,
+                                    [edge.id]: e.target.value,
+                                  }))
+                                }
+                                className="block w-full border rounded p-2 mt-1"
+                              />
+                            </label>
+                            <div className="flex items-center gap-1.5">
+                              <Button
+                                size="sm"
+                                className="h-6 text-[11px] px-2 flex items-center gap-1"
+                                disabled={isReviewingLineageId === edge.id}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleReviewLineage(edge.id, 'reviewed');
+                                }}
+                              >
+                                <Check size={11} />
+                                {isReviewingLineageId === edge.id
+                                  ? 'Reviewing…'
+                                  : 'Review & Approve'}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-6 text-[11px] px-2 text-destructive border-destructive/30 hover:bg-destructive/10"
+                                disabled={isReviewingLineageId === edge.id}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleReviewLineage(edge.id, 'rejected');
+                                }}
+                              >
+                                Reject
+                              </Button>
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
         </aside>
       </div>
     </main>

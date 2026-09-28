@@ -26,8 +26,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+    <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`} suppressHydrationWarning>
+      <body className="antialiased" suppressHydrationWarning>
+        {/* Suppress browser-extension hydration mismatches (fdprocessedid) and benign ResizeObserver loop notifications before React & Vinext load */}
+        <script dangerouslySetInnerHTML={{ __html: `(function(){var o=console.error;console.error=function(){for(var i=0;i<arguments.length;i++){if(typeof arguments[i]==='string'&&arguments[i].indexOf('fdprocessedid')!==-1)return}o.apply(console,arguments)};window.addEventListener('error',function(e){if(e&&e.message&&(e.message.indexOf('ResizeObserver loop completed with undelivered notifications')!==-1||e.message.indexOf('ResizeObserver loop limit exceeded')!==-1)){e.stopImmediatePropagation();e.preventDefault()}},true)})()` }} />
         {children}
       </body>
     </html>
