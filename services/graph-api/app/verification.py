@@ -9,11 +9,11 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.formula_ast import (
     FormulaFormat,
@@ -23,7 +23,9 @@ from app.formula_ast import (
     parse_formula,
 )
 from app.symbol_contracts import (
+    ContractReview,
     SymbolContract,
+    apply_contract_reviews,
     assess_domain_obligations,
     infer_contracts,
     infer_domain_obligations,
@@ -74,11 +76,24 @@ class CheckResult(BaseModel):
     error_code: str | None = Field(default=None, max_length=100)
     duration_ms: int = Field(ge=0)
     created_at: datetime
-    schema_version: Literal["check-result.v1"] = "check-result.v1"
     job_id: str | None = None
     execution_image: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    contract_review_ids: tuple[str, ...] = ()
+    contract_review_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    schema_version: Literal["check-result.v1", "check-result.v2"] = "check-result.v1"
 
     model_config = {"frozen": True, "extra": "forbid"}
+
+    @model_validator(mode="after")
+    def validate_review_snapshot(self) -> CheckResult:
+        if self.schema_version == "check-result.v1":
+            if self.contract_review_ids or self.contract_review_hash is not None:
+                raise ValueError("Version 1 check results cannot carry contract-review state.")
+        elif self.contract_review_hash is None or len(self.contract_review_ids) != len(
+            set(self.contract_review_ids)
+        ):
+            raise ValueError("Version 2 check results require a unique, hashed review snapshot.")
+        return self
 
 
 class CheckResultResponse(CheckResult):
@@ -88,6 +103,7 @@ class CheckResultResponse(CheckResult):
 def symbolic_request_hash(
     formula_a: str, formula_b: str, *, source_format: FormulaFormat = "latex",
     timeout_ms: int = 2_000, execution_image: str | None = None,
+    contract_review_hash: str | None = None,
 ) -> str:
     from app.formula_ast import CANONICALIZER_VERSION, SYNTAX_HASH_VERSION
 
@@ -98,6 +114,8 @@ def symbolic_request_hash(
     ]
     if execution_image is not None:
         payload.extend(["sandbox-policy.v1", execution_image])
+    if contract_review_hash is not None:
+        payload.extend(["contract-review-state.v1", contract_review_hash])
     return hashlib.sha256(json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
     ).encode("utf-8")).hexdigest()
@@ -110,6 +128,8 @@ def run_symbolic_check(
     source_format: FormulaFormat = "latex",
     timeout_ms: int = 2_000,
     worker_runner: Callable | None = None,
+    contract_reviews: Iterable[ContractReview] = (),
+    contract_review_scope: str | None = None,
 ) -> CheckResult:
     """Run one symbolic comparison with conservative preflight gates."""
     started = time.monotonic()
@@ -153,8 +173,15 @@ def run_symbolic_check(
             error_code="AST_RESOURCE_LIMIT",
         )
 
-    contracts_a = infer_contracts(parsed_a)
-    contracts_b = infer_contracts(parsed_b)
+    reviews = list(contract_reviews)
+    if reviews and not contract_review_scope:
+        raise ValueError("A source equation scope is required for reviewed contracts.")
+    contracts_a = _apply_reviews_to_symbols(
+        infer_contracts(parsed_a), reviews, contract_review_scope,
+    )
+    contracts_b = _apply_reviews_to_symbols(
+        infer_contracts(parsed_b), reviews, contract_review_scope,
+    )
     _, errors_a = infer_expression_shape(contracts_a, parsed_a)
     _, errors_b = infer_expression_shape(contracts_b, parsed_b)
     if errors_a or errors_b:
@@ -269,10 +296,25 @@ def _result(
 
 def _contracts_have_unknown_shape(contracts: list[object]) -> bool:
     return any(
-        shape is not None and any(dimension == "?" for dimension in shape)
+        getattr(contract, "category", None) == "unknown"
+        or (
+            (shape := getattr(contract, "shape", None)) is not None
+            and any(dimension == "?" for dimension in shape)
+        )
         for contract in contracts
-        if (shape := getattr(contract, "shape", None)) is not None
     )
+
+
+def _apply_reviews_to_symbols(
+    contracts: list[SymbolContract],
+    reviews: list[ContractReview],
+    scope: str | None,
+) -> list[SymbolContract]:
+    names = {contract.name for contract in contracts}
+    applicable = [review for review in reviews if review.symbol_name in names]
+    if not applicable:
+        return contracts
+    return apply_contract_reviews(contracts, applicable, scope=scope or "")
 
 
 def _has_missing_symbol_coverage(

@@ -30,7 +30,7 @@ NodeKind = Literal[
 MAX_FORMULA_CHARACTERS = 20_000
 MAX_AST_NODES = 2_048
 MAX_PARSE_DEPTH = 64
-SYNTAX_HASH_VERSION = "syntax-hash.v3"
+SYNTAX_HASH_VERSION = "syntax-hash.v8"
 CANONICALIZER_VERSION = "alpha-canonicalizer.v3"
 
 
@@ -109,7 +109,7 @@ class _Token:
     position: int
 
 
-_SPACING_COMMANDS = {",", ";", ":", "!", "quad", "qquad", " "}
+_SPACING_COMMANDS = {",", ";", ":", "!", "quad", "qquad", "displaystyle", " "}
 _OPERATOR_COMMANDS = {"cdot": "*", "times": "*", "div": "/"}
 _FUNCTION_COMMANDS = {
     "sin",
@@ -136,6 +136,7 @@ _STRUCTURAL_COMMANDS = {
     "boldsymbol",
     "vec",
     "mathcal",
+    "widehat",
 }
 _CONSTANTS = {"pi", "infty", "infinity"}
 
@@ -165,6 +166,11 @@ def parse_formula(source: str, source_format: FormulaFormat = "latex") -> Parsed
 
 def _tokenize_latex(source: str) -> list[_Token]:
     text = source.strip()
+    # ponytail: ignore one terminal period/comma after a closing delimiter,
+    # ceiling: other trailing prose punctuation remains unsupported,
+    # upgrade: a supported paper corpus requires more terminal punctuation.
+    if len(text) > 1 and text[-1] in ".," and text[-2] in "})]":
+        text = text[:-1].rstrip()
     for left, right in (("\\[", "\\]"), ("$$", "$$"), ("$", "$")):
         if text.startswith(left) and text.endswith(right) and len(text) >= len(left) + len(right):
             text = text[len(left) : len(text) - len(right)].strip()
@@ -264,14 +270,21 @@ class _FormulaParser:
         return self.tokens[self.index]
 
     def parse(self) -> AstNode:
-        expression = self._expression(0, frozenset())
+        expressions = [self._expression(0, frozenset())]
+        while self.current.value == "," and self.index + 1 < len(self.tokens):
+            if self.tokens[self.index + 1].kind == "eof":
+                break
+            self._advance()
+            expressions.append(self._expression(0, frozenset()))
         if self.current.kind != "eof":
             raise FormulaParseError(
                 "TRAILING_INPUT",
                 "Unexpected input after the formula.",
                 self.current.position,
             )
-        return expression
+        return expressions[0] if len(expressions) == 1 else self._node(
+            "sequence", children=tuple(expressions),
+        )
 
     def _node(
         self,
@@ -295,6 +308,23 @@ class _FormulaParser:
                 if self.current.value in {"_", "^"}:
                     operator = self._advance().value
                     right = self._script_argument()
+                    if operator == "_" and left.kind == "symbol" and left.value == "log":
+                        argument = self._script_argument()
+                        left = self._node("call", children=(left, argument, right))
+                        continue
+                    if operator == "^" and right.kind == "symbol" and right.value == "prime":
+                        if left.kind == "symbol" and left.value:
+                            left = replace(left, value=f"{left.value}'")
+                            continue
+                        if (
+                            left.kind == "subscript"
+                            and left.children
+                            and left.children[0].kind == "symbol"
+                            and left.children[0].value
+                        ):
+                            base = replace(left.children[0], value=f"{left.children[0].value}'")
+                            left = replace(left, children=(base, *left.children[1:]))
+                            continue
                     attributes = (
                         (("operation", "transpose"),)
                         if operator == "^"
@@ -373,6 +403,14 @@ class _FormulaParser:
                 else "identifier"
             )
             return self._node("symbol", name, attributes=(("role", role),))
+        if command == "widehat":
+            # ponytail: reject unsupported accents instead of inventing a symbol,
+            # ceiling: widehat expressions remain unparsed,
+            # upgrade: an attention corpus case requires accent-preserving AST nodes.
+            raise FormulaParseError(
+                "UNSUPPORTED_ACCENT", "Accented formula symbols are outside the parser subset.",
+                token.position,
+            )
         if command in {"mathbf", "boldsymbol", "vec", "mathcal"}:
             child = self._required_group()
             style = {
@@ -422,6 +460,15 @@ class _FormulaParser:
                 self._advance()
         self._expect(")")
         name = function.value if function.kind == "symbol" else None
+        if name == "log" and len(arguments) not in {1, 2}:
+            raise FormulaParseError(
+                "UNSUPPORTED_FUNCTION_ARITY",
+                "Logarithm requires one argument and an optional base.",
+            )
+        if name == "sqrt" and len(arguments) != 1:
+            raise FormulaParseError(
+                "UNSUPPORTED_FUNCTION_ARITY", "Square root requires exactly one argument."
+            )
         kind: NodeKind = (
             "distribution" if name and name.lower() in {"n", "normal", "bernoulli"} else "call"
         )
@@ -681,11 +728,13 @@ def _indexed_category(
     style = base.attribute("style")
     if style == "calligraphy" or index_count >= 3:
         return "tensor"
-    if style == "bold" and base.value and base.value[:1].isupper():
-        return "matrix"
     if index_count >= 2:
         return "matrix"
-    if index_count == 1 or style in {"bold", "vector"}:
+    if index_count == 1:
+        return "vector"
+    if style == "bold" and base.value and base.value[:1].isupper():
+        return "matrix"
+    if style in {"bold", "vector"}:
         return "vector"
     return "unknown"
 

@@ -99,7 +99,7 @@ function Free-PortProcesses {
 
 # --- RELIABLE PORT & HEALTH CHECK HELPERS (IPv4 + IPv6 Dual-stack) ---
 function Test-PortListening {
-    param([int]$Port, [int]$TimeoutMs = 700)
+    param([int]$Port, [int]$TimeoutMs = 250)
     # 1. Kiem tra qua NetTCPConnection (nhanh va ho tro ca IPv4/IPv6 listen sockets)
     $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
     if ($conns) {
@@ -147,16 +147,21 @@ function Wait-ForPort {
             Write-Host " [San sang!]" -ForegroundColor Green
             return $true
         }
-        # Hien thi tien do bundle/optimizer tu log neu co
+        # Success-fast & hien thi tien do tu log neu co
         if ($OutLogPath -and (Test-Path $OutLogPath)) {
+            $logContent = Get-Content $OutLogPath -Raw -ErrorAction SilentlyContinue
+            if ($logContent -and $logContent -match "Local:\s+http://localhost:$Port") {
+                Write-Host " [San sang!]" -ForegroundColor Green
+                return $true
+            }
             $latestLine = Get-Content $OutLogPath -Tail 1 -ErrorAction SilentlyContinue
-            if ($latestLine -and $latestLine -ne $lastMsg -and ($latestLine -match "optimizer|bundling|scanning")) {
+            if ($latestLine -and $latestLine -ne $lastMsg -and ($latestLine -match "optimizer|bundling|scanning|Vite")) {
                 $lastMsg = $latestLine
                 Write-Host "`n    -> $latestLine" -ForegroundColor DarkYellow -NoNewline
             }
         }
         Write-Host -NoNewline "."
-        Start-Sleep -Milliseconds 800
+        Start-Sleep -Milliseconds 600
     }
     Write-Host " [Het thoi gian cho]" -ForegroundColor Red
     return $false
@@ -315,6 +320,15 @@ NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=$neo4jPassword
 OPENAI_API_KEY=
+# Proposal generation is disabled until a model and operator-verified prices/caps are configured.
+FGL_ENABLE_PROPOSALS=false
+FGL_ENABLE_PROPOSAL_GENERATION=false
+FGL_PROPOSAL_MODEL=
+FGL_PROPOSAL_MAX_COST_USD=
+FGL_PROPOSAL_DAILY_MAX_COST_USD=
+FGL_PROPOSAL_INPUT_USD_PER_MILLION=
+FGL_PROPOSAL_OUTPUT_USD_PER_MILLION=
+FGL_PROPOSAL_MAX_OUTPUT_TOKENS=2000
 SERVICE_TOKEN=$randomToken
 SEARCH_CURSOR_SECRET=$cursorSecret
 "@
@@ -327,6 +341,25 @@ SEARCH_CURSOR_SECRET=$cursorSecret
         $cursorSecret = "fg_cursor_" + (New-SecureHex -ByteCount 32)
         Add-Content -Path $EnvFile -Value "`nSEARCH_CURSOR_SECRET=$cursorSecret" -Encoding UTF8
         Write-Step "ENV" "Bo sung SEARCH_CURSOR_SECRET vao file .env."
+    }
+
+    # Add fail-closed provider defaults to older .env files without replacing operator values.
+    $proposalDefaults = @(
+        "FGL_ENABLE_PROPOSALS=false",
+        "FGL_ENABLE_PROPOSAL_GENERATION=false",
+        "FGL_PROPOSAL_MODEL=",
+        "FGL_PROPOSAL_MAX_COST_USD=",
+        "FGL_PROPOSAL_DAILY_MAX_COST_USD=",
+        "FGL_PROPOSAL_INPUT_USD_PER_MILLION=",
+        "FGL_PROPOSAL_OUTPUT_USD_PER_MILLION=",
+        "FGL_PROPOSAL_MAX_OUTPUT_TOKENS=2000"
+    )
+    foreach ($proposalDefault in $proposalDefaults) {
+        $proposalSetting = $proposalDefault.Split('=', 2)[0]
+        if ($envContent -notmatch "(?m)^$([regex]::Escape($proposalSetting))=") {
+            Add-Content -Path $EnvFile -Value $proposalDefault -Encoding UTF8
+            $envContent += "`n$proposalDefault"
+        }
     }
 
     # Dong bo GRAPH_API_URL voi Ngrok domain neu duoc bat
@@ -510,46 +543,73 @@ if (-not $NoNgrok) {
 # --- 5. KHOI DONG FRONTEND (VINEXT / REACT 19) ---
 Write-Header "5. Khoi dong Frontend (Vinext / React 19 RSC)"
 
-# Giai phong port 3000 neu dang bi chiem
-Free-PortProcesses -Port 3000
-Start-Sleep -Milliseconds 400
+$feReady = $false
+$fePid = $null
 
-# Don dep tien trinh cu tu file lock cua Vinext (tranh EADDRINUSE hoac lock collision)
-if (Test-Path $VinextLock) {
+# ponytail: reuse running healthy Frontend if port 3000 alive, ceiling: single-tenant dev, upgrade: explicit -Restart flag.
+if (-not $Restart -and (Test-PortListening -Port 3000)) {
     try {
-        $lockData = Get-Content $VinextLock -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
-        if ($lockData -and $lockData.pid -gt 4) {
-            Write-Step "LOCK" "Tien trinh Vinext cu dang ton tai (PID: $($lockData.pid)). Dang don dep..."
-            Kill-ProcessTree -TargetPid $lockData.pid
+        $resp = Invoke-WebRequest -Uri "http://localhost:3000" -UseBasicParsing -TimeoutSec 3 -ErrorAction SilentlyContinue
+        if ($resp -and $resp.StatusCode -ge 200 -and $resp.StatusCode -lt 400) {
+            $feReady = $true
+            if (Test-Path $VinextLock) {
+                try { $fePid = (Get-Content $VinextLock -Raw | ConvertFrom-Json).pid } catch { }
+            }
+            Write-Success "Frontend UI da san sang tu truoc tai http://localhost:3000 $(if ($fePid) { "(PID: $fePid)" }) (Bo qua khoi dong lai nho Vite HMR)."
         }
     } catch { }
-    Remove-Item $VinextLock -Force -ErrorAction SilentlyContinue
-    Write-Step "LOCK" "Da xoa file khoa cu .vinext/dev/lock.json."
 }
-Get-Process workerd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-# ponytail: direct Node execution of vinext cli for exact PID tracking, ceiling: local dev server. upgrade: production multi-worker deployment if serving external traffic.
-$vinextCli = Join-Path $ProjectRoot "node_modules\vinext\dist\cli.js"
-$feOutLog = Join-Path $LogDir "frontend.stdout.log"
-$feErrLog = Join-Path $LogDir "frontend.stderr.log"
-
-$feProc = Start-Process -FilePath "node" -ArgumentList @($vinextCli, "dev") -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden -RedirectStandardOutput $feOutLog -RedirectStandardError $feErrLog
-Write-Success "Frontend chay an truc tiep qua Node (PID: $($feProc.Id)); log: .logs\frontend.*.log"
-
-# Cho Frontend san sang (Fail-fast neu process crash, hien thi tien do optimizer neu cold-start)
-$feReady = Wait-ForPort -Port 3000 -TimeoutSeconds 90 -ServiceName "Frontend UI (Port 3000)" -Process $feProc -OutLogPath $feOutLog
 if (-not $feReady) {
-    Write-ErrorMsg "Frontend UI chua mo port 3000 sau thoi gian cho hoac da bi ngat."
-    Show-RecentLog -FilePath $feErrLog -LineCount 10
-    Show-RecentLog -FilePath $feOutLog -LineCount 10
-} else {
-    Write-Success "Frontend UI da san sang tai http://localhost:3000"
+    # Giai phong port 3000 neu dang bi chiem
+    Free-PortProcesses -Port 3000
+    Start-Sleep -Milliseconds 400
+
+    # Don dep tien trinh cu tu file lock cua Vinext (tranh EADDRINUSE hoac lock collision)
+    if (Test-Path $VinextLock) {
+        try {
+            $lockData = Get-Content $VinextLock -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+            if ($lockData -and $lockData.pid -gt 4) {
+                Write-Step "LOCK" "Tien trinh Vinext cu dang ton tai (PID: $($lockData.pid)). Dang don dep..."
+                Kill-ProcessTree -TargetPid $lockData.pid
+            }
+        } catch { }
+        Remove-Item $VinextLock -Force -ErrorAction SilentlyContinue
+        Write-Step "LOCK" "Da xoa file khoa cu .vinext/dev/lock.json."
+    }
+    Get-Process workerd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+    $vinextCli = Join-Path $ProjectRoot "node_modules\vinext\dist\cli.js"
+    $feOutLog = Join-Path $LogDir "frontend.stdout.log"
+    $feErrLog = Join-Path $LogDir "frontend.stderr.log"
+
+    # ponytail: direct Node execution with --unhandled-rejections=warn to prevent transient Miniflare/workerd socket ECONNRESET aborts during heavy optimizer runs, ceiling: local dev server. upgrade: production multi-worker deployment if serving external traffic.
+    $nodeArgs = @("--unhandled-rejections=warn", $vinextCli, "dev")
+    $feProc = Start-Process -FilePath "node" -ArgumentList $nodeArgs -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden -RedirectStandardOutput $feOutLog -RedirectStandardError $feErrLog
+    $fePid = $feProc.Id
+    Write-Success "Frontend chay an truc tiep qua Node (PID: $fePid); log: .logs\frontend.*.log"
+
+    # Cho Frontend san sang (Fail-fast neu process crash, hien thi tien do optimizer neu cold-start)
+    $feReady = Wait-ForPort -Port 3000 -TimeoutSeconds 150 -ServiceName "Frontend UI (Port 3000)" -Process $feProc -OutLogPath $feOutLog
+    if (-not $feReady -and ($feProc -and $feProc.HasExited)) {
+        Write-Step "RETRY" "Khoi dong lai Frontend (retry sau lan scan dependencies dau tien)..."
+        $feProc = Start-Process -FilePath "node" -ArgumentList $nodeArgs -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden -RedirectStandardOutput $feOutLog -RedirectStandardError $feErrLog
+        $fePid = $feProc.Id
+        $feReady = Wait-ForPort -Port 3000 -TimeoutSeconds 60 -ServiceName "Frontend UI (Port 3000)" -Process $feProc -OutLogPath $feOutLog
+    }
+    if (-not $feReady) {
+        Write-ErrorMsg "Frontend UI chua mo port 3000 sau thoi gian cho hoac da bi ngat."
+        Show-RecentLog -FilePath $feErrLog -LineCount 10
+        Show-RecentLog -FilePath $feOutLog -LineCount 10
+    } else {
+        Write-Success "Frontend UI da san sang tai http://localhost:3000"
+    }
 }
 
 # Luu thong tin PID de Stop
 $pidData = @{
     BackendPid  = $beProc.Id
-    FrontendPid = $feProc.Id
+    FrontendPid = if ($feProc) { $feProc.Id } else { $fePid }
     NgrokPid    = if ($ngrokProc) { $ngrokProc.Id } else { $null }
     StartedAt   = (Get-Date).ToString("o")
 } | ConvertTo-Json

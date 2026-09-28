@@ -23,6 +23,7 @@ from app.episodes import workspace_group_id
 from app.evidence import analyze_equation
 from app.evidence_store import Neo4jEvidenceStore
 from app.models import ExtractedEquation
+from app.research_lock import lock_research_workspace
 
 logger = logging.getLogger(__name__)
 PAGE_SIZE = 100
@@ -82,6 +83,7 @@ class AnalysisMigration:
 
     @staticmethod
     async def _batch(tx, group: str, receipt_id: str, limit: int) -> dict:
+        await lock_research_workspace(tx, group)
         now = datetime.now(UTC)
         state_result = await tx.run(
             "MERGE (m:AnalysisMigration {uuid:$uuid}) "
@@ -229,6 +231,7 @@ class AnalysisMigration:
 
     @staticmethod
     async def _rollback(tx, group: str, receipt_id: str) -> int:
+        await lock_research_workspace(tx, group)
         found = await tx.run(
             "MATCH (m:AnalysisMigration {uuid:$uuid, group_id:$group}) "
             "SET m.lock_version=coalesce(m.lock_version,0)+1 RETURN m.status AS status",

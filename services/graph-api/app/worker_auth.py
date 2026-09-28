@@ -52,8 +52,12 @@ def configured_credentials() -> list[WorkerCredential]:
         gateway = os.getenv("SERVICE_TOKEN", "")
         for entry in entries:
             token = entry.token.get_secret_value()
-            if (entry.identity in names or token in tokens
-                    or token == gateway or not token.isascii()):
+            if (
+                entry.identity in names
+                or token in tokens
+                or token == gateway
+                or not token.isascii()
+            ):
                 raise ValueError("identity/token collision")
             if any(not w.strip() or len(w) > 200 or w == "*" for w in entry.workspaces):
                 raise ValueError("invalid workspace grant")
@@ -64,7 +68,8 @@ def configured_credentials() -> list[WorkerCredential]:
         return entries
     except (ValidationError, ValueError) as exc:
         raise HTTPException(
-            status_code=503, detail="Worker authentication is not configured.",
+            status_code=503,
+            detail="Worker authentication is not configured.",
         ) from exc
 
 
@@ -84,6 +89,43 @@ async def require_worker(
     return WorkerPrincipal(matched.identity, matched.role, frozenset(matched.workspaces))
 
 
+def configured_worker_principal(role: WorkerRole, workspace_id: str) -> WorkerPrincipal:
+    """Resolve an internal service identity without exposing its credential to callers."""
+    for credential in configured_credentials():
+        if credential.role == role and workspace_id in credential.workspaces:
+            return WorkerPrincipal(
+                credential.identity,
+                credential.role,
+                frozenset(credential.workspaces),
+            )
+    raise HTTPException(status_code=503, detail="Required research worker is not configured.")
+
+
 async def require_research_checks_enabled() -> None:
     if os.getenv("FGL_ENABLE_RESEARCH_CHECKS", "false") != "true":
         raise HTTPException(status_code=503, detail="Research check execution is disabled.")
+
+
+async def require_research_compiler_enabled() -> None:
+    if os.getenv("FGL_ENABLE_RESEARCH_COMPILER", "false") != "true":
+        raise HTTPException(status_code=503, detail="Research candidate compilation is disabled.")
+
+
+async def require_candidate_checks_enabled() -> None:
+    if os.getenv("FGL_ENABLE_CANDIDATE_CHECKS", "false") != "true":
+        raise HTTPException(status_code=503, detail="Candidate verification is disabled.")
+
+
+async def require_numerical_fixture_enabled() -> None:
+    if os.getenv("FGL_ENABLE_NUMERICAL_FIXTURE", "false") != "true":
+        raise HTTPException(status_code=503, detail="Numerical fixture execution is disabled.")
+
+
+async def require_proposals_enabled() -> None:
+    if os.getenv("FGL_ENABLE_PROPOSALS", "false") != "true":
+        raise HTTPException(status_code=503, detail="Model proposal ingestion is disabled.")
+
+
+async def require_proposal_generation_enabled() -> None:
+    if os.getenv("FGL_ENABLE_PROPOSAL_GENERATION", "false") != "true":
+        raise HTTPException(status_code=503, detail="AI proposal generation is disabled.")

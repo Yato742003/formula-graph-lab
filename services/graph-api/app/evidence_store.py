@@ -19,12 +19,17 @@ from app.models import (
     EvidenceGraphSnapshotRequest,
     EvidenceGraphSnapshotResponse,
 )
+from app.research_lock import lock_research_workspace
 from app.search import (
     EvidenceCandidate,
     EvidenceSearchFilters,
     build_lucene_query,
 )
-from app.symbol_contracts import ContractReview, ReviewedContractValue
+from app.symbol_contracts import (
+    ContractReview,
+    contract_review_state_hash,
+    latest_contract_reviews,
+)
 from app.verification import CheckResult
 
 MAX_SNAPSHOT_NODES = 500
@@ -83,6 +88,11 @@ class Neo4jEvidenceStore:
         return cls(AsyncGraphDatabase.driver(uri, auth=(user, password)), database=database)
 
     async def initialize(self) -> None:
+        await self.driver.execute_query(
+            "CREATE CONSTRAINT fgl_research_workspace_lock IF NOT EXISTS "
+            "FOR (n:ResearchWorkspaceLock) REQUIRE n.group_id IS UNIQUE",
+            database_=self.database,
+        )
         for label in ("ResearchJob", "ResearchQueueLock"):
             await self.driver.execute_query(
                 f"CREATE CONSTRAINT fgl_{label.lower()}_id IF NOT EXISTS "
@@ -131,6 +141,25 @@ class Neo4jEvidenceStore:
         if not rows:
             raise ValueError("Check target must exist in this workspace.")
         return source_payload(rows[0]["payload"])
+
+    async def equation_contract_reviews(
+        self, *, workspace_id: str, equation_uuid: str,
+    ) -> list[ContractReview]:
+        rows, _, _ = await self.driver.execute_query(
+            "MATCH (equation:Evidence {uuid:$uuid, group_id:$group, kind:'Equation'}) "
+            "OPTIONAL MATCH (review:ContractReview {group_id:$group})-[:REVIEWS]->(equation) "
+            "RETURN collect(review.payload) AS payloads",
+            uuid=equation_uuid,
+            group=workspace_group_id(workspace_id),
+            database_=self.database,
+        )
+        if not rows:
+            raise ValueError("Check target must exist in this workspace.")
+        return latest_contract_reviews([
+            ContractReview.model_validate_json(payload)
+            for payload in rows[0]["payloads"]
+            if payload is not None
+        ])
 
     async def append_contract_review(
         self,
@@ -255,6 +284,8 @@ class Neo4jEvidenceStore:
         payload: str,
         created_at: datetime,
     ) -> tuple[bool, str]:
+        await lock_research_workspace(tx, group_id)
+        incoming = CheckResult.model_validate_json(payload)
         source = await tx.run(
             """
             MATCH (target:Evidence {uuid:$target_uuid, group_id:$group})
@@ -266,6 +297,28 @@ class Neo4jEvidenceStore:
         )
         if await source.single() is None:
             raise ValueError("Check target must exist in this workspace.")
+        if incoming.contract_review_hash is not None:
+            reviews_result = await tx.run(
+                "MATCH (equation:Evidence {uuid:$target_uuid, group_id:$group, kind:'Equation'}) "
+                "OPTIONAL MATCH (review:ContractReview {group_id:$group})-[:REVIEWS]->(equation) "
+                "RETURN collect(review.payload) AS payloads",
+                target_uuid=target_uuid,
+                group=group_id,
+            )
+            review_state = await reviews_result.single()
+            if review_state is None:
+                raise ValueError("Contract-review-bound checks require an equation target.")
+            current_reviews = latest_contract_reviews([
+                ContractReview.model_validate_json(review_payload)
+                for review_payload in review_state["payloads"]
+                if review_payload is not None
+            ])
+            current_review_ids = tuple(review.review_id for review in current_reviews)
+            if (
+                contract_review_state_hash(current_reviews) != incoming.contract_review_hash
+                or current_review_ids != incoming.contract_review_ids
+            ):
+                raise ValueError("Contract review state changed while the check was running.")
         now = datetime.now(UTC)
         creation_token = str(uuid4())
         query = await tx.run(
@@ -338,6 +391,7 @@ class Neo4jEvidenceStore:
         payload: str,
         reviewed_at: datetime,
     ) -> tuple[bool, str]:
+        await lock_research_workspace(tx, group_id)
         source = await tx.run(
             """
             MATCH (equation:Evidence {uuid:$equation_uuid, group_id:$group,
@@ -426,7 +480,8 @@ class Neo4jEvidenceStore:
             """
             MATCH (equation:Evidence {uuid:$equation_uuid, group_id:$group, kind:'Equation'})
             OPTIONAL MATCH (r:ContractReview {group_id:$group})-[:REVIEWS]->(equation)
-            WHERE r.decision = 'confirmed'
+            WITH equation, r
+            ORDER BY r.reviewed_at, r.uuid
             RETURN equation.payload AS eq_payload, collect(r.payload) AS review_payloads
             """,
             equation_uuid=equation_uuid,
@@ -436,51 +491,65 @@ class Neo4jEvidenceStore:
         if eq_record and eq_record["eq_payload"]:
             eq_raw = eq_record["eq_payload"]
             extracted_eq = ExtractedEquation.model_validate_json(eq_raw)
-            confirmed_contracts: dict[str, ReviewedContractValue] = {}
-            for rev_json in eq_record["review_payloads"]:
-                rev_obj = ContractReview.model_validate_json(rev_json)
-                if rev_obj.reviewed_contract is not None:
-                    confirmed_contracts[rev_obj.reviewed_contract.name] = rev_obj.reviewed_contract
-            if confirmed_contracts:
-                analysis, _, _ = analyze_equation(
-                    extracted_eq,
-                    reviewed_contracts=confirmed_contracts.values(),
-                )
-                version_record = make_analysis_version(
-                    equation_uuid,
-                    eq_raw,
-                    analysis,
-                )
-                await tx.run(
-                    """
-                    MATCH (equation:Evidence {
-                        uuid:$equation_uuid, group_id:$group, kind:'Equation'
-                    })
-                    MERGE (analysis:FormulaAnalysisVersion {uuid:$analysis_uuid})
-                    ON CREATE SET analysis.group_id=$group,
-                        analysis.equation_uuid=$equation_uuid,
-                        analysis.payload=$payload,
-                        analysis.schema_version=$schema_version,
-                        analysis.analyzer_version=$analyzer_version,
-                        analysis.canonicalizer_version=$canonicalizer_version,
-                        analysis.syntax_hash=$syntax_hash,
-                        analysis.source_hash=$source_hash,
-                        analysis.retired=false,
-                        analysis.created_at=$now
-                    MERGE (analysis)-[relation:ANALYZES {uuid:$analysis_uuid}]->(equation)
-                    ON CREATE SET relation.group_id=$group, relation.created_at=$now
-                    """,
-                    equation_uuid=equation_uuid,
-                    group=group_id,
-                    analysis_uuid=version_record["uuid"],
-                    payload=version_record["payload"],
-                    schema_version=version_record["schema_version"],
-                    analyzer_version=version_record["analyzer_version"],
-                    canonicalizer_version=version_record["canonicalizer_version"],
-                    syntax_hash=version_record["syntax_hash"],
-                    source_hash=version_record["source_hash"],
-                    now=now,
-                )
+            reviews = latest_contract_reviews([
+                ContractReview.model_validate_json(payload)
+                for payload in eq_record["review_payloads"]
+                if payload is not None
+            ])
+            active_contracts = [
+                review.reviewed_contract
+                for review in reviews
+                if review.decision == "accepted" and review.reviewed_contract is not None
+            ]
+            analysis, _, _ = analyze_equation(
+                extracted_eq,
+                reviewed_contracts=active_contracts,
+            )
+            # Bind each immutable analysis snapshot to the exact review state that
+            # informed it; this keeps a later rejection from exposing an older
+            # accepted analysis as current while the review records stay separate.
+            analysis["contract_review_state"] = {
+                "schema_version": "contract-review-state.v1",
+                "reviews": [
+                    {
+                        "review_id": review.review_id,
+                        "symbol_name": review.symbol_name,
+                        "decision": review.decision,
+                    }
+                    for review in reviews
+                ],
+            }
+            version_record = make_analysis_version(equation_uuid, eq_raw, analysis)
+            await tx.run(
+                """
+                MATCH (equation:Evidence {
+                    uuid:$equation_uuid, group_id:$group, kind:'Equation'
+                })
+                MERGE (analysis:FormulaAnalysisVersion {uuid:$analysis_uuid})
+                ON CREATE SET analysis.group_id=$group,
+                    analysis.equation_uuid=$equation_uuid,
+                    analysis.payload=$payload,
+                    analysis.schema_version=$schema_version,
+                    analysis.analyzer_version=$analyzer_version,
+                    analysis.canonicalizer_version=$canonicalizer_version,
+                    analysis.syntax_hash=$syntax_hash,
+                    analysis.source_hash=$source_hash,
+                    analysis.retired=false,
+                    analysis.created_at=$now
+                MERGE (analysis)-[relation:ANALYZES {uuid:$analysis_uuid}]->(equation)
+                ON CREATE SET relation.group_id=$group, relation.created_at=$now
+                """,
+                equation_uuid=equation_uuid,
+                group=group_id,
+                analysis_uuid=version_record["uuid"],
+                payload=version_record["payload"],
+                schema_version=version_record["schema_version"],
+                analyzer_version=version_record["analyzer_version"],
+                canonicalizer_version=version_record["canonicalizer_version"],
+                syntax_hash=version_record["syntax_hash"],
+                source_hash=version_record["source_hash"],
+                now=now,
+            )
         replayed = not created
         effective_payload = record["payload"] if replayed else payload
         return replayed, effective_payload
@@ -1014,6 +1083,7 @@ class Neo4jEvidenceStore:
 
     @staticmethod
     async def _write(tx, graph: EvidenceGraph) -> ImportReceipt:
+        await lock_research_workspace(tx, graph.group_id)
         now = datetime.now(UTC)
         locked = await tx.run(
             """

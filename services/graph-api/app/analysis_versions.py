@@ -7,7 +7,7 @@ import json
 from uuid import NAMESPACE_URL, uuid5
 
 SCHEMA_VERSION = "formula-analysis.v1"
-ANALYZER_VERSION = "formula-analyzer.v2"
+ANALYZER_VERSION = "formula-analyzer.v7"
 MIGRATION_VERSION = "analysis-separation.v1"
 
 

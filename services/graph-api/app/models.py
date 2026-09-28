@@ -278,9 +278,23 @@ class ReviewedFormulaContract(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     category: ConcreteSymbolCategory
     shape: list[int | str] | None = Field(default=None, max_length=16)
+    feature_rank: int | None = Field(default=None, gt=0, le=100_000, strict=True)
     domain: FormulaSymbolDomain = "real"
     constraints: list[str] = Field(default_factory=list, max_length=50)
     scope: str | None = Field(default=None, min_length=1, max_length=500)
+    normalization: Literal[
+        "none",
+        "l1",
+        "l2",
+        "softmax",
+        "layer_norm",
+        "rms_norm",
+        "batch_norm",
+        "unknown",
+    ] = "unknown"
+    mask: Literal["none", "causal", "padding", "sliding_window", "custom", "missing"] = "missing"
+    causal: bool | None = Field(default=None, strict=True)
+    resource_class: Literal["unknown", "not_applicable", "cpu", "gpu"] = "unknown"
 
     model_config = {"extra": "forbid"}
 
@@ -315,11 +329,14 @@ class ContractReviewCreateRequest(BaseModel):
     def require_accepted_contract(self):
         if self.decision == "accepted" and self.reviewed_contract is None:
             raise ValueError("An accepted review requires the reviewed contract.")
+        if self.reviewed_contract is not None and self.reviewed_contract.name != self.symbol_name:
+            raise ValueError("Reviewed contract must match the reviewed symbol.")
         if (
             self.reviewed_contract is not None
-            and self.reviewed_contract.name != self.symbol_name
+            and self.reviewed_contract.feature_rank is not None
+            and self.reviewed_contract.category != "vector"
         ):
-            raise ValueError("Reviewed contract must match the reviewed symbol.")
+            raise ValueError("Feature rank is only valid for a reviewed vector contract.")
         return self
 
 
@@ -344,28 +361,61 @@ class FormulaValidationIssue(BaseModel):
     symbols: list[str]
 
 
+class FormulaDomainPredicateWitnessResponse(BaseModel):
+    value: str
+    bindings: dict[str, str] | None = None
+
+
+class FormulaDomainPredicateEvaluationResponse(BaseModel):
+    evaluation_id: str
+    evaluator_version: Literal[
+        "domain-predicate-evaluator.v1", "domain-predicate-evaluator.v2"
+    ]
+    input_hash: str
+    outcome: Literal["true", "false", "unknown", "unsupported", "timeout", "error"]
+    scope: Literal[
+        "exact_constant", "sample_assignment", "unresolved_expression", "unsupported_expression",
+    ]
+    witness: FormulaDomainPredicateWitnessResponse | None
+
+
 class FormulaDomainObligationResponse(BaseModel):
     obligation_id: str
     predicate: Literal[
-        "nonzero", "zero", "positive", "negative", "non_negative", "non_positive",
+        "nonzero",
+        "zero",
+        "positive",
+        "negative",
+        "non_negative",
+        "non_positive",
+        "not_one",
     ]
     expression: dict[str, Any]
     expression_hash: str
     location: str
     origin: Literal["inferred"]
     status: Literal[
-        "discharged", "conditional", "unresolved", "contradictory", "unsupported",
+        "discharged",
+        "conditional",
+        "unresolved",
+        "contradictory",
+        "unsupported",
     ]
     discharged_by: list[str]
     conditions: list[str]
+    predicate_evaluation: FormulaDomainPredicateEvaluationResponse | None = None
 
 
 class FormulaDomainAssessmentResponse(BaseModel):
     status: Literal[
-        "discharged", "conditional", "unresolved", "contradictory", "unsupported",
+        "discharged",
+        "conditional",
+        "unresolved",
+        "contradictory",
+        "unsupported",
     ]
     obligations: list[FormulaDomainObligationResponse]
-    contradictions: list[tuple[str, str]]
+    contradictions: list[tuple[str, ...]]
 
 
 class FormulaParseResponse(BaseModel):
