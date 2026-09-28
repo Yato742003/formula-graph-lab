@@ -1,0 +1,3 @@
+ARG WORKER_IMAGE
+FROM ${WORKER_IMAGE}
+COPY tests/sandbox_probe.py /opt/worker/app/sandbox_probe.py

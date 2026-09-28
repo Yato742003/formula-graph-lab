@@ -1,0 +1,15 @@
+<html>
+  <head><title>Rethinking Attention with Performers</title></head>
+  <body>
+    <div id="watermark-tr">arXiv:2009.14794v4 [cs.LG] 19 Nov 2022</div>
+    <section id="S2">
+      <h2>2 FAVOR+ Mechanism and Positive Orthogonal Random Features</h2>
+      <p>Regular dot-product attention is attributed to <a href="https://arxiv.org/abs/1706.03762">Vaswani et al. (2017)</a>.</p>
+      <table class="ltx_equationgroup">
+        <tbody id="S2.E1"><tr class="ltx_equation"><td><math id="S2.E1.m1" display="block" alttext="\mathrm{Att}_{\leftrightarrow}(\mathbf{Q},\mathbf{K},\mathbf{V})=\mathbf{D}^{-1}\mathbf{A}\mathbf{V},\quad\mathbf{A}=\exp(\mathbf{Q}\mathbf{K}^{\top}/\sqrt{d}),\quad\mathbf{D}=\mathrm{diag}(\mathbf{A}\mathbf{1}_{L})."><annotation encoding="application/x-tex">\mathrm{Att}_{\leftrightarrow}(\mathbf{Q},\mathbf{K},\mathbf{V})=\mathbf{D}^{-1}\mathbf{A}\mathbf{V},\quad\mathbf{A}=\exp(\mathbf{Q}\mathbf{K}^{\top}/\sqrt{d}),\quad\mathbf{D}=\mathrm{diag}(\mathbf{A}\mathbf{1}_{L}).</annotation></math><span class="ltx_tag ltx_tag_equation">(1)</span></td></tr></tbody>
+        <tbody id="S2.E4"><tr class="ltx_equation"><td><math id="S2.E4.m1" display="block" alttext="\widehat{\mathrm{Att}_{\leftrightarrow}}(\mathbf{Q},\mathbf{K},\mathbf{V})=\widehat{\mathbf{D}}^{-1}(\mathbf{Q}^{\prime}((\mathbf{K}^{\prime})^{\top}\mathbf{V})),\quad\quad\widehat{\mathbf{D}}=\mathrm{diag}(\mathbf{Q}^{\prime}((\mathbf{K}^{\prime})^{\top}\mathbf{1}_{L}))."><annotation encoding="application/x-tex">\widehat{\mathrm{Att}_{\leftrightarrow}}(\mathbf{Q},\mathbf{K},\mathbf{V})=\widehat{\mathbf{D}}^{-1}(\mathbf{Q}^{\prime}((\mathbf{K}^{\prime})^{\top}\mathbf{V})),\quad\quad\widehat{\mathbf{D}}=\mathrm{diag}(\mathbf{Q}^{\prime}((\mathbf{K}^{\prime})^{\top}\mathbf{1}_{L})).</annotation></math><span class="ltx_tag ltx_tag_equation">(4)</span></td></tr></tbody>
+        <tbody id="S2.E7"><tr class="ltx_equation"><td><math id="S2.E7.m1" display="block" alttext="\mathrm{SM}(\mathbf{x},\mathbf{y})=\mathbb{E}_{\omega\sim\mathcal{N}(0,\mathbf{I}_{d})}\!\Big[\mathrm{exp}\!\Big(\omega^{\top}\mathbf{x}-\frac{\|\mathbf{x}\|^{2}}{2}\Big)\mathrm{exp}\!\Big(\omega^{\top}\mathbf{y}-\frac{\|\mathbf{y}\|^{2}}{2}\Big)\Big]=\Lambda\mathbb{E}_{\omega\sim\mathcal{N}(0,\mathbf{I}_{d})}\cosh(\omega^{\top}\mathbf{z}),"><annotation encoding="application/x-tex">\mathrm{SM}(\mathbf{x},\mathbf{y})=\mathbb{E}_{\omega\sim\mathcal{N}(0,\mathbf{I}_{d})}\!\Big[\mathrm{exp}\!\Big(\omega^{\top}\mathbf{x}-\frac{\|\mathbf{x}\|^{2}}{2}\Big)\mathrm{exp}\!\Big(\omega^{\top}\mathbf{y}-\frac{\|\mathbf{y}\|^{2}}{2}\Big)\Big]=\Lambda\mathbb{E}_{\omega\sim\mathcal{N}(0,\mathbf{I}_{d})}\cosh(\omega^{\top}\mathbf{z}),</annotation></math><span class="ltx_tag ltx_tag_equation">(7)</span></td></tr></tbody>
+      </table>
+    </section>
+  </body>
+</html>

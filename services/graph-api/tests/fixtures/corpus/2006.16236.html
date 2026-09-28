@@ -1,0 +1,20 @@
+<html>
+  <head><title>Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention</title></head>
+  <body>
+    <div id="watermark-tr">arXiv:2006.16236v3 [cs.LG] 31 Aug 2020</div>
+    <section id="S1">
+      <h2>1 Introduction</h2>
+      <p>Transformer models were originally introduced by <a href="https://arxiv.org/abs/1706.03762">Vaswani et al. (2017)</a>.</p>
+    </section>
+    <section id="S3">
+      <h2>3 Linear Transformers</h2>
+      <p>Given a kernel feature representation, attention can be rewritten and simplified using the associative property of matrix multiplication.</p>
+      <table class="ltx_equationgroup">
+        <tbody id="S3.E4"><tr class="ltx_equation"><td><math id="S3.E4.m1" display="block" alttext="\displaystyle V^{\prime}_{i}=\frac{\sum_{j=1}^{N}\phi\left(Q_{i}\right)^{T}\phi\left(K_{j}\right)V_{j}}{\sum_{j=1}^{N}\phi\left(Q_{i}\right)^{T}\phi\left(K_{j}\right)}."><annotation encoding="application/x-tex">\displaystyle V^{\prime}_{i}=\frac{\sum_{j=1}^{N}\phi\left(Q_{i}\right)^{T}\phi\left(K_{j}\right)V_{j}}{\sum_{j=1}^{N}\phi\left(Q_{i}\right)^{T}\phi\left(K_{j}\right)}.</annotation></math><span class="ltx_tag ltx_tag_equation">(4)</span></td></tr></tbody>
+        <tbody id="S3.E5"><tr class="ltx_equation"><td><math id="S3.E5.m1" display="block" alttext="\displaystyle V^{\prime}_{i}=\frac{\phi\left(Q_{i}\right)^{T}\sum_{j=1}^{N}\phi\left(K_{j}\right)V_{j}^{T}}{\phi\left(Q_{i}\right)^{T}\sum_{j=1}^{N}\phi\left(K_{j}\right)}."><annotation encoding="application/x-tex">\displaystyle V^{\prime}_{i}=\frac{\phi\left(Q_{i}\right)^{T}\sum_{j=1}^{N}\phi\left(K_{j}\right)V_{j}^{T}}{\phi\left(Q_{i}\right)^{T}\sum_{j=1}^{N}\phi\left(K_{j}\right)}.</annotation></math><span class="ltx_tag ltx_tag_equation">(5)</span></td></tr></tbody>
+        <tbody id="S3.E9"><tr class="ltx_equation"><td><math id="S3.E9.m1" display="block" alttext="V^{\prime}_{i}=\frac{\phi\left(Q_{i}\right)^{T}\sum_{j=1}^{i}\phi\left(K_{j}\right)V_{j}^{T}}{\phi\left(Q_{i}\right)^{T}\sum_{j=1}^{i}\phi\left(K_{j}\right)}."><annotation encoding="application/x-tex">V^{\prime}_{i}=\frac{\phi\left(Q_{i}\right)^{T}\sum_{j=1}^{i}\phi\left(K_{j}\right)V_{j}^{T}}{\phi\left(Q_{i}\right)^{T}\sum_{j=1}^{i}\phi\left(K_{j}\right)}.</annotation></math><span class="ltx_tag ltx_tag_equation">(9)</span></td></tr></tbody>
+        <tbody id="S3.E12"><tr class="ltx_equation"><td><math id="S3.E12.m1" display="block" alttext="V^{\prime}_{i}=\frac{\phi\left(Q_{i}\right)^{T}S_{i}}{\phi\left(Q_{i}\right)^{T}Z_{i}}."><annotation encoding="application/x-tex">V^{\prime}_{i}=\frac{\phi\left(Q_{i}\right)^{T}S_{i}}{\phi\left(Q_{i}\right)^{T}Z_{i}}.</annotation></math><span class="ltx_tag ltx_tag_equation">(12)</span></td></tr></tbody>
+      </table>
+    </section>
+  </body>
+</html>

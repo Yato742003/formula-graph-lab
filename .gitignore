@@ -41,28 +41,16 @@ next-env.d.ts
 /dist/
 /.wrangler/
 /outputs/
+/work/
 *.tsbuildinfo
 
-# agents & ai configs
-.agent/
-.agents/
-AGENTS.md
-.gemini/
-.claude/
-.cursor/
-.vscode/
-.idea/
-
-# openai
-.openai/
-
-# documentation
-/docs/
-
-# testing
-/tests/
-services/graph-api/tests/
-test-*.ps1
-docker-compose.test.yml
-vitest.config.ts
-verify-research.ps1
+# local agent and editor configuration
+/.agent/
+/.agents/
+/AGENTS.md
+/.openai/
+/.gemini/
+/.claude/
+/.cursor/
+/.vscode/
+/.idea/
