@@ -667,6 +667,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   const [isRightCollapsed, setIsRightCollapsed] = useState(false);
   const [isZenMode, setIsZenMode] = useState(false);
   const [isImportExpanded, setIsImportExpanded] = useState(false);
+  const researchMoveRef = useRef<HTMLDivElement | null>(null);
 
   const toggleZenMode = useCallback(() => {
     setIsZenMode((prev) => {
@@ -767,6 +768,26 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
     setIsImportExpanded(false);
     setIsLeftCollapsed(view === 'graph');
   }
+
+  function selectCompatibilityView() {
+    setActiveViewTab('compat');
+    setIsLeftCollapsed(false);
+    setIsImportExpanded(false);
+  }
+
+  const focusResearchMove = useCallback(() => {
+    setActiveViewTab('lineage');
+    setIsLeftCollapsed(false);
+    setIsImportExpanded(false);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        researchMoveRef.current?.scrollIntoView?.({
+          behavior: 'smooth',
+          block: 'nearest',
+        });
+      });
+    });
+  }, []);
 
   const [copiedLatex, setCopiedLatex] = useState(false);
 
@@ -1854,10 +1875,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                       ? 'bg-background text-foreground shadow-xs font-semibold'
                       : 'text-muted-foreground hover:text-foreground hover:bg-background/40'
                   }`}
-                  onClick={() => {
-                    setActiveViewTab('compat');
-                    setIsLeftCollapsed(false);
-                  }}
+                  onClick={selectCompatibilityView}
                 >
                   <ShieldCheck size={13} className={activeViewTab === 'compat' ? 'text-primary' : 'text-muted-foreground'} />
                   <span>Compatibility (G3)</span>
@@ -1903,6 +1921,76 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
             </div>
           </div>
 
+          <nav className="workspace-flow" aria-label="Research workflow">
+            <div className="workspace-flow-label">
+              <span className="eyebrow">Workflow</span>
+              <span className="workspace-flow-state">
+                {activeViewTab === 'spec'
+                  ? 'Step 1 of 3 · draft scope'
+                  : activeViewTab === 'compat'
+                    ? 'Step 3 of 3 · verify ports'
+                    : 'Step 2 of 3 · trace evidence'}
+              </span>
+            </div>
+            <ol className="workspace-flow-steps">
+              <li>
+                <button
+                  type="button"
+                  className={`workspace-flow-step ${activeViewTab === 'spec' ? 'is-active' : ''}`}
+                  aria-current={activeViewTab === 'spec' ? 'step' : undefined}
+                  onClick={() => selectPrimaryView('research')}
+                >
+                  <span className="workspace-flow-step-index">01</span>
+                  <span className="workspace-flow-step-copy">
+                    <strong>Define scope</strong>
+                    <small>G1 · freeze inputs</small>
+                  </span>
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  className={`workspace-flow-step ${activeViewTab === 'lineage' ? 'is-active' : ''}`}
+                  aria-current={activeViewTab === 'lineage' ? 'step' : undefined}
+                  onClick={() => selectPrimaryView('papers')}
+                >
+                  <span className="workspace-flow-step-index">02</span>
+                  <span className="workspace-flow-step-copy">
+                    <strong>Trace evidence</strong>
+                    <small>G2 · source-bound graph</small>
+                  </span>
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  className={`workspace-flow-step ${activeViewTab === 'compat' ? 'is-active' : ''}`}
+                  aria-current={activeViewTab === 'compat' ? 'step' : undefined}
+                  onClick={selectCompatibilityView}
+                >
+                  <span className="workspace-flow-step-index">03</span>
+                  <span className="workspace-flow-step-copy">
+                    <strong>Verify ports</strong>
+                    <small>G3 · reviewed bindings</small>
+                  </span>
+                </button>
+              </li>
+            </ol>
+            <button
+              type="button"
+              className="workspace-flow-action"
+              aria-label="Open research move"
+              onClick={focusResearchMove}
+            >
+              <Braces size={14} aria-hidden="true" />
+              <span className="workspace-flow-step-copy">
+                <strong>Research move</strong>
+                <small>Hypothesis only</small>
+              </span>
+              <ArrowRight size={14} aria-hidden="true" />
+            </button>
+          </nav>
+
           <div
             hidden={activeViewTab !== 'spec'}
             className="flex-1 overflow-y-auto"
@@ -1940,7 +2028,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                 </output>
               </div>
 
-              <div className="hypothesis-dock shrink-0">
+              <div className="hypothesis-dock shrink-0" ref={researchMoveRef}>
                 <div className="hypothesis-icon">
                   <Braces size={18} />
                 </div>

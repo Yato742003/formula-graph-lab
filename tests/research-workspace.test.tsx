@@ -632,6 +632,51 @@ describe('provenance inspector', () => {
     expect(container.querySelector('[aria-label="Import a paper"]')).toBeTruthy();
   });
 
+  it('keeps the research workflow stage and hypothesis boundary visible', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) =>
+      requestUrl(input) === '/api/graph'
+        ? jsonResponse(emptyGraph)
+        : jsonResponse({ items: [], total: 0, indexed_papers: [] }),
+    ));
+    const user = userEvent.setup();
+    render(
+      <ResearchWorkspace
+        user={{ displayName: 'Researcher', email: 'researcher@example.com' }}
+      />,
+    );
+
+    const workflow = screen.getByRole('navigation', {
+      name: 'Research workflow',
+    });
+    expect(within(workflow).getByText('Step 1 of 3 · draft scope')).toBeTruthy();
+    expect(
+      within(workflow)
+        .getByRole('button', { name: /Define scope/i })
+        .getAttribute('aria-current'),
+    ).toBe('step');
+    expect(within(workflow).getByText('Hypothesis only')).toBeTruthy();
+
+    await user.click(within(workflow).getByRole('button', { name: /Trace evidence/i }));
+    expect(within(workflow).getByText('Step 2 of 3 · trace evidence')).toBeTruthy();
+    expect(
+      screen.getByRole('tab', { name: /Lineage Graph/i }).getAttribute('aria-selected'),
+    ).toBe('true');
+
+    await user.click(within(workflow).getByRole('button', { name: /Verify ports/i }));
+    expect(within(workflow).getByText('Step 3 of 3 · verify ports')).toBeTruthy();
+    expect(
+      screen
+        .getByRole('tab', { name: /Compatibility \(G3\)/i })
+        .getAttribute('aria-selected'),
+    ).toBe('true');
+
+    await user.click(within(workflow).getByRole('button', { name: 'Open research move' }));
+    expect(within(workflow).getByText('Step 2 of 3 · trace evidence')).toBeTruthy();
+    expect(
+      screen.getByRole('tab', { name: /Lineage Graph/i }).getAttribute('aria-selected'),
+    ).toBe('true');
+  });
+
   it('preserves compatibility when the server returns an invalid review receipt', async () => {
     let reviewBody: Record<string, unknown> | undefined;
     const reviewKeys: Array<string | null> = [];
