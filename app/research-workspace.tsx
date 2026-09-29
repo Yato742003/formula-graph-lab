@@ -751,7 +751,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
     'lineage' | 'spec' | 'compat'
   >('spec');
 
-  function selectPrimaryView(view: 'papers' | 'graph' | 'research') {
+  function selectPrimaryView(view: 'papers' | 'research') {
     if (view === 'research') {
       setActiveViewTab('spec');
       setIsImportExpanded(false);
@@ -760,7 +760,6 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
 
     setActiveViewTab('lineage');
     setIsImportExpanded(false);
-    setIsLeftCollapsed(view === 'graph');
   }
 
   function selectCompatibilityView() {
