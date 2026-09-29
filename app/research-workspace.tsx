@@ -750,12 +750,6 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   const [activeViewTab, setActiveViewTab] = useState<
     'lineage' | 'spec' | 'compat'
   >('spec');
-  const activePrimaryView =
-    activeViewTab !== 'lineage'
-      ? 'research'
-      : isLeftCollapsed
-        ? 'graph'
-        : 'papers';
 
   function selectPrimaryView(view: 'papers' | 'graph' | 'research') {
     if (view === 'research') {
@@ -1400,33 +1394,6 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
           </div>
         </div>
 
-        <nav className="top-nav" aria-label="Primary navigation">
-          <button
-            type="button"
-            className={`nav-item ${activePrimaryView === 'papers' ? 'nav-item-active' : ''}`}
-            aria-current={activePrimaryView === 'papers' ? 'page' : undefined}
-            onClick={() => selectPrimaryView('papers')}
-          >
-            Papers
-          </button>
-          <button
-            type="button"
-            className={`nav-item ${activePrimaryView === 'graph' ? 'nav-item-active' : ''}`}
-            aria-current={activePrimaryView === 'graph' ? 'page' : undefined}
-            onClick={() => selectPrimaryView('graph')}
-          >
-            Graph
-          </button>
-          <button
-            type="button"
-            className={`nav-item ${activePrimaryView === 'research' ? 'nav-item-active' : ''}`}
-            aria-current={activePrimaryView === 'research' ? 'page' : undefined}
-            onClick={() => selectPrimaryView('research')}
-          >
-            Research
-          </button>
-        </nav>
-
         <div className="top-actions">
           <button
             type="button"
@@ -1922,60 +1889,23 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
           </div>
 
           <nav className="workspace-flow" aria-label="Research workflow">
-            <div className="workspace-flow-label">
-              <span className="eyebrow">Workflow</span>
-              <span className="workspace-flow-state">
+            <div className="workspace-flow-status" aria-live="polite">
+              <span className="eyebrow">Current stage</span>
+              <strong>
                 {activeViewTab === 'spec'
-                  ? 'Step 1 of 3 · draft scope'
+                  ? '01 · Scope'
                   : activeViewTab === 'compat'
-                    ? 'Step 3 of 3 · verify ports'
-                    : 'Step 2 of 3 · trace evidence'}
-              </span>
+                    ? '03 · Verify'
+                    : '02 · Trace'}
+              </strong>
+              <small>
+                {activeViewTab === 'spec'
+                  ? 'G1'
+                  : activeViewTab === 'compat'
+                    ? 'G3'
+                    : 'G2'}
+              </small>
             </div>
-            <ol className="workspace-flow-steps">
-              <li>
-                <button
-                  type="button"
-                  className={`workspace-flow-step ${activeViewTab === 'spec' ? 'is-active' : ''}`}
-                  aria-current={activeViewTab === 'spec' ? 'step' : undefined}
-                  onClick={() => selectPrimaryView('research')}
-                >
-                  <span className="workspace-flow-step-index">01</span>
-                  <span className="workspace-flow-step-copy">
-                    <strong>Define scope</strong>
-                    <small>G1 · freeze inputs</small>
-                  </span>
-                </button>
-              </li>
-              <li>
-                <button
-                  type="button"
-                  className={`workspace-flow-step ${activeViewTab === 'lineage' ? 'is-active' : ''}`}
-                  aria-current={activeViewTab === 'lineage' ? 'step' : undefined}
-                  onClick={() => selectPrimaryView('papers')}
-                >
-                  <span className="workspace-flow-step-index">02</span>
-                  <span className="workspace-flow-step-copy">
-                    <strong>Trace evidence</strong>
-                    <small>G2 · source-bound graph</small>
-                  </span>
-                </button>
-              </li>
-              <li>
-                <button
-                  type="button"
-                  className={`workspace-flow-step ${activeViewTab === 'compat' ? 'is-active' : ''}`}
-                  aria-current={activeViewTab === 'compat' ? 'step' : undefined}
-                  onClick={selectCompatibilityView}
-                >
-                  <span className="workspace-flow-step-index">03</span>
-                  <span className="workspace-flow-step-copy">
-                    <strong>Verify ports</strong>
-                    <small>G3 · reviewed bindings</small>
-                  </span>
-                </button>
-              </li>
-            </ol>
             <button
               type="button"
               className="workspace-flow-action"
@@ -1983,8 +1913,8 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               onClick={focusResearchMove}
             >
               <Braces size={14} aria-hidden="true" />
-              <span className="workspace-flow-step-copy">
-                <strong>Research move</strong>
+              <span className="workspace-flow-action-copy">
+                <strong>Open move</strong>
                 <small>Hypothesis only</small>
               </span>
               <ArrowRight size={14} aria-hidden="true" />

@@ -247,7 +247,7 @@ afterEach(() => {
 });
 
 describe('ResearchWorkspace import interaction', () => {
-  it('routes the primary navigation to existing paper, graph, and research views', async () => {
+  it('uses one workspace navigation surface without duplicate view controls', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(emptyGraph)));
     const user = userEvent.setup();
     const { container } = render(
@@ -255,28 +255,21 @@ describe('ResearchWorkspace import interaction', () => {
         user={{ displayName: 'Researcher', email: 'researcher@example.com' }}
       />,
     );
-    const navigation = screen.getByRole('navigation', {
-      name: 'Primary navigation',
-    });
-    const papers = within(navigation).getByRole('button', { name: 'Papers' });
-    const graph = within(navigation).getByRole('button', { name: 'Graph' });
-    const research = within(navigation).getByRole('button', {
-      name: 'Research',
+    expect(
+      screen.queryByRole('navigation', { name: 'Primary navigation' }),
+    ).toBeNull();
+    const workflow = screen.getByRole('navigation', {
+      name: 'Research workflow',
     });
     const workspace = container.querySelector('.research-grid');
 
-    expect(research.getAttribute('aria-current')).toBe('page');
-    await user.click(papers);
-    expect(papers.getAttribute('aria-current')).toBe('page');
+    expect(within(workflow).getByText('01 · Scope')).toBeTruthy();
+    expect(within(workflow).getByText('G1')).toBeTruthy();
+    await user.click(screen.getByRole('tab', { name: /Lineage Graph/i }));
     expect(screen.getByRole('tab', { name: /Lineage Graph/i }).getAttribute('aria-selected')).toBe('true');
-    expect(workspace?.classList.contains('is-left-collapsed')).toBe(false);
+    expect(workspace?.classList.contains('is-spec-view')).toBe(false);
 
-    await user.click(graph);
-    expect(graph.getAttribute('aria-current')).toBe('page');
-    expect(workspace?.classList.contains('is-left-collapsed')).toBe(true);
-
-    await user.click(research);
-    expect(research.getAttribute('aria-current')).toBe('page');
+    await user.click(screen.getByRole('tab', { name: /Problem Spec \(G1\)/i }));
     expect(screen.getByRole('heading', { name: 'Start with your research question' })).toBeTruthy();
     expect(workspace?.classList.contains('is-spec-view')).toBe(true);
   });
@@ -632,7 +625,7 @@ describe('provenance inspector', () => {
     expect(container.querySelector('[aria-label="Import a paper"]')).toBeTruthy();
   });
 
-  it('keeps the research workflow stage and hypothesis boundary visible', async () => {
+  it('keeps a compact stage status and hypothesis boundary visible', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) =>
       requestUrl(input) === '/api/graph'
         ? jsonResponse(emptyGraph)
@@ -648,30 +641,17 @@ describe('provenance inspector', () => {
     const workflow = screen.getByRole('navigation', {
       name: 'Research workflow',
     });
-    expect(within(workflow).getByText('Step 1 of 3 · draft scope')).toBeTruthy();
-    expect(
-      within(workflow)
-        .getByRole('button', { name: /Define scope/i })
-        .getAttribute('aria-current'),
-    ).toBe('step');
+    expect(within(workflow).getByText('01 · Scope')).toBeTruthy();
+    expect(within(workflow).getByText('G1')).toBeTruthy();
     expect(within(workflow).getByText('Hypothesis only')).toBeTruthy();
 
-    await user.click(within(workflow).getByRole('button', { name: /Trace evidence/i }));
-    expect(within(workflow).getByText('Step 2 of 3 · trace evidence')).toBeTruthy();
-    expect(
-      screen.getByRole('tab', { name: /Lineage Graph/i }).getAttribute('aria-selected'),
-    ).toBe('true');
-
-    await user.click(within(workflow).getByRole('button', { name: /Verify ports/i }));
-    expect(within(workflow).getByText('Step 3 of 3 · verify ports')).toBeTruthy();
-    expect(
-      screen
-        .getByRole('tab', { name: /Compatibility \(G3\)/i })
-        .getAttribute('aria-selected'),
-    ).toBe('true');
+    await user.click(screen.getByRole('tab', { name: /Compatibility \(G3\)/i }));
+    expect(within(workflow).getByText('03 · Verify')).toBeTruthy();
+    expect(within(workflow).getByText('G3')).toBeTruthy();
 
     await user.click(within(workflow).getByRole('button', { name: 'Open research move' }));
-    expect(within(workflow).getByText('Step 2 of 3 · trace evidence')).toBeTruthy();
+    expect(within(workflow).getByText('02 · Trace')).toBeTruthy();
+    expect(within(workflow).getByText('G2')).toBeTruthy();
     expect(
       screen.getByRole('tab', { name: /Lineage Graph/i }).getAttribute('aria-selected'),
     ).toBe('true');

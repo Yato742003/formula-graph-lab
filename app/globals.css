@@ -128,7 +128,7 @@ button {
   position: relative;
   z-index: 20;
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 1fr);
+  grid-template-columns: minmax(180px, 1fr) auto;
   align-items: center;
   height: 48px;
   padding: 0 16px;
@@ -169,38 +169,6 @@ button {
   font-family: var(--font-geist-mono);
   font-size: 9.5px;
   letter-spacing: 0.1em;
-}
-
-.top-nav {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--muted);
-}
-
-.nav-item {
-  min-height: 28px;
-  padding: 0 12px;
-  border: 0;
-  border-radius: 6px;
-  color: var(--muted-foreground);
-  background: transparent;
-  font-size: 13px;
-  font-weight: 500;
-  transition: all 140ms ease;
-}
-
-.nav-item:hover {
-  color: var(--foreground);
-}
-
-.nav-item-active {
-  color: var(--foreground);
-  background: var(--card);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 .top-actions {
@@ -917,6 +885,7 @@ button {
 .workspace-flow {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
   min-width: 0;
   margin-bottom: 8px;
@@ -928,120 +897,75 @@ button {
   flex-shrink: 0;
 }
 
-.workspace-flow-label {
-  display: grid;
-  min-width: 124px;
-  gap: 1px;
+.workspace-flow-status {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
   padding-inline: 3px;
 }
 
-.workspace-flow-label .eyebrow {
-  margin-bottom: 0;
+.workspace-flow-status .eyebrow {
+  margin: 0;
   font-size: 8.5px;
 }
 
-.workspace-flow-state {
-  color: var(--muted-foreground);
-  font-size: 10px;
+.workspace-flow-status strong {
+  color: var(--foreground);
+  font-family: var(--font-geist-mono);
+  font-size: 11px;
+  font-weight: 700;
   white-space: nowrap;
 }
 
-.workspace-flow-steps {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 4px;
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  flex: 1 1 auto;
+.workspace-flow-status small {
+  color: var(--muted-foreground);
+  font-family: var(--font-geist-mono);
+  font-size: 9px;
 }
 
-.workspace-flow-step,
 .workspace-flow-action {
   display: flex;
-  min-width: 0;
-  min-height: 38px;
+  min-height: 32px;
+  min-width: 154px;
   align-items: center;
+  justify-content: space-between;
   gap: 7px;
   padding: 5px 8px;
-  border: 1px solid transparent;
+  border: 1px solid #e8d8c6;
   border-radius: 7px;
-  color: var(--muted-foreground);
-  background: transparent;
   text-align: left;
   font: inherit;
+  color: #8a5a2b;
+  background: #fffaf4;
   transition:
     border-color 150ms ease,
     background-color 150ms ease,
     color 150ms ease;
 }
 
-.workspace-flow-step:hover,
-.workspace-flow-step:focus-visible {
-  border-color: color-mix(in oklab, var(--primary) 32%, var(--border));
-  background: color-mix(in oklab, var(--primary) 5%, var(--card));
-  color: var(--foreground);
-}
-
-.workspace-flow-step.is-active {
-  border-color: color-mix(in oklab, var(--primary) 28%, var(--border));
-  background: color-mix(in oklab, var(--primary) 9%, var(--card));
-  color: var(--foreground);
-  box-shadow: inset 3px 0 0 var(--primary);
-}
-
-.workspace-flow-step-index {
-  display: grid;
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
-  place-items: center;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--muted-foreground);
-  background: var(--background);
-  font-family: var(--font-geist-mono);
-  font-size: 9px;
-  font-weight: 700;
-}
-
-.workspace-flow-step.is-active .workspace-flow-step-index {
-  border-color: color-mix(in oklab, var(--primary) 42%, var(--border));
-  color: var(--primary);
-  background: color-mix(in oklab, var(--primary) 10%, var(--background));
-}
-
-.workspace-flow-step-copy {
+.workspace-flow-action-copy {
   display: grid;
   min-width: 0;
   gap: 1px;
 }
 
-.workspace-flow-step-copy strong,
-.workspace-flow-step-copy small {
+.workspace-flow-action-copy strong,
+.workspace-flow-action-copy small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.workspace-flow-step-copy strong {
+.workspace-flow-action-copy strong {
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.workspace-flow-action-copy small {
   color: inherit;
-  font-size: 11px;
-  font-weight: 650;
-}
-
-.workspace-flow-step-copy small {
-  color: var(--muted-foreground);
-  font-size: 9px;
-}
-
-.workspace-flow-action {
-  min-width: 154px;
-  justify-content: space-between;
-  border-color: #e8d8c6;
-  color: #8a5a2b;
-  background: #fffaf4;
+  font-size: 8.5px;
+  opacity: 0.82;
 }
 
 .workspace-flow-action:hover,
@@ -4317,10 +4241,8 @@ button {
 
   .topbar {
     grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas:
-      'brand actions'
-      'nav nav';
-    grid-template-rows: 36px 34px;
+    grid-template-areas: 'brand actions';
+    grid-template-rows: 36px;
     gap: 2px 8px;
     height: auto;
     min-height: 0;
@@ -4333,20 +4255,6 @@ button {
 
   .top-actions {
     grid-area: actions;
-  }
-
-  .top-nav {
-    display: flex;
-    grid-area: nav;
-    width: 100%;
-  }
-
-  .nav-item {
-    flex: 1;
-    min-width: 0;
-    min-height: 30px;
-    padding-inline: 8px;
-    font-size: 12px;
   }
 
   .workspace-pill {
@@ -4420,27 +4328,16 @@ button {
   }
 
   .workspace-flow {
-    align-items: stretch;
-    flex-direction: column;
-    gap: 7px;
+    flex-wrap: wrap;
+    gap: 6px;
   }
 
-  .workspace-flow-label {
-    min-width: 0;
-  }
-
-  .workspace-flow-steps {
-    width: 100%;
-    overflow-x: auto;
-    padding-bottom: 2px;
-  }
-
-  .workspace-flow-step {
-    min-width: 150px;
+  .workspace-flow-status {
+    flex: 1 1 auto;
   }
 
   .workspace-flow-action {
-    width: 100%;
+    flex: 0 1 auto;
   }
 
   .legend {
