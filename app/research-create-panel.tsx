@@ -46,7 +46,7 @@ export default function ResearchCreatePanel({ onCreated }: { onCreated: () => vo
   const [rationale, setRationale] = useState('');
   const [contract, setContract] = useState({ decision: 'accepted', category: '', domain: '',
     shape: 'null', normalization: 'unknown', mask: 'missing', causal: 'unknown',
-    resourceClass: 'unknown', featureRank: '' });
+    resourceClass: 'unknown', featureRank: '', outputDomain: '' });
   const [metadata, setMetadata] = useState<Record<string, string>>(
     Object.fromEntries(Object.keys(metadataLabels).map(key => [key, ''])),
   );
@@ -125,8 +125,12 @@ export default function ResearchCreatePanel({ onCreated }: { onCreated: () => vo
         const featureRank = contract.featureRank ? Number(contract.featureRank) : null;
         if (featureRank !== null && (!Number.isInteger(featureRank) || featureRank < 1 || featureRank > 100000))
           throw new Error('Feature rank must be an integer from 1 to 100000.');
-        if (featureRank !== null && contract.category !== 'vector')
-          throw new Error('Feature rank is only valid for a reviewed vector contract.');
+        if (featureRank !== null && !['vector', 'function'].includes(contract.category))
+          throw new Error('Feature rank is only valid for a reviewed vector or function.');
+        if (featureRank !== null && contract.category === 'function' &&
+            (contract.domain !== 'real' || contract.outputDomain !== 'strictly_positive_real' ||
+              !Array.isArray(shape) || shape.length !== 1 || typeof shape[0] !== 'number'))
+          throw new Error('A feature-map function needs real input width and an explicit positive output domain.');
         if (contract.decision === 'accepted' && (!contract.category || !contract.domain))
           throw new Error('Choose the reviewed category and domain.');
         payload = {
@@ -135,6 +139,7 @@ export default function ResearchCreatePanel({ onCreated }: { onCreated: () => vo
           reviewed_contract: contract.decision === 'accepted' ? {
             name: ends.producer, category: contract.category, domain: contract.domain,
             shape, feature_rank: featureRank, constraints: [], normalization: contract.normalization, mask: contract.mask,
+            ...(contract.category === 'function' && featureRank !== null ? { feature_output_domain: contract.outputDomain } : {}),
             causal: contract.causal === 'unknown' ? null : contract.causal === 'yes',
             resource_class: contract.resourceClass,
           } : null,
@@ -185,7 +190,8 @@ export default function ResearchCreatePanel({ onCreated }: { onCreated: () => vo
   return (
     <details className="border border-border/70 rounded-xl bg-card/60 backdrop-blur-xs p-3 text-xs shadow-2xs">
       <summary className="cursor-pointer font-medium text-foreground hover:text-primary transition-colors select-none">
-        Create source-backed research records
+        <span className="sr-only">Create source-backed research records</span>
+        <span aria-hidden="true">Add evidence</span>
       </summary>
       <output className="block text-[11px] text-muted-foreground mt-1" aria-live="polite">
         {sourceNotice}
@@ -402,8 +408,19 @@ export default function ResearchCreatePanel({ onCreated }: { onCreated: () => vo
                         />
                       </label>
                       <p className="text-[11px] text-muted-foreground">
-                        Optional; only enter this when the reviewed vector is a feature map. It is not inferred from shape.
+                        Optional feature map only; rank is not inferred. For functions, shape and domain describe the input.
                       </p>
+                      {contract.category === 'function' ? (
+                        <label className="block text-xs font-medium text-foreground">
+                          Feature-map output domain
+                          <select value={contract.outputDomain} required={!!contract.featureRank}
+                            onChange={event => setContract(current => ({ ...current, outputDomain: event.target.value }))}
+                            className="block w-full border border-border/60 rounded-md p-1.5 mt-1 bg-background text-foreground text-xs">
+                            <option value="">Unknown · not reviewed</option>
+                            <option value="strictly_positive_real">Strictly positive real</option>
+                          </select>
+                        </label>
+                      ) : null}
                       <label htmlFor="contract-normalization" className="block text-xs font-medium text-foreground">
                         Normalization
                         <select

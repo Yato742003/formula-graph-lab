@@ -23,6 +23,25 @@ afterEach(() => {
 });
 const context = (slug: string[]) => ({ params: Promise.resolve({ slug }) });
 
+it('allows bounded evolution commands but never browser metrics or holdout overrides', async () => {
+  mocks.user.mockResolvedValue({ userId: 'user-1' });
+  mocks.owned.mockResolvedValue(true);
+  const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ campaign: {}, replayed: false }));
+  vi.stubGlobal('fetch', fetcher);
+  const eid = `evo_${'a'.repeat(32)}`;
+  const write = (action: string, body: unknown) => POST(new Request(`https://app.test/api/research/evolution/${eid}/${action}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-idempotency-key': 'bounded-step' },
+    body: JSON.stringify(body),
+  }), context(['evolution', eid, action]));
+  expect((await write('generation', { metrics: [], fitness: 1 })).status).toBe(400);
+  expect((await write('confirm', { evaluation_role: 'search', seed: 1 })).status).toBe(400);
+  expect(fetcher).not.toHaveBeenCalled();
+  expect((await write('generation', { seed_candidate_id: `cand_${'b'.repeat(32)}` })).status).toBe(200);
+  expect((await write('confirm', {})).status).toBe(200);
+  const headers = new Headers(fetcher.mock.calls[0]?.[1]?.headers);
+  expect(headers.get('x-fgl-actor-role')).toBe('researcher');
+});
+
 it('rejects unauthenticated access before upstream fetch', async () => {
   mocks.user.mockResolvedValue(null);
   const fetcher = vi.fn();

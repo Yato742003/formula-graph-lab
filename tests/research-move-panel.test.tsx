@@ -19,6 +19,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   sessionStorage.clear();
+  window.history.replaceState({}, '', '/');
 });
 
 const problemList = {
@@ -201,6 +202,17 @@ function researchCase(candidateId: string, specId: string, outcome = 'supported_
     },
     replayed: false,
   };
+}
+
+function scopedResearchCase(candidateId: string, specId: string) {
+  const receipt = researchCase(candidateId, specId);
+  return { ...receipt, result: { ...receipt.result,
+    schema_version: 'research-case-result.v2', evaluation_role: 'search', evolution_id: null,
+    holdout_mean: null, holdout_ci95_low: null, holdout_ci95_high: null,
+    trials: [42, 43, 44].map((seed, index) => ({ seed,
+      split: index === 2 ? 'validation' : 'search', outcome: 'passed_suite' })),
+    search_cost: { ...receipt.result.search_cost, trial_count: 3, completed_trial_count: 3 },
+  } };
 }
 
 function requestPath(input: RequestInfo | URL): string {
@@ -486,6 +498,34 @@ it('compiles a hypothesis from a frozen spec and reviewed mapping without callin
   expect(
     screen.getByRole('button', { name: /Policy denied · no run/i }),
   ).toBeTruthy();
+});
+
+it('shows the dedicated proposal builder directly and links missing prerequisites', async () => {
+  mockApi(vi.fn(async () => Response.json({ items: [], total: 0 })));
+  render(<ResearchMovePanel mappings={[]} mappingsState="loaded" mappingsPartial={false} surface="proposals" />);
+
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(screen.getByRole('heading', { name: 'Candidate builder' })).toBeTruthy();
+  expect((await screen.findByRole('link', { name: 'Open Spec' })).getAttribute('href')).toBe('/spec');
+  expect(screen.getByRole('button', { name: 'Compile hypothesis' })).toHaveProperty('disabled', true);
+  expect(screen.queryByRole('button', { name: /Open proposal builder/ })).toBeNull();
+});
+
+it('loads a linked saved candidate directly in Reports without starting a check or run', async () => {
+  const saved = candidate('1', '1', 'mix_positive_feature_maps', 'hypothesis_changing', ['eq-a'], []);
+  window.history.replaceState({}, '', `/reports?candidate_id=${saved.candidate.candidate_id}`);
+  const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json(problemList));
+  mockApi(fetcher, { total: 1, items: [{
+    ...saved,
+    candidate: { ...saved.candidate, problem_spec_id: 'spec_0123456789abcdef', mapping_id: mapping.mappingId },
+    check: null,
+    admission: null,
+  }] });
+  render(<ResearchMovePanel mappings={[mapping]} mappingsState="loaded" mappingsPartial={false} surface="reports" />);
+
+  expect(await screen.findByRole('region', { name: 'Compiled candidate receipt' })).toBeTruthy();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(fetcher.mock.calls.every((call) => !call[1] || call[1]?.method !== 'POST')).toBe(true);
 });
 
 it('opens the composer as a dialog and closes it on Escape', async () => {
@@ -839,7 +879,7 @@ it('does not show an empty proposal count when history is unavailable', async ()
   expect(await screen.findByText(/Existing candidates and checks are unchanged/i)).toBeTruthy();
 });
 
-it('runs the registered CPU research case as bounded protocol evidence', async () => {
+it('runs search without holdout and requires explicit human scope review', async () => {
   const requests: { path: string; body: string; key: string | null }[] = [];
   const fetcher = vi.fn(
     async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -851,9 +891,13 @@ it('runs the registered CPU research case as bounded protocol evidence', async (
         return Response.json(candidateCheck(candidateId));
       }
       if (path.endsWith('/admission')) return Response.json(admission());
+      if (path.endsWith('/research-case/reviews')) {
+        return Response.json({ candidate_id: 'cand_' + '0'.repeat(31) + '1',
+          result_id: 'exp_' + 'f'.repeat(32), decision: requestBody(init).decision });
+      }
       if (path.endsWith('/research-case'))
         return Response.json(
-          researchCase(
+          scopedResearchCase(
             'cand_' + '0'.repeat(31) + '1',
             'spec_0123456789abcdef',
           ),
@@ -891,7 +935,7 @@ it('runs the registered CPU research case as bounded protocol evidence', async (
     await screen.findByRole('button', { name: 'Compile hypothesis' }),
   );
   const run = screen.getByRole('button', {
-    name: 'Run frozen CPU research case',
+    name: 'Run frozen CPU search',
   });
   await user.click(run);
 
@@ -915,6 +959,43 @@ it('runs the registered CPU research case as bounded protocol evidence', async (
   expect(JSON.parse(requests[0].body).transform.operator).toBe(
     'mix_positive_feature_maps',
   );
+  expect(screen.getByText('Locked until finalist freeze')).toBeTruthy();
+  expect(fetcher.mock.calls.some(([input]) => requestPath(input).endsWith('/research-case/reviews'))).toBe(false);
+  await user.click(screen.getByText('Human scope review'));
+  expect((screen.getByRole('button', { name: 'Authorize frozen-family search' }) as HTMLButtonElement).disabled).toBe(true);
+  await user.type(screen.getByLabelText('Review notes'), 'Synthetic CPU family only.');
+  await user.click(screen.getByRole('button', { name: 'Authorize frozen-family search' }));
+  await waitFor(() => expect(screen.getByText(/Human scope review · authorized/)).toBeTruthy());
+  const reviewed = fetcher.mock.calls.find(([input]) => requestPath(input).endsWith('/research-case/reviews'));
+  expect(requestBody(reviewed?.[1])).toEqual({ result_id: 'exp_' + 'f'.repeat(32),
+    decision: 'accept_protocol_scope', notes: 'Synthetic CPU family only.' });
+  expect(screen.getByText(/Policy denied · no run/i)).toBeTruthy();
+});
+
+it('allows a legacy receipt to be replaced by scoped search without authorizing evolution', async () => {
+  let calls = 0;
+  const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+    const path = requestPath(input);
+    if (path.startsWith('/api/research/problems?')) return Response.json(problemList);
+    if (path.endsWith('/verify')) return Response.json(candidateCheck('cand_' + '0'.repeat(31) + '1'));
+    if (path.endsWith('/admission')) return Response.json(admission());
+    if (path.endsWith('/research-case')) {
+      calls++;
+      return Response.json((calls === 1 ? researchCase : scopedResearchCase)('cand_' + '0'.repeat(31) + '1', 'spec_0123456789abcdef'));
+    }
+    return Response.json(candidate('1', '1', 'lower_mixture_to_concatenation', 'preserving', ['cand_parent'], []));
+  });
+  mockApi(fetcher);
+  const user = userEvent.setup();
+  render(<ResearchMovePanel mappings={[mapping]} mappingsState="loaded" mappingsPartial={false} />);
+  await user.click(screen.getByText('Create research candidate'));
+  await user.click(await screen.findByRole('button', { name: 'Compile hypothesis' }));
+  await user.click(screen.getByRole('button', { name: 'Run frozen CPU search' }));
+  expect(await screen.findByText(/Historical receipt · replay only/)).toBeTruthy();
+  await user.click(screen.getByRole('button', { name: 'Run frozen CPU search' }));
+  expect(await screen.findByText('Locked until finalist freeze')).toBeTruthy();
+  expect(calls).toBe(2);
+  expect((screen.getByRole('button', { name: 'Authorize frozen-family search' }) as HTMLButtonElement).disabled).toBe(true);
 });
 
 it('keeps research-case failure distinct and reuses the idempotency key on retry', async () => {
@@ -962,13 +1043,13 @@ it('keeps research-case failure distinct and reuses the idempotency key on retry
     await screen.findByRole('button', { name: 'Compile hypothesis' }),
   );
   const run = screen.getByRole('button', {
-    name: 'Run frozen CPU research case',
+    name: 'Run frozen CPU search',
   });
   await user.click(run);
   expect(await screen.findByText(/no result was confirmed/i)).toBeTruthy();
   await user.click(run);
   await waitFor(() => expect(researchCaseKeys).toHaveLength(2));
-  expect(researchCaseKeys[0]).toBe(`research-case:cand_${'0'.repeat(31)}1`);
+  expect(researchCaseKeys[0]).toBe(`research-search-v2:cand_${'0'.repeat(31)}1`);
   expect(researchCaseKeys[1]).toBe(researchCaseKeys[0]);
   expect(screen.queryByText(/Outcome/i)).toBeNull();
   expect(screen.getByText(/Policy denied · no run/i)).toBeTruthy();

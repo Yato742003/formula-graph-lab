@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import {
   type CompatibilityView,
   type ProposalReviewView,
@@ -481,6 +482,8 @@ type NumericalFixtureReceipt = {
 };
 
 type ResearchCaseReceipt = {
+  evaluationRole?: 'legacy_full' | 'search' | 'holdout';
+  protocolReviewed?: boolean;
   bindingId: string;
   resultId: string;
   outcome: 'supported_on_protocol' | 'failed_on_protocol' | 'inconclusive';
@@ -683,6 +686,8 @@ function parseReplayReport(
       !record(item) || typeof item.result_id !== 'string' || !/^exp_[a-f0-9]{32}$/.test(item.result_id) ||
       typeof item.binding_id !== 'string' || !/^bind_[a-f0-9]{32}$/.test(item.binding_id) ||
       !['supported_on_protocol', 'failed_on_protocol', 'inconclusive'].includes(String(item.outcome)) ||
+      (item.evaluation_role !== undefined && (typeof item.evaluation_role !== 'string' || !['legacy_full', 'search', 'holdout'].includes(item.evaluation_role))) ||
+      (item.evaluation_role === 'search' && (item.holdout_mean != null || item.holdout_ci95_low != null || item.holdout_ci95_high != null)) ||
       item.claim_scope !== 'synthetic_operator_only_no_product_claim' ||
       item.performance_claim !== false ||
       !['replayed', 'stored_only'].includes(String(item.replay_status)) ||
@@ -693,6 +698,7 @@ function parseReplayReport(
     return {
       bindingId: item.binding_id,
       resultId: item.result_id,
+      evaluationRole: (item.evaluation_role ?? 'legacy_full') as ResearchCaseReceipt['evaluationRole'],
       outcome: item.outcome as ResearchCaseReceipt['outcome'],
       holdoutMean: typeof item.holdout_mean === 'number' ? item.holdout_mean : null,
       holdoutCi95Low: typeof item.holdout_ci95_low === 'number' ? item.holdout_ci95_low : null,
@@ -1199,7 +1205,12 @@ function parseResearchCase(
 ): ResearchCaseReceipt {
   if (!record(value)) throw new Error('Invalid registered research-case receipt.');
   const result = record(value.result) ? value.result : value;
+  const role = result.evaluation_role ?? 'legacy_full';
+  const splits = role === 'search' ? ['search', 'search', 'validation']
+    : role === 'holdout' ? ['holdout', 'holdout'] : ['search', 'search', 'validation', 'holdout', 'holdout'];
   if (
+    typeof role !== 'string' || !['legacy_full', 'search', 'holdout'].includes(role) ||
+    (role !== 'legacy_full' && result.schema_version !== 'research-case-result.v2') ||
     typeof result.result_id !== 'string' || !/^exp_[a-f0-9]{32}$/.test(result.result_id) ||
     typeof result.result_hash !== 'string' || !/^[a-f0-9]{64}$/.test(result.result_hash) ||
     result.candidate_id !== candidateId ||
@@ -1210,7 +1221,9 @@ function parseResearchCase(
     !['supported_on_protocol', 'failed_on_protocol', 'inconclusive'].includes(String(result.outcome)) ||
     result.claim_scope !== 'synthetic_operator_only_no_product_claim' ||
     result.performance_claim !== false ||
-    !Array.isArray(result.trials) || result.trials.length !== 5 ||
+    !Array.isArray(result.trials) || result.trials.length !== splits.length ||
+    (role !== 'legacy_full' && result.trials.some((trial, index) => !record(trial) || trial.split !== splits[index])) ||
+    (role === 'search' && [result.holdout_mean, result.holdout_ci95_low, result.holdout_ci95_high].some(value => value != null)) ||
     (result.holdout_mean !== null && result.holdout_mean !== undefined && !Number.isFinite(result.holdout_mean)) ||
     (result.holdout_ci95_low !== null && result.holdout_ci95_low !== undefined && !Number.isFinite(result.holdout_ci95_low)) ||
     (result.holdout_ci95_high !== null && result.holdout_ci95_high !== undefined && !Number.isFinite(result.holdout_ci95_high))
@@ -1222,6 +1235,7 @@ function parseResearchCase(
     binding.binding_hash !== result.binding_hash
   ) throw new Error('Registered research-case binding does not match its result.');
   return {
+    evaluationRole: role as ResearchCaseReceipt['evaluationRole'],
     bindingId: result.binding_id,
     resultId: result.result_id,
     outcome: result.outcome as ResearchCaseReceipt['outcome'],
@@ -1317,10 +1331,12 @@ export default function ResearchMovePanel({
   mappings,
   mappingsState,
   mappingsPartial,
+  surface = 'workspace',
 }: {
   mappings: CompatibilityView[];
   mappingsState: 'loading' | 'loaded' | 'unavailable';
   mappingsPartial: boolean;
+  surface?: 'workspace' | 'proposals' | 'reports';
 }) {
   const [problems, setProblems] = useState<ProblemOption[]>([]);
   const [problemState, setProblemState] = useState<
@@ -1361,12 +1377,16 @@ export default function ResearchMovePanel({
   const [proposalReviewNotes, setProposalReviewNotes] = useState<Record<string, string>>({});
   const [proposalReviewNotices, setProposalReviewNotices] = useState<Record<string, string>>({});
   const [proposalReviewBusy, setProposalReviewBusy] = useState<string | null>(null);
-  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(surface !== 'workspace');
+  const [requestedCandidateId, setRequestedCandidateId] = useState('');
+  const pendingCandidateLink = useRef(true);
   const [notice, setNotice] = useState('Loading frozen ProblemSpecs…');
   const [busy, setBusy] = useState(false);
   const [researchCaseBusy, setResearchCaseBusy] = useState(false);
   const inFlight = useRef(false);
   const researchCaseInFlight = useRef(false);
+  const protocolReviewRetry = useRef<{ intent: string; key: string } | null>(null);
+  const [protocolNotes, setProtocolNotes] = useState('');
   const retry = useRef<{ body: string; key: string } | null>(null);
   const verificationRetry = useRef<{ candidateId: string; key: string } | null>(
     null,
@@ -1436,7 +1456,8 @@ export default function ResearchMovePanel({
   const canRunResearchCase = Boolean(
     receipt &&
     receipt.operator === 'lower_mixture_to_concatenation' &&
-    !receipt.researchCase &&
+    receipt.researchCase?.evaluationRole !== 'search' &&
+    receipt.researchCase?.evaluationRole !== 'holdout' &&
     !busy &&
     !researchCaseBusy,
   );
@@ -1458,6 +1479,7 @@ export default function ResearchMovePanel({
         setSpecId(
           (current) =>
             current ||
+            new URLSearchParams(window.location.search).get('spec_id') ||
             result.items.find((item) => item.allowsMix)?.specId ||
             '',
         );
@@ -1500,6 +1522,17 @@ export default function ResearchMovePanel({
         });
         setCandidateHistoryTotal(page.total);
         setCandidateHistoryState('loaded');
+        if (pendingCandidateLink.current) {
+          const linkedId = new URLSearchParams(window.location.search).get('candidate_id') ?? '';
+          const item = page.items.find((candidate) => candidate.candidateId === linkedId);
+          setRequestedCandidateId(item ? '' : linkedId);
+          if (item) {
+            setReceipt(item);
+            setSpecId(item.specId);
+            if (item.mappingId) setMappingId(item.mappingId);
+            pendingCandidateLink.current = false;
+          }
+        }
       } catch {
         if (!controller.signal.aborted) setCandidateHistoryState('unavailable');
       }
@@ -1834,7 +1867,8 @@ export default function ResearchMovePanel({
     if (
       !activeReceipt ||
       activeReceipt.operator !== 'lower_mixture_to_concatenation' ||
-      activeReceipt.researchCase ||
+      activeReceipt.researchCase?.evaluationRole === 'search' ||
+      activeReceipt.researchCase?.evaluationRole === 'holdout' ||
       busy ||
       researchCaseBusy ||
       researchCaseInFlight.current
@@ -1842,7 +1876,7 @@ export default function ResearchMovePanel({
       return;
     researchCaseInFlight.current = true;
     setResearchCaseBusy(true);
-    const idempotencyKey = `research-case:${activeReceipt.candidateId}`;
+    const idempotencyKey = `research-search-v2:${activeReceipt.candidateId}`;
     try {
       const response = await fetch(
         `/api/research/candidates/${activeReceipt.candidateId}/research-case`,
@@ -1882,6 +1916,44 @@ export default function ResearchMovePanel({
       setNotice(
         `Research case unavailable; no result was confirmed. ${error instanceof Error ? error.message : 'Retry is safe.'}`,
       );
+    } finally {
+      researchCaseInFlight.current = false;
+      setResearchCaseBusy(false);
+    }
+  }
+
+  async function reviewProtocol(decision: 'accept_protocol_scope' | 'reject') {
+    const current = receipt;
+    if (!current?.researchCase || current.researchCase.evaluationRole !== 'search' ||
+        researchCaseInFlight.current || busy || !protocolNotes.trim()) return;
+    const body = JSON.stringify({ result_id: current.researchCase.resultId, decision,
+      notes: protocolNotes.trim() });
+    const intent = JSON.stringify([current.candidateId, body]);
+    if (protocolReviewRetry.current?.intent !== intent) {
+      protocolReviewRetry.current = { intent, key: crypto.randomUUID() };
+    }
+    researchCaseInFlight.current = true;
+    setResearchCaseBusy(true);
+    try {
+      const response = await fetch(`/api/research/candidates/${current.candidateId}/research-case/reviews`, {
+        method: 'POST', headers: { 'content-type': 'application/json',
+          'x-idempotency-key': protocolReviewRetry.current.key }, body,
+      });
+      const raw: unknown = await response.json().catch(() => null);
+      if (!response.ok || !record(raw) || raw.candidate_id !== current.candidateId ||
+          raw.result_id !== current.researchCase.resultId || raw.decision !== decision) {
+        throw new Error(`Protocol review rejected (${response.status}).`);
+      }
+      protocolReviewRetry.current = null;
+      setReceipt(active => active?.candidateId === current.candidateId && active.researchCase
+        ? { ...active, researchCase: { ...active.researchCase,
+          protocolReviewed: decision === 'accept_protocol_scope' } } : active);
+      setNotice(decision === 'accept_protocol_scope'
+        ? 'Frozen-family search authorized by your review. Evolution will re-check admission; no global proof or product claim.'
+        : 'Protocol scope rejected. This family cannot enter evolution.');
+      setCandidateHistoryRevision(revision => revision + 1);
+    } catch (error) {
+      setNotice(`${error instanceof Error ? error.message : 'Review failed.'} No acceptance was confirmed.`);
     } finally {
       researchCaseInFlight.current = false;
       setResearchCaseBusy(false);
@@ -2014,10 +2086,19 @@ export default function ResearchMovePanel({
     });
   }
 
+  // Reuse the same controls on dedicated pages and in the legacy workspace dialog.
+  const Content = surface === 'workspace' ? DialogContent : 'div';
+  const Header = surface === 'workspace' ? DialogHeader : 'header';
+  const Title = surface === 'workspace' ? DialogTitle : 'h2';
+  const Description = surface === 'workspace' ? DialogDescription : 'p';
+
   return (
-    <section className="research-move-panel">
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogTrigger className="research-move-trigger">
+    <section
+      id={surface === 'proposals' ? 'proposal-builder' : surface === 'reports' ? 'report-view' : undefined}
+      className={`research-move-panel research-move-panel-${surface}`}
+    >
+      <Dialog open={surface === 'workspace' && dialogOpen} onOpenChange={setDialogOpen}>
+        {surface === 'workspace' ? <DialogTrigger className="research-move-trigger">
           <span>
             <strong>Create research candidate</strong>
             <small>Deterministic DSL · no model judgment</small>
@@ -2033,16 +2114,16 @@ export default function ResearchMovePanel({
                     : 'Not verified'
               : 'No candidate'}
           </span>
-        </DialogTrigger>
-        <DialogContent className="research-move-dialog">
-          <DialogHeader className="research-move-dialog-header">
-            <DialogTitle>Create research candidate</DialogTitle>
-            <DialogDescription>
-              Explore one bounded transformation. The compiler records a
-              hypothesis; independent checks and policy decisions remain
-              separate.
-            </DialogDescription>
-          </DialogHeader>
+        </DialogTrigger> : null}
+        <Content className={`research-move-dialog research-move-dialog-${surface}${surface !== 'workspace' ? ' research-move-inline' : ''}`}>
+          <Header className="research-move-dialog-header">
+          <Title>{surface === 'reports' ? 'Saved evidence' : surface === 'workspace' ? 'Create research candidate' : 'Candidate builder'}</Title>
+            <Description>
+              {surface === 'reports'
+                ? 'Open a saved candidate to inspect scoped checks, replay evidence and export a bundle.'
+                : 'Explore one bounded transformation. The compiler records a hypothesis; independent checks and policy decisions remain separate.'}
+            </Description>
+          </Header>
           <div className="research-move-content">
             <p className="research-move-intro">
               Compile a positive feature-map mixture from a frozen objective and
@@ -2146,6 +2227,8 @@ export default function ResearchMovePanel({
               {blockedReason ? (
                 <output className="research-move-blocked">
                   {blockedReason}
+                  {problemState === 'loaded' && !selectedSpec ? <Link href="/spec">Open Spec</Link> : null}
+                  {selectedSpec && mappingsState === 'loaded' && !selectedMapping ? <Link href="/compatibility">Open Compatibility</Link> : null}
                 </output>
               ) : null}
               <button type="submit" disabled={!canCompile}>
@@ -2339,7 +2422,10 @@ export default function ResearchMovePanel({
                   request.
                 </output>
               ) : candidateHistory.length === 0 ? (
-                <output aria-live="polite">No saved candidates yet.</output>
+                <div className="research-history-empty">
+                  <output aria-live="polite">No saved candidates yet.</output>
+                  <Link href="/proposals">Create a candidate</Link>
+                </div>
               ) : (
                 <ul>
                   {candidateHistory.map((item) => (
@@ -2353,6 +2439,8 @@ export default function ResearchMovePanel({
                         aria-pressed={receipt?.candidateId === item.candidateId}
                         disabled={busy}
                         onClick={() => {
+                          pendingCandidateLink.current = false;
+                          setRequestedCandidateId('');
                           setReceipt(item);
                           setSpecId(item.specId);
                           if (item.mappingId) setMappingId(item.mappingId);
@@ -2418,6 +2506,9 @@ export default function ResearchMovePanel({
                   ))}
                 </ul>
               )}
+              {requestedCandidateId && candidateHistoryState === 'loaded' ? (
+                <output aria-live="polite">The linked candidate is not in the loaded history. Load older candidates to find it.</output>
+              ) : null}
               {candidateHistoryState === 'loaded' &&
               candidateHistory.length < candidateHistoryTotal ? (
                 <button
@@ -2558,6 +2649,13 @@ export default function ResearchMovePanel({
             <output className="research-move-notice" aria-live="polite">
               {notice}
             </output>
+            {surface === 'proposals' && receipt ? (
+              <section className="research-proposal-result" aria-label="Candidate result">
+                <strong>{receipt.check ? `Check: ${receipt.check.outcome}` : 'Not verified'}</strong>
+                <code>{receipt.candidateId}</code>
+                <Link href={`/reports?spec_id=${encodeURIComponent(receipt.specId)}&candidate_id=${encodeURIComponent(receipt.candidateId)}`}>View in Reports</Link>
+              </section>
+            ) : null}
             {receipt ? (
               <section
                 className="research-candidate-receipt"
@@ -2660,12 +2758,12 @@ export default function ResearchMovePanel({
                 </ul>
                 {receipt.operator === 'lower_mixture_to_concatenation' ? (
                   <details className="research-case-panel" open>
-                    <summary>Frozen CPU research case · protocol evidence</summary>
+                    <summary>Frozen CPU search · protocol evidence</summary>
                     <div>
                       <p>
                         Runs the registered synthetic matched-control protocol with
                         frozen seeds, split assignments, rank-matched parents and a
-                        protected holdout. This is server reference code only; it is
+                        locked holdout (Reports → freeze finalists → confirm). This is server reference code only; it is
                         not author code or a product-performance benchmark.
                       </p>
                       {receipt.researchCase ? (
@@ -2678,11 +2776,11 @@ export default function ResearchMovePanel({
                           </div>
                           <div>
                             <dt>Holdout mean</dt>
-                            <dd>{receipt.researchCase.holdoutMean ?? 'Not available'}</dd>
+                            <dd className="font-mono tabular-nums">{receipt.researchCase.evaluationRole === 'search' ? 'Locked until finalist freeze' : receipt.researchCase.holdoutMean ?? 'Not available'}</dd>
                           </div>
                           <div>
                             <dt>95% CI</dt>
-                            <dd>
+                            <dd className="font-mono tabular-nums">
                               {receipt.researchCase.holdoutCi95Low !== null && receipt.researchCase.holdoutCi95High !== null
                                 ? `${receipt.researchCase.holdoutCi95Low} … ${receipt.researchCase.holdoutCi95High}`
                                 : 'Not available'}
@@ -2693,20 +2791,41 @@ export default function ResearchMovePanel({
                             <dd><code>{receipt.researchCase.resultId}</code></dd>
                           </div>
                         </dl>
-                      ) : (
+                      ) : null}
+                      {receipt.researchCase && (!receipt.researchCase.evaluationRole || receipt.researchCase.evaluationRole === 'legacy_full') ? (
+                        <p>Historical receipt · replay only. Run scoped search before using this candidate in evolution.</p>
+                      ) : null}
+                      {canRunResearchCase || !receipt.researchCase ? (
                         <button
                           type="button"
                           className="research-move-secondary"
                           disabled={!canRunResearchCase}
                           onClick={() => void runResearchCase()}
                         >
-                          {researchCaseBusy ? 'Running frozen protocol…' : 'Run frozen CPU research case'}
+                          {researchCaseBusy ? 'Running frozen protocol…' : 'Run frozen CPU search'}
                         </button>
-                      )}
+                      ) : null}
                       {researchCaseBusy ? (
                         <output aria-live="polite">
-                          Running frozen seeds and holdout; no model API or paid provider is called…
+                          Running search/validation only; holdout stays locked. No model API is called…
                         </output>
+                      ) : null}
+                      {receipt.researchCase?.evaluationRole === 'search' ? (
+                        <details>
+                          <summary>Human scope review{receipt.researchCase.protocolReviewed ? ' · authorized' : ''}</summary>
+                          <label className="block space-y-1">
+                            <span>Review notes</span>
+                            <textarea value={protocolNotes} onChange={event => setProtocolNotes(event.target.value)}
+                              maxLength={2000} disabled={researchCaseBusy || busy} className="w-full rounded border bg-background p-2" />
+                          </label>
+                          <p className="text-xs">Authorizes bounded parameter search for this frozen family only, not mathematical correctness.</p>
+                          <button type="button" className="research-move-secondary"
+                            disabled={busy || researchCaseBusy || !protocolNotes.trim() || receipt.researchCase.protocolReviewed}
+                            onClick={() => void reviewProtocol('accept_protocol_scope')}>Authorize frozen-family search</button>
+                          <button type="button" className="research-move-secondary"
+                            disabled={busy || researchCaseBusy || !protocolNotes.trim()}
+                            onClick={() => void reviewProtocol('reject')}>Reject scope</button>
+                        </details>
                       ) : null}
                     </div>
                   </details>
@@ -2930,8 +3049,8 @@ export default function ResearchMovePanel({
                                 <span>
                                   {researchCase.replayStatus === 'replayed' ? 'replayed from frozen protocol' : 'stored receipt only'} · <code>{researchCase.resultId}</code>
                                 </span>
-                                <small>
-                                  Holdout {researchCase.holdoutMean ?? 'n/a'} · CI [{researchCase.holdoutCi95Low ?? 'n/a'}, {researchCase.holdoutCi95High ?? 'n/a'}]
+                                <small className="font-mono tabular-nums">
+                                  {researchCase.evaluationRole === 'search' ? 'Search/validation only · holdout locked' : `Holdout ${researchCase.holdoutMean ?? 'n/a'} · CI [${researchCase.holdoutCi95Low ?? 'n/a'}, ${researchCase.holdoutCi95High ?? 'n/a'}]`}
                                 </small>
                                 <small>No author-code or product-performance claim</small>
                               </li>
@@ -2980,7 +3099,7 @@ export default function ResearchMovePanel({
               </section>
             ) : null}
           </div>
-        </DialogContent>
+        </Content>
       </Dialog>
     </section>
   );

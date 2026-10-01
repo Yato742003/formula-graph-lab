@@ -3,6 +3,7 @@
 import ProblemSpecPanel from './problem-spec-panel';
 import ResearchCreatePanel from './research-create-panel';
 import ResearchMovePanel from './research-move-panel';
+import StageNav, { useWorkspaceLocation, withContext } from '@/components/workspace-shell';
 
 import {
   type CompatibilityView,
@@ -80,6 +81,7 @@ type ResearchWorkspaceProps = {
     displayName: string;
     email: string;
   };
+  stage?: 'graph' | 'spec' | 'compatibility';
 };
 
 type InspectorRecord = {
@@ -639,7 +641,9 @@ function LineageSourceRefs({
   );
 }
 
-export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
+export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProps) {
+  const { params: workspaceParams } = useWorkspaceLocation();
+  const helpHref = withContext('/help', workspaceParams);
   const [selectedId, setSelectedId] = useState<string | null>('scaled');
   const [isImporting, setIsImporting] = useState(false);
   const [imported, setImported] = useState<WorkspaceImportResponse | null>(
@@ -668,6 +672,18 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   const [isZenMode, setIsZenMode] = useState(false);
   const [isImportExpanded, setIsImportExpanded] = useState(false);
   const researchMoveRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isSearchOpen) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const dialog = document.getElementById('graph-search-panel') as HTMLDialogElement;
+    dialog.showModal();
+    document.getElementById('search-evidence-query')?.focus();
+    return () => {
+      dialog.close();
+      previousFocus?.focus();
+    };
+  }, [isSearchOpen]);
 
   const toggleZenMode = useCallback(() => {
     setIsZenMode((prev) => {
@@ -749,7 +765,9 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   // --- Sprint 5A State & Handlers ---
   const [activeViewTab, setActiveViewTab] = useState<
     'lineage' | 'spec' | 'compat'
-  >('spec');
+  >(
+    stage === 'graph' ? 'lineage' : stage === 'compatibility' ? 'compat' : 'spec',
+  );
 
   function selectPrimaryView(view: 'papers' | 'research') {
     if (view === 'research') {
@@ -789,6 +807,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   const [multiPaperCoverage, setMultiPaperCoverage] = useState<CoverageView[]>(
     [],
   );
+  const [lineageFilter, setLineageFilter] = useState('');
   const [selectedLineageId, setSelectedLineageId] = useState<string | null>(
     null,
   );
@@ -1112,6 +1131,13 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
       graphId: null,
     }));
   }, [evidenceNodes, hasPersistedGraph, selectedEvidence]);
+  const filteredCoverage = useMemo(() => {
+    const query = lineageFilter.trim().toLowerCase();
+    if (!query) return multiPaperCoverage;
+    return multiPaperCoverage.filter((paper) =>
+      `${paper.id} ${paper.title} ${paper.authors}`.toLowerCase().includes(query),
+    );
+  }, [lineageFilter, multiPaperCoverage]);
   const persistedAuthors = Array.isArray(persistedVersionNode?.payload.authors)
     ? persistedVersionNode.payload.authors.filter(
         (author): author is string => typeof author === 'string',
@@ -1373,7 +1399,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
   }
 
   return (
-    <main className="app-shell" suppressHydrationWarning>
+    <main className={`app-shell ${stage ? `app-shell-${stage}` : ''}`} suppressHydrationWarning>
       <output className="sr-only" aria-live="polite">
         {researchLoadNotice}
       </output>
@@ -1394,6 +1420,10 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
         </div>
 
         <div className="top-actions">
+          <a className="workspace-help-link" href={helpHref} aria-label="Open FormulaGraph help">
+            <BookOpenText size={16} aria-hidden="true" />
+            <span>Help</span>
+          </a>
           <button
             type="button"
             className={`icon-button ${isSearchOpen ? 'icon-button-active' : ''}`}
@@ -1412,16 +1442,16 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
             <ChevronDown size={14} />
           </div>
         </div>
+        {stage ? <StageNav /> : null}
       </header>
 
       {isSearchOpen ? (
-        <div className="command-palette-backdrop">
           <dialog
-            open
             className="search-command"
             id="graph-search-panel"
             aria-label="Search evidence graph"
             aria-modal="true"
+            onCancel={() => setIsSearchOpen(false)}
           >
             <div className="search-command-heading">
               <div className="search-command-icon" aria-hidden="true">
@@ -1529,11 +1559,11 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               )}
             </div>
           </dialog>
-        </div>
       ) : null}
 
-      {activeViewTab !== 'spec' ? (
+      {activeViewTab === 'lineage' ? (
         <section
+          id="paper-import"
           className={`import-strip ${hasPersistedGraph && !isImportExpanded ? 'is-compact' : ''}`}
           aria-label="Import a paper"
         >
@@ -1675,12 +1705,21 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
             </div>
           </article>
 
-          <div className="section-list mb-4">
-            <p className="list-label">
+          <details className="source-section-disclosure mb-4">
+            <summary className="list-label">
               Multi-paper lineage ({multiPaperCoverage.length} indexed)
-            </p>
-            <div className="space-y-1.5 px-2">
-              {multiPaperCoverage.map((p, idx) => (
+              <span className="source-disclosure-hint">Filter</span>
+            </summary>
+            <div className="source-section-body">
+              <Input
+                aria-label="Filter multi-paper lineage"
+                value={lineageFilter}
+                onChange={(event) => setLineageFilter(event.target.value)}
+                placeholder="Filter papers"
+                className="source-lineage-filter"
+              />
+            <div className="space-y-1.5">
+              {filteredCoverage.map((p, idx) => (
                 <div
                   key={p.id}
                   className="p-2 rounded border border-border/40 bg-card/50 text-xs space-y-1"
@@ -1715,11 +1754,19 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                   ) : null}
                 </div>
               ))}
+              {!filteredCoverage.length ? (
+                <p className="source-disclosure-empty">No paper matches this filter.</p>
+              ) : null}
             </div>
-          </div>
+            </div>
+          </details>
 
-          <div className="section-list">
-            <p className="list-label">Extracted structure</p>
+          <details className="source-section-disclosure">
+            <summary className="list-label">
+              Extracted structure
+              <span className="source-disclosure-hint">{paperSections.length}</span>
+            </summary>
+            <div className="source-section-body">
             {paperSections.map((section) => (
               <button
                 className={`section-row ${section.active ? 'section-row-active' : ''}`}
@@ -1740,7 +1787,8 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                 <span>{section.count}</span>
               </button>
             ))}
-          </div>
+            </div>
+          </details>
 
           <div className="provenance-note">
             <ShieldCheck size={18} />
@@ -1793,7 +1841,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                         : 'Attention lineage'}
                 </h1>
               </div>
-              <div
+              {!stage ? <div
                 className="flex flex-wrap items-center gap-1 ml-0 sm:ml-4 bg-muted/60 p-1 rounded-xl border border-border/60 max-w-full min-h-9 shadow-inner"
                 role="tablist"
                 aria-label="Research Workspace Views"
@@ -1849,7 +1897,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                     {compatMappings.length}
                   </span>
                 </button>
-              </div>
+              </div> : null}
             </div>
             <div className="graph-header-right">
               {activeViewTab === 'lineage' ? (
@@ -1887,7 +1935,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
             </div>
           </div>
 
-          <nav className="workspace-flow" aria-label="Research workflow">
+          {!stage ? <nav className="workspace-flow" aria-label="Research workflow">
             <div className="workspace-flow-status" aria-live="polite">
               <span className="eyebrow">Current stage</span>
               <strong>
@@ -1905,7 +1953,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                     : 'G2'}
               </small>
             </div>
-            <button
+            {!stage ? <button
               type="button"
               className="workspace-flow-action"
               aria-label="Open research move"
@@ -1917,14 +1965,14 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                 <small>Hypothesis only</small>
               </span>
               <ArrowRight size={14} aria-hidden="true" />
-            </button>
-          </nav>
+            </button> : null}
+          </nav> : null}
 
           <div
             hidden={activeViewTab !== 'spec'}
             className="flex-1 overflow-y-auto"
           >
-            <ProblemSpecPanel />
+            <ProblemSpecPanel showEvolution={stage !== 'spec'} />
           </div>
           <div hidden={activeViewTab === 'spec'} className="shrink-0 mb-2">
             <ResearchCreatePanel
@@ -1957,7 +2005,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                 </output>
               </div>
 
-              <div className="hypothesis-dock shrink-0" ref={researchMoveRef}>
+              {!stage ? <div className="hypothesis-dock shrink-0" ref={researchMoveRef}>
                 <div className="hypothesis-icon">
                   <Braces size={18} />
                 </div>
@@ -1972,7 +2020,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                   mappingsState={researchRecordsState}
                   mappingsPartial={researchRecordsPartial}
                 />
-              </div>
+              </div> : null}
             </>
           ) : activeViewTab === 'spec' ? null : (
             <div className="flex-1 p-6 overflow-y-auto bg-card/20 space-y-4">
@@ -1996,90 +2044,58 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               <div className="space-y-3">
                 {compatMappings.length === 0 ? (
                   <div className="space-y-4">
-                    <output className="block rounded-lg border border-border/60 bg-card p-3 text-sm text-muted-foreground">
-                      {researchLoadNotice ===
-                        'Research records loaded from the workspace.' ||
-                      researchLoadNotice ===
-                        'No saved research records in this workspace.'
-                        ? 'No saved port mappings in this workspace.'
-                        : researchLoadNotice}
-                    </output>
+                    {researchRecordsState === 'loading' ? (
+                      <output className="block rounded-lg border border-border/60 bg-card p-3 text-sm text-muted-foreground">
+                        Loading research records…
+                      </output>
+                    ) : researchRecordsState === 'unavailable' ? (
+                      <output role="alert" className="block rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+                        {researchLoadNotice}
+                      </output>
+                    ) : (
+                      <>
+                        <output className="block rounded-lg border border-border/60 bg-card p-3 text-sm text-muted-foreground">
+                          {researchLoadNotice ===
+                            'Research records loaded from the workspace.' ||
+                          researchLoadNotice ===
+                            'No saved research records in this workspace.'
+                            ? 'No saved port mappings in this workspace.'
+                            : researchLoadNotice}
+                        </output>
 
-                    <div className="rounded-xl border border-border/60 bg-card/60 backdrop-blur-xs p-5 space-y-4 shadow-xs">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <ShieldCheck size={18} className="text-primary" />
-                          <h3 className="text-sm font-semibold text-foreground">
-                            6-Gate Semantic Compatibility Protocol
-                          </h3>
-                        </div>
-                        <p className="text-xs text-muted-foreground leading-relaxed">
-                          Automated cross-formula tensor port verification ensures mathematically sound synthesis before generating speculative hypothesis moves.
-                        </p>
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-                        <div className="p-3 rounded-lg border border-border/40 bg-background/50 space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-medium text-foreground">1. Tensor Shape Gate</span>
-                            <Badge variant="outline" className="text-[10px] font-mono">Rank & Dim</Badge>
+                        <div className="compatibility-empty-card rounded-xl border border-border/60 bg-card/60 p-4 space-y-3 shadow-xs">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex items-center gap-2">
+                              <ShieldCheck size={18} className="text-primary" />
+                              <div>
+                                <h3 className="text-sm font-semibold text-foreground">No mapping yet</h3>
+                                <p className="text-xs text-muted-foreground">Not run · gates need a reviewed mapping.</p>
+                              </div>
+                            </div>
+                            <Badge variant="outline" className="text-[10px]">G3</Badge>
                           </div>
-                          <p className="text-[11px] text-muted-foreground">Validates broadcasting rules and dimension alignment across ports.</p>
-                        </div>
-                        <div className="p-3 rounded-lg border border-border/40 bg-background/50 space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-medium text-foreground">2. Domain Value Gate</span>
-                            <Badge variant="outline" className="text-[10px] font-mono">Bounds</Badge>
+                          <div className="compatibility-gate-chips" aria-label="Compatibility gates">
+                            {['Shape', 'Domain', 'Normalization', 'Mask', 'Causality', 'Binding'].map((gate) => (
+                              <span key={gate} title={`${gate}: not run`}>{gate}</span>
+                            ))}
                           </div>
-                          <p className="text-[11px] text-muted-foreground">Ensures producer codomain is a valid subset of consumer domain.</p>
-                        </div>
-                        <div className="p-3 rounded-lg border border-border/40 bg-background/50 space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-medium text-foreground">3. Normalization Gate</span>
-                            <Badge variant="outline" className="text-[10px] font-mono">Scale</Badge>
+                          <div className="flex items-center justify-between gap-3 pt-2 border-t border-border/40">
+                            <span className="text-xs text-muted-foreground">Select a formula pair to add a mapping.</span>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-8 text-xs gap-1.5"
+                              onClick={() => selectPrimaryView('papers')}
+                            >
+                              <Network size={13} />
+                              <span>Open Graph</span>
+                              <ArrowRight size={13} />
+                            </Button>
                           </div>
-                          <p className="text-[11px] text-muted-foreground">Checks softmax temperature, layer-norm variance, and scaling factors.</p>
                         </div>
-                        <div className="p-3 rounded-lg border border-border/40 bg-background/50 space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-medium text-foreground">4. Attention Mask Gate</span>
-                            <Badge variant="outline" className="text-[10px] font-mono">Sparsity</Badge>
-                          </div>
-                          <p className="text-[11px] text-muted-foreground">Verifies causal masking and padding mask compatibility.</p>
-                        </div>
-                        <div className="p-3 rounded-lg border border-border/40 bg-background/50 space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-medium text-foreground">5. Causality DAG Gate</span>
-                            <Badge variant="outline" className="text-[10px] font-mono">No Cycle</Badge>
-                          </div>
-                          <p className="text-[11px] text-muted-foreground">Guarantees acyclic temporal ordering across paper derivations.</p>
-                        </div>
-                        <div className="p-3 rounded-lg border border-border/40 bg-background/50 space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-medium text-foreground">6. Reviewed Binding Gate</span>
-                            <Badge variant="outline" className="text-[10px] font-mono">Human-in-Loop</Badge>
-                          </div>
-                          <p className="text-[11px] text-muted-foreground">Enforces cryptographic sign-off for ambiguous symbol names.</p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-between pt-2 border-t border-border/40">
-                        <span className="text-xs text-muted-foreground">
-                          Ready to assess candidate ports? Select formulas in the Lineage Graph.
-                        </span>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-8 text-xs gap-1.5"
-                          onClick={() => selectPrimaryView('papers')}
-                        >
-                          <Network size={13} />
-                          <span>View Lineage Graph</span>
-                          <ArrowRight size={13} />
-                        </Button>
-                      </div>
-                    </div>
+                      </>
+                    )}
                   </div>
                 ) : null}
                 {compatMappings.map((m) => (
@@ -2243,6 +2259,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
         </section>
 
         <aside
+          id="formula-inspector"
           className={`inspector-panel ${isRightCollapsed ? 'is-collapsed' : ''}`}
           aria-label="Formula inspector"
         >
@@ -2443,13 +2460,17 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                   )}
                 </div>
                 <p className="source-context-text">{inspector.sourceText}</p>
+                <details className="source-context-details">
+                  <summary>Open full source context</summary>
+                  <p>{inspector.sourceText}</p>
+                </details>
               </section>
 
-              <section className="inspector-section">
-                <div className="section-title">
-                  <h3>Relation history</h3>
+              <details className="inspector-section inspector-disclosure">
+                <summary className="section-title">
+                  <span>Relation history</span>
                   <span>{inspector.relations.length} visible</span>
-                </div>
+                </summary>
                 {inspector.relations.length > 0 ? (
                   <ol className="relation-history">
                     {inspector.relations.map((relation) => (
@@ -2470,13 +2491,13 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                     No visible relations for this node.
                   </p>
                 )}
-              </section>
+              </details>
 
-              <section className="inspector-section">
-                <div className="section-title">
-                  <h3>Provenance episodes</h3>
+              <details className="inspector-section inspector-disclosure">
+                <summary className="section-title">
+                  <span>Provenance episodes</span>
                   <span>{inspector.paperLabel}</span>
-                </div>
+                </summary>
                 <ul className="episode-list">
                   {inspector.episodeIds.map((episodeId) => (
                     <li key={episodeId}>
@@ -2484,13 +2505,13 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                     </li>
                   ))}
                 </ul>
-              </section>
+              </details>
 
-              <section className="inspector-section">
-                <div className="section-title">
-                  <h3>Validation</h3>
+              <details className="inspector-section inspector-disclosure">
+                <summary className="section-title">
+                  <span>Validation</span>
                   <span>{inspector.verificationStatus}</span>
-                </div>
+                </summary>
                 <ul className="check-list">
                   <li>
                     <Check size={14} />
@@ -2513,7 +2534,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
                       : 'No newer revision in view'}
                   </li>
                 </ul>
-              </section>
+              </details>
 
               <a
                 className="source-link"
@@ -2558,7 +2579,7 @@ export default function ResearchWorkspace({ user }: ResearchWorkspaceProps) {
               </div>
             </>
           )}
-          {activeViewTab === 'lineage' ? (
+          {activeViewTab === 'lineage' && lineageRelations.length > 0 ? (
             <section className="inspector-section lineage-evidence-drawer">
               <div className="section-title">
                 <h3>Lineage & Derivations</h3>

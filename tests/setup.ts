@@ -8,6 +8,12 @@ class TestResizeObserver implements ResizeObserver {
 
 vi.stubGlobal('ResizeObserver', TestResizeObserver);
 
+// jsdom has no top-layer dialog implementation; real focus trapping is checked in Chrome.
+Object.assign(HTMLDialogElement.prototype, {
+  showModal(this: HTMLDialogElement) { this.open = true; },
+  close(this: HTMLDialogElement) { this.open = false; },
+});
+
 Object.defineProperty(globalThis, 'matchMedia', {
   configurable: true,
   value: vi.fn((query: string) => ({

@@ -247,6 +247,46 @@ afterEach(() => {
 });
 
 describe('ResearchWorkspace import interaction', () => {
+  it('keeps the compatibility empty state hidden while records are loading', () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === '/api/research/compatibility?limit=100') {
+        return new Promise<Response>(() => undefined);
+      }
+      return url === '/api/graph'
+        ? jsonResponse(emptyGraph)
+        : jsonResponse({ items: [], total: 0, indexed_papers: [] });
+    }));
+
+    render(
+      <ResearchWorkspace
+        user={{ displayName: 'Researcher', email: 'researcher@example.com' }}
+        stage="compatibility"
+      />,
+    );
+
+    expect(screen.getAllByText('Loading research records…')).toHaveLength(2);
+    expect(screen.queryByText('No mapping yet')).toBeNull();
+  });
+
+  it('keeps guidance in Help and candidate actions in Proposals on the graph route', () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(emptyGraph)));
+
+    const { container } = render(
+      <ResearchWorkspace
+        user={{ displayName: 'Researcher', email: 'researcher@example.com' }}
+        stage="graph"
+      />,
+    );
+
+    expect(container.querySelector('.app-shell-graph')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Open research move' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Create research candidate/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Show steps' })).toBeNull();
+    expect(screen.queryByText('Start with one paper')).toBeNull();
+    expect(screen.getByRole('link', { name: 'Open FormulaGraph help' })).toBeTruthy();
+  });
+
   it('uses one workspace navigation surface without duplicate view controls', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(emptyGraph)));
     const user = userEvent.setup();
@@ -410,7 +450,14 @@ describe('ResearchWorkspace import interaction', () => {
     const input = screen.getByRole('textbox', {
       name: 'Formula or research concept',
     });
-    await user.type(input, 'scaled attention');
+    expect(document.activeElement).toBe(input);
+    expect((screen.getByRole('dialog', { name: 'Search evidence graph' }) as HTMLDialogElement).open).toBe(true);
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog', { name: 'Search evidence graph' })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Search graph' }));
+    await user.click(screen.getByRole('button', { name: 'Search graph' }));
+    const reopenedInput = screen.getByRole('textbox', { name: 'Formula or research concept' });
+    await user.type(reopenedInput, 'scaled attention');
     await user.click(screen.getByRole('button', { name: 'Search evidence' }));
 
     await waitFor(() =>

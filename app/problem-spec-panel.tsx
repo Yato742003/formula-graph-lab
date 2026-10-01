@@ -62,7 +62,7 @@ function initialFields(): Record<string, string> {
   return Object.fromEntries(sections.map(([key, , value]) => [key, JSON.stringify(value, null, 2)]));
 }
 
-export default function ProblemSpecPanel() {
+export default function ProblemSpecPanel({ showEvolution = true }: { showEvolution?: boolean }) {
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [task, setTask] = useState('');
   const [family, setFamily] = useState('');
@@ -82,6 +82,12 @@ export default function ProblemSpecPanel() {
   const [copiedHash, setCopiedHash] = useState(false);
   const inFlight = useRef(false);
   const retry = useRef<{ body: string; key: string } | null>(null);
+
+  const loadBenchmarkTemplate = () => {
+    setTask('Compress 3D Gaussian Splatting anchor latent coordinates with deterministic entropy coding (arXiv:2609.30245)');
+    setFamily('neural_compression');
+    setDtype('float32');
+  };
 
   useEffect(() => {
     if (!snapshot) return;
@@ -215,13 +221,10 @@ export default function ProblemSpecPanel() {
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-lg font-semibold tracking-tight">Problem Spec (G1)</h2>
-                <Badge variant="outline" className="text-[11px] font-mono border-primary/30 text-primary">
-                  Phase 5A Gate
-                </Badge>
+                <h2 className="text-lg font-semibold tracking-tight">Research question</h2>
               </div>
           <p className="text-xs text-muted-foreground mt-0.5">
-                Freeze your research question and reproducible inputs. Saving does not run experiments or verify artifacts.
+                Define the question and inputs, then freeze a version for comparison.
               </p>
             </div>
           </div>
@@ -238,9 +241,6 @@ export default function ProblemSpecPanel() {
           </div>
         </div>
 
-        <p className="text-xs text-muted-foreground/80 border-t border-border/40 pt-2.5">
-          Replace template values with pinned experiment inputs. Continuing checks JSON syntax; freezing validates the manifest but does not verify artifact bytes or run experiments.
-        </p>
       </header>
 
       <ol aria-label="ProblemSpec setup progress" className="grid grid-cols-3 gap-2 text-xs font-medium text-center">
@@ -349,16 +349,25 @@ export default function ProblemSpecPanel() {
         </div>
       ) : null}
 
-      {snapshot ? <EvolutionPanel key={snapshot.spec_id} specId={snapshot.spec_id} /> : null}
+      {snapshot && showEvolution ? <EvolutionPanel key={snapshot.spec_id} specId={snapshot.spec_id} /> : null}
 
       {/* Main Spec Editor Form */}
       <form onSubmit={event => { if (step === 3) void freeze(event); else { event.preventDefault(); continueSetup(); } }} className="space-y-6">
         <fieldset disabled={busy || snapshot !== null} className="space-y-6">
           {/* Card 1: Core Research Identity */}
           {step === 1 ? <div className="p-5 rounded-xl border border-border/60 bg-card shadow-xs space-y-4">
-            <div className="flex items-center gap-2 border-b border-border/40 pb-2.5">
-              <FileCode2 size={16} className="text-primary" />
-              <h3 className="text-sm font-semibold text-foreground">1. Core Research Identity</h3>
+            <div className="flex items-center justify-between border-b border-border/40 pb-2.5">
+              <div className="flex items-center gap-2">
+                <FileCode2 size={16} className="text-primary" />
+                <h3 className="text-sm font-semibold text-foreground">1. Core Research Identity</h3>
+              </div>
+              <button
+                type="button"
+                onClick={loadBenchmarkTemplate}
+                className="text-xs px-2.5 py-1 rounded bg-secondary hover:bg-secondary/80 text-secondary-foreground font-medium transition-colors cursor-pointer"
+              >
+                Load 3DGS Benchmark Spec
+              </button>
             </div>
 
             <div className="space-y-3">

@@ -21,6 +21,17 @@ const input = {
 };
 
 describe('contract review boundary', () => {
+  it('preserves function input and reviewed output separately and fails closed without codomain', () => {
+    const contract = { ...input.reviewed_contract, category: 'function', shape: [64],
+      feature_rank: 16, feature_output_domain: 'strictly_positive_real' };
+    const parsed = parseContractReviewInput({ ...input, reviewed_contract: contract });
+    expect(parsed.reviewed_contract).toMatchObject(contract);
+    for (const changed of [{ feature_output_domain: null }, { shape: null },
+      { shape: ['unknown'] }, { domain: 'positive' }, { category: 'vector' }]) {
+      expect(() => parseContractReviewInput({ ...input,
+        reviewed_contract: { ...contract, ...changed } })).toThrow();
+    }
+  });
   it('preserves explicit port metadata and accepts a nullable legacy scope', () => {
     const result = parseContractReviewInput({
       ...input,

@@ -72,3 +72,39 @@ it('rejects malformed campaign history instead of rendering promoted state', () 
     winner_ids: [123],
   })).toThrow(/Invalid evolution campaign/);
 });
+
+it('runs one generation, freezes explicit finalists, then confirms without client fitness', async () => {
+  const candidateId = `cand_${'b'.repeat(32)}`;
+  const bodies: { action: string; body: unknown }[] = [];
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method !== 'POST') return Response.json({ items: [campaign], total: 1 });
+    const path = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const action = path.split('/').at(-1) ?? '';
+    if (typeof init.body !== 'string') throw new Error('Expected JSON body');
+    bodies.push({ action, body: JSON.parse(init.body) });
+    return Response.json({ campaign: { ...campaign, generation: 1,
+      status: action === 'generation' ? 'search_stopped' : action === 'finalists' ? 'finalists_frozen' : 'stopped',
+      search_stop_reason: 'candidate_budget_exhausted', stop_reason: action === 'confirm' ? 'confirmation_completed' : 'none',
+      evaluations: [{}], pareto_archive: [candidateId],
+      finalist_ids: action === 'generation' ? [] : [candidateId], winner_ids: [],
+    }, replayed: false });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  render(<EvolutionPanel specId="spec-one" />);
+  fireEvent.change(await screen.findByLabelText('Reviewed search seed'), { target: { value: candidateId } });
+  fireEvent.click(screen.getByRole('button', { name: 'Run next generation' }));
+  expect(await screen.findByText(/Generation recorded from server receipts/)).toBeTruthy();
+  fireEvent.click(screen.getByText('Choose finalists (0)'));
+  fireEvent.click(screen.getByRole('checkbox'));
+  fireEvent.click(screen.getByRole('button', { name: 'Freeze selected finalists' }));
+  expect(await screen.findByText(/Finalists frozen/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Run next generation' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm on locked holdout' }));
+  expect(await screen.findByText(/Confirmation recorded/)).toBeTruthy();
+  expect(bodies).toEqual([
+    { action: 'generation', body: { seed_candidate_id: candidateId } },
+    { action: 'finalists', body: { finalist_ids: [candidateId] } },
+    { action: 'confirm', body: {} },
+  ]);
+  expect(screen.getByRole('link', { name: 'Export campaign bundle' })).toBeTruthy();
+});

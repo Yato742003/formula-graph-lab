@@ -18,6 +18,9 @@ export const metadata: Metadata = {
   title: 'FormulaGraph Lab',
   description:
     'A temporal research graph for extracting, connecting, and validating equations from HTML papers.',
+  icons: {
+    icon: '/favicon.svg',
+  },
 };
 
 export default function RootLayout({

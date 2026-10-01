@@ -50,6 +50,9 @@ async function forward(request: Request, { params }: Context) {
   const isResearchCase = !isRead && collection === 'candidates' &&
     Boolean(identifier && /^cand_[a-f0-9]{32}$/.test(identifier)) &&
     action === 'research-case' && slug.length === 3;
+  const isProtocolReview = !isRead && collection === 'candidates' &&
+    Boolean(identifier && /^cand_[a-f0-9]{32}$/.test(identifier)) &&
+    action === 'research-case' && slug[3] === 'reviews' && slug.length === 4;
   const isReplayBundle = isRead && collection === 'candidates' &&
     Boolean(identifier && /^cand_[a-f0-9]{32}$/.test(identifier)) &&
     slug[2] === 'activities' && Boolean(slug[3] && /^act_[a-f0-9]{32}$/.test(slug[3])) &&
@@ -65,7 +68,13 @@ async function forward(request: Request, { params }: Context) {
     action === 'finalists' && slug.length === 3;
   const isEvolutionStop = !isRead && collection === 'evolution' && isEvolutionId &&
     action === 'stop' && slug.length === 3;
-  const validRoute = isCompile || isProposalReview || isProposalGenerate || isProposalCapabilities || isAdmission || isVerification || isNumericalFixture || isResearchCase || isReplayBundle || isReplayReport || isEvolutionReport || isEvolutionFinalists || isEvolutionStop || (
+  const isEvolutionGeneration = !isRead && collection === 'evolution' && isEvolutionId &&
+    action === 'generation' && slug.length === 3;
+  const isEvolutionConfirm = !isRead && collection === 'evolution' && isEvolutionId &&
+    action === 'confirm' && slug.length === 3;
+  const isEvolutionBundle = isRead && collection === 'evolution' && isEvolutionId &&
+    action === 'bundle' && slug.length === 3;
+  const validRoute = isCompile || isProposalReview || isProposalGenerate || isProposalCapabilities || isAdmission || isVerification || isNumericalFixture || isResearchCase || isProtocolReview || isReplayBundle || isReplayReport || isEvolutionReport || isEvolutionFinalists || isEvolutionStop || isEvolutionGeneration || isEvolutionConfirm || isEvolutionBundle || (
     collection === 'proposals'
       ? (isRead && slug.length === 1) || isProposalReview || isProposalGenerate || isProposalCapabilities
       : collection === 'evolution'
@@ -116,6 +125,9 @@ async function forward(request: Request, { params }: Context) {
         ? ['spec_id', 'mapping_id', 'transform', 'parent_candidate_id', 'proposal_id']
         : isEvolutionFinalists ? ['finalist_ids']
         : isEvolutionStop ? []
+        : isEvolutionGeneration ? ['seed_candidate_id']
+        : isEvolutionConfirm ? []
+        : isProtocolReview ? ['result_id', 'decision', 'notes']
         : isVerification ? []
         : isNumericalFixture ? ['seed']
         : isResearchCase ? []
@@ -166,7 +178,7 @@ async function forward(request: Request, { params }: Context) {
       },
       body: upstreamBody,
       redirect: 'manual',
-      signal: AbortSignal.timeout(isProposalGenerate ? 100_000 : isResearchCase ? 45_000 : isNumericalFixture ? 45_000 : 20_000),
+      signal: AbortSignal.timeout(isProposalGenerate ? 100_000 : isEvolutionConfirm ? 75_000 : isResearchCase || isEvolutionGeneration ? 45_000 : isNumericalFixture ? 45_000 : 20_000),
     });
     if (response.status < 200 || response.status >= 300 && response.status < 400) {
       await response.body?.cancel();

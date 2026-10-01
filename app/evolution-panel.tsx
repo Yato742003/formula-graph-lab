@@ -15,6 +15,7 @@ type EvolutionCampaignView = {
   paretoCount: number;
   finalistCount: number;
   winnerCount: number;
+  paretoIds: string[];
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -57,6 +58,7 @@ export function parseEvolutionCampaign(value: unknown): EvolutionCampaignView {
     paretoCount: value.pareto_archive.length,
     finalistCount: value.finalist_ids.length,
     winnerCount: value.winner_ids.length,
+    paretoIds: value.pareto_archive as string[],
   };
 }
 
@@ -73,6 +75,10 @@ export default function EvolutionPanel({ specId }: { specId: string }) {
   const [revision, setRevision] = useState(0);
   const startRetry = useRef<{ specId: string; key: string } | null>(null);
   const stopRetry = useRef<{ evolutionId: string; key: string } | null>(null);
+  const [seedId, setSeedId] = useState('');
+  const [finalists, setFinalists] = useState<string[]>([]);
+  const stepRetry = useRef<{ intent: string; key: string } | null>(null);
+  const stepInFlight = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -185,6 +191,41 @@ export default function EvolutionPanel({ specId }: { specId: string }) {
     }
   }
 
+  async function advance(action: 'generation' | 'finalists' | 'confirm') {
+    if (!campaign || busy || stepInFlight.current) return;
+    const body = action === 'generation'
+      ? campaign.generation === 0 ? { seed_candidate_id: seedId.trim() } : {}
+      : action === 'finalists' ? { finalist_ids: finalists } : {};
+    const intent = JSON.stringify([campaign.evolutionId, action, body]);
+    if (stepRetry.current?.intent !== intent) stepRetry.current = { intent, key: crypto.randomUUID() };
+    stepInFlight.current = true;
+    setBusy(true);
+    setNotice(action === 'confirm' ? 'Running locked holdout confirmation…' : 'Recording bounded search step…');
+    try {
+      const response = await fetch(`/api/research/evolution/${campaign.evolutionId}/${action}`, {
+        method: 'POST', headers: { 'content-type': 'application/json',
+          'x-idempotency-key': stepRetry.current.key }, body: JSON.stringify(body),
+      });
+      const raw: unknown = await response.json().catch(() => null);
+      if (!response.ok || !record(raw)) throw new Error(`Step rejected (${response.status}).`);
+      const saved = parseEvolutionCampaign(raw.campaign);
+      if (saved.evolutionId !== campaign.evolutionId || saved.specId !== specId) {
+        throw new Error('Campaign scope mismatch.');
+      }
+      stepRetry.current = null;
+      setCampaign(saved);
+      setFinalists([]);
+      setNotice(action === 'confirm' ? 'Confirmation recorded. Winners remain synthetic-protocol results only.'
+        : action === 'finalists' ? 'Finalists frozen. Search is closed; holdout can now run.'
+        : 'Generation recorded from server receipts. No browser fitness was submitted.');
+    } catch (error) {
+      setNotice(`${error instanceof Error ? error.message : 'Step failed.'} Retry keeps the same request key.`);
+    } finally {
+      stepInFlight.current = false;
+      setBusy(false);
+    }
+  }
+
   return (
     <section aria-label="Evolution campaign" className="rounded-xl border border-border/60 bg-card p-5 shadow-xs space-y-4">
       <header className="flex flex-wrap items-start justify-between gap-3 border-b border-border/40 pb-3">
@@ -229,13 +270,56 @@ export default function EvolutionPanel({ specId }: { specId: string }) {
       <div className="flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/5 p-3 text-xs text-amber-800 dark:text-amber-300">
         <ShieldAlert size={15} className="mt-0.5 shrink-0" />
         <p>
-          Synthetic diagnostics remain <code>empirical=not_run</code>. A candidate cannot enter Pareto selection without a current server-owned <code>can_enter_parent_pool</code> decision.
+          Unbound diagnostics remain <code>empirical=not_run</code>. Scoped search requires passed receipts and human review; holdout stays locked until finalists are frozen. No product-performance claim.
         </p>
       </div>
 
       <output aria-live="polite" className="block text-xs text-muted-foreground">{notice}</output>
 
+      {campaign?.status === 'active' && campaign.generation === 0 ? (
+        <label className="block space-y-1 text-xs">
+          <span>Reviewed search seed</span>
+          <input value={seedId} onChange={event => setSeedId(event.target.value)} disabled={busy}
+            aria-label="Reviewed search seed"
+            placeholder="cand_…" className="w-full rounded-lg border bg-background p-2 font-mono"
+            aria-describedby="evolution-seed-help" />
+          <span id="evolution-seed-help" className="block text-muted-foreground">Run search and review protocol scope in Proposals first.</span>
+        </label>
+      ) : null}
+      {campaign && ['active', 'search_stopped'].includes(campaign.status) && campaign.paretoIds.length > 0 ? (
+        <details className="rounded-lg border border-border/60 p-3 text-xs">
+          <summary>Choose finalists ({finalists.length})</summary>
+          <fieldset className="mt-3 space-y-2" disabled={busy}>
+            <legend className="sr-only">Pareto finalists</legend>
+            {campaign.paretoIds.map(id => (
+              <label key={id} className="flex items-center gap-2 break-all">
+                <input type="checkbox" checked={finalists.includes(id)}
+                  onChange={event => setFinalists(current => event.target.checked
+                    ? [...current, id] : current.filter(value => value !== id))} />
+                <code>{id}</code>
+              </label>
+            ))}
+          </fieldset>
+          <button type="button" disabled={busy || finalists.length === 0 || finalists.length > 4}
+            onClick={() => void advance('finalists')} className="mt-3 rounded-lg border px-3 py-2 disabled:opacity-50">
+            Freeze selected finalists
+          </button>
+        </details>
+      ) : null}
+
       <div className="flex flex-wrap items-center gap-2">
+        {campaign?.status === 'active' ? (
+          <button type="button" disabled={busy || (campaign.generation === 0 && !/^cand_[a-f0-9]{32}$/.test(seedId.trim()))}
+            onClick={() => void advance('generation')}
+            className="min-h-9 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50">
+            Run next generation
+          </button>
+        ) : campaign?.status === 'finalists_frozen' ? (
+          <button type="button" disabled={busy} onClick={() => void advance('confirm')}
+            className="min-h-9 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50">
+            Confirm on locked holdout
+          </button>
+        ) : null}
         {!campaign ? (
           <button
             type="button"
@@ -267,6 +351,10 @@ export default function EvolutionPanel({ specId }: { specId: string }) {
             <FileText size={12} />
             Open campaign report
           </a>
+        ) : null}
+        {campaign && campaign.comparedCount > 0 ? (
+          <a href={`/api/research/evolution/${campaign.evolutionId}/bundle`} target="_blank" rel="noreferrer"
+            className="min-h-9 rounded-lg border px-3 py-2 text-xs">Export campaign bundle</a>
         ) : null}
         <button
           type="button"

@@ -9,7 +9,7 @@ const sources = ['a', 'b'].map(id => ({ id: `eq-${id}`, paper_id: `paper-${id}`,
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('source-backed record creation', () => {
-  it('requires a human-entered contract and sends an append-only review', async () => {
+  it.each(['vector', 'function'])('sends an append-only reviewed %s feature map without changing its category', async category => {
     const equationId = '11111111-1111-4111-8111-111111111111';
     const requests: RequestInit[] = [];
     vi.stubGlobal('fetch', vi.fn(async (_input, init?: RequestInit) => {
@@ -28,7 +28,10 @@ describe('source-backed record creation', () => {
       target: { value: equationId },
     });
     fireEvent.change(screen.getByLabelText('Reviewed symbol'), { target: { value: 'x' } });
-    fireEvent.change(screen.getByLabelText('Category'), { target: { value: 'vector' } });
+    fireEvent.change(screen.getByLabelText('Category'), { target: { value: category } });
+    if (category === 'function') fireEvent.change(screen.getByLabelText('Feature-map output domain'), {
+      target: { value: 'strictly_positive_real' },
+    });
     fireEvent.change(screen.getByLabelText('Domain'), { target: { value: 'real' } });
     fireEvent.change(screen.getByLabelText('Shape JSON'), { target: { value: '[128]' } });
     fireEvent.change(screen.getByLabelText('Feature-map output rank'), { target: { value: '128' } });
@@ -45,12 +48,13 @@ describe('source-backed record creation', () => {
     await screen.findByText(/Record saved/);
     const payload = JSON.parse(requests[0].body as string);
     expect(payload.reviewed_contract).toMatchObject({
-      name: 'x', category: 'vector', domain: 'real', shape: [128], feature_rank: 128,
+      name: 'x', category, domain: 'real', shape: [128], feature_rank: 128,
       normalization: 'none', mask: 'none', causal: false,
       resource_class: 'not_applicable',
     });
     expect(new Headers(requests[0].headers).get('idempotency-key')).toBeTruthy();
     expect(payload).not.toHaveProperty('review_id');
+    expect(payload.reviewed_contract.feature_output_domain).toBe(category === 'function' ? 'strictly_positive_real' : undefined);
   });
 
   it('creates a paper citation with a section anchor and explicit direction', async () => {

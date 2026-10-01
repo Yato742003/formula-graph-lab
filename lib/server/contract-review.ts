@@ -36,6 +36,7 @@ const CONTRACT_FIELDS = new Set([
   'category',
   'shape',
   'feature_rank',
+  'feature_output_domain',
   'domain',
   'constraints',
   'scope',
@@ -50,6 +51,7 @@ export type ReviewedContractInput = {
   category: string;
   shape: Array<number | string> | null;
   feature_rank?: number | null;
+  feature_output_domain?: 'strictly_positive_real' | null;
   domain: string;
   constraints: string[];
   scope?: string;
@@ -229,9 +231,16 @@ function parseReviewedContract(
   const featureRank = contract.feature_rank;
   if (featureRank !== undefined && featureRank !== null &&
       (typeof featureRank !== 'number' || !Number.isInteger(featureRank) ||
-        featureRank < 1 || featureRank > 100000 || category !== 'vector')) {
-    throw new TypeError('Feature rank must be a bounded positive integer on a vector contract.');
+        featureRank < 1 || featureRank > 100000 || !['vector', 'function'].includes(category))) {
+    throw new TypeError('Feature rank must be a bounded positive integer on a feature-map contract.');
   }
+  const outputDomain = contract.feature_output_domain;
+  if (category === 'function' && featureRank != null) {
+    if (outputDomain !== 'strictly_positive_real' || domain !== 'real' ||
+        shape?.length !== 1 || typeof shape[0] !== 'number') {
+      throw new TypeError('A feature-map function needs real input shape and positive output domain.');
+    }
+  } else if (outputDomain != null) throw new TypeError('Output domain requires a ranked function.');
   const scope =
     contract.scope == null
       ? undefined
@@ -263,6 +272,7 @@ function parseReviewedContract(
     category,
     shape,
     ...(featureRank !== undefined ? { feature_rank: featureRank as number | null } : {}),
+    ...(outputDomain != null ? { feature_output_domain: outputDomain as 'strictly_positive_real' } : {}),
     domain,
     constraints: boundedStringArray(contract.constraints, 50, 500),
     ...(scope ? { scope } : {}),

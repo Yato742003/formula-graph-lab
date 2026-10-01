@@ -761,7 +761,13 @@ export default function EvidenceGraphViewport({
   const [disabledKinds, setDisabledKinds] = useState<Set<EvidenceEntityType>>(
     () => new Set<EvidenceEntityType>(),
   );
-  const activeFilterCount = disabledKinds.size + disabledRelations.size;
+  const [showIntraSectionDerivations, setShowIntraSectionDerivations] = useState(true);
+  const [showCrossSectionDerivations, setShowCrossSectionDerivations] = useState(true);
+  const activeFilterCount =
+    disabledKinds.size +
+    disabledRelations.size +
+    (!showIntraSectionDerivations ? 1 : 0) +
+    (!showCrossSectionDerivations ? 1 : 0);
 
   const toggleKind = useCallback(
     (kind: EvidenceEntityType, checked: boolean) => {
@@ -1003,101 +1009,112 @@ export default function EvidenceGraphViewport({
       const derivationColor = '#059669'; // Emerald derivation line
 
       // Intra-swimlane sequential derivation: Eq 0 -> Eq 1 -> Eq 2 (vertical straight down)
-      activeSectionIds.forEach((secId) => {
-        const eqIds = secEqMap.get(secId) ?? [];
-        for (let i = 0; i < eqIds.length - 1; i++) {
-          const srcId = eqIds[i];
-          const tgtId = eqIds[i + 1];
-          const pairKey = `${srcId}->${tgtId}`;
-          const revKey = `${tgtId}->${srcId}`;
-          if (!connectedPairs.has(pairKey) && !connectedPairs.has(revKey)) {
-            connectedPairs.add(pairKey);
-            const edgeId = `swimlane-seq-${srcId}-${tgtId}`;
-            const isHighlighted =
-              activeEdgeIds !== null &&
-              (activeEdgeIds.has(srcId) || activeEdgeIds.has(tgtId));
-            const isDimmed = activeEdgeIds !== null && !isHighlighted;
+      if (showIntraSectionDerivations) {
+        activeSectionIds.forEach((secId) => {
+          const eqIds = secEqMap.get(secId) ?? [];
+          for (let i = 0; i < eqIds.length - 1; i++) {
+            const srcId = eqIds[i];
+            const tgtId = eqIds[i + 1];
+            const pairKey = `${srcId}->${tgtId}`;
+            const revKey = `${tgtId}->${srcId}`;
+            if (!connectedPairs.has(pairKey) && !connectedPairs.has(revKey)) {
+              connectedPairs.add(pairKey);
+              const edgeId = `swimlane-seq-${srcId}-${tgtId}`;
+              const isHighlighted =
+                activeFocusId !== null &&
+                (activeFocusId === srcId || activeFocusId === tgtId);
+              const isDimmed = activeFocusId !== null && !isHighlighted;
 
-            resultEdges.push({
-              id: edgeId,
-              source: srcId,
-              target: tgtId,
-              sourceHandle: 'bottom',
-              targetHandle: 'top',
-              type: 'smoothstep',
-              markerEnd: {
-                type: MarkerType.ArrowClosed,
-                color: derivationColor,
-                width: 14,
-                height: 14,
-              },
-              selectable: true,
-              focusable: true,
-              zIndex: isHighlighted ? 20 : isDimmed ? 1 : 10,
-              style: {
-                stroke: derivationColor,
-                strokeWidth: isHighlighted ? 2.5 : isDimmed ? 0.9 : 2.0,
-                opacity: isDimmed ? 0.08 : 0.95,
-                transition: 'opacity 0.2s ease, stroke-width 0.2s ease',
-              },
-              ariaLabel: 'intra-section derivation',
-            });
+              resultEdges.push({
+                id: edgeId,
+                source: srcId,
+                target: tgtId,
+                sourceHandle: 'bottom',
+                targetHandle: 'top',
+                type: 'smoothstep',
+                markerEnd: {
+                  type: MarkerType.ArrowClosed,
+                  color: derivationColor,
+                  width: 14,
+                  height: 14,
+                },
+                selectable: true,
+                focusable: true,
+                zIndex: isHighlighted ? 20 : isDimmed ? 1 : 10,
+                style: {
+                  stroke: derivationColor,
+                  strokeWidth: isHighlighted ? 2.5 : isDimmed ? 0.9 : 2.0,
+                  opacity: isDimmed ? 0.08 : 0.95,
+                  transition: 'opacity 0.2s ease, stroke-width 0.2s ease',
+                },
+                ariaLabel: 'intra-section derivation',
+              });
+            }
           }
-        }
-      });
+        });
+      }
 
       // Cross-swimlane pipeline bridge: last Eq of Section K -> first Eq of Section K+1 (smooth horizontal bezier)
-      for (let s = 0; s < activeSectionIds.length - 1; s++) {
-        const currEqs = secEqMap.get(activeSectionIds[s]) ?? [];
-        const nextEqs = secEqMap.get(activeSectionIds[s + 1]) ?? [];
-        if (currEqs.length > 0 && nextEqs.length > 0) {
-          const lastEqId = currEqs[currEqs.length - 1];
-          const firstNextEqId = nextEqs[0];
-          const bridgeKey = `${lastEqId}->${firstNextEqId}`;
-          if (!connectedPairs.has(bridgeKey)) {
-            connectedPairs.add(bridgeKey);
-            const edgeId = `swimlane-bridge-${lastEqId}-${firstNextEqId}`;
-            const bridgeColor = '#0d9488'; // Teal
-            const isHighlighted =
-              activeEdgeIds !== null &&
-              (activeEdgeIds.has(lastEqId) || activeEdgeIds.has(firstNextEqId));
-            const isDimmed = activeEdgeIds !== null && !isHighlighted;
+      if (showCrossSectionDerivations) {
+        for (let s = 0; s < activeSectionIds.length - 1; s++) {
+          const currEqs = secEqMap.get(activeSectionIds[s]) ?? [];
+          const nextEqs = secEqMap.get(activeSectionIds[s + 1]) ?? [];
+          if (currEqs.length > 0 && nextEqs.length > 0) {
+            const lastEqId = currEqs[currEqs.length - 1];
+            const firstNextEqId = nextEqs[0];
+            const bridgeKey = `${lastEqId}->${firstNextEqId}`;
+            if (!connectedPairs.has(bridgeKey)) {
+              connectedPairs.add(bridgeKey);
+              const edgeId = `swimlane-bridge-${lastEqId}-${firstNextEqId}`;
+              const bridgeColor = '#0d9488'; // Teal
+              const isHighlighted =
+                activeFocusId !== null &&
+                (activeFocusId === lastEqId || activeFocusId === firstNextEqId);
+              const isDimmed = activeFocusId !== null && !isHighlighted;
 
-            const lastPos = nodePosMap.get(lastEqId);
-            const nextPos = nodePosMap.get(firstNextEqId);
-            const isRowWrap = Boolean(lastPos && nextPos && nextPos.x < lastPos.x);
+              const lastPos = nodePosMap.get(lastEqId);
+              const nextPos = nodePosMap.get(firstNextEqId);
+              const isRowWrap = Boolean(lastPos && nextPos && nextPos.x < lastPos.x);
 
-            resultEdges.push({
-              id: edgeId,
-              source: lastEqId,
-              target: firstNextEqId,
-              sourceHandle: isRowWrap ? 'bottom' : 'right',
-              targetHandle: isRowWrap ? 'top' : 'left',
-              type: isRowWrap ? 'smoothstep' : 'default',
-              markerEnd: {
-                type: MarkerType.ArrowClosed,
-                color: bridgeColor,
-                width: 15,
-                height: 15,
-              },
-              selectable: true,
-              focusable: true,
-              zIndex: isHighlighted ? 20 : isDimmed ? 1 : 12,
-              style: {
-                stroke: bridgeColor,
-                strokeWidth: isHighlighted ? 2.8 : isDimmed ? 0.9 : 2.2,
-                opacity: isDimmed ? 0.08 : 0.95,
-                transition: 'opacity 0.2s ease, stroke-width 0.2s ease',
-              },
-              ariaLabel: 'cross-section derivation bridge',
-            });
+              resultEdges.push({
+                id: edgeId,
+                source: lastEqId,
+                target: firstNextEqId,
+                sourceHandle: isRowWrap ? 'bottom' : 'right',
+                targetHandle: isRowWrap ? 'top' : 'left',
+                type: isRowWrap ? 'smoothstep' : 'default',
+                markerEnd: {
+                  type: MarkerType.ArrowClosed,
+                  color: bridgeColor,
+                  width: 15,
+                  height: 15,
+                },
+                selectable: true,
+                focusable: true,
+                zIndex: isHighlighted ? 20 : isDimmed ? 1 : 12,
+                style: {
+                  stroke: bridgeColor,
+                  strokeWidth: isHighlighted ? 2.8 : isDimmed ? 0.9 : 2.2,
+                  opacity: isDimmed ? 0.08 : 0.95,
+                  transition: 'opacity 0.2s ease, stroke-width 0.2s ease',
+                },
+                ariaLabel: 'cross-section derivation bridge',
+              });
+            }
           }
         }
       }
     }
 
     return resultEdges;
-  }, [baseLayoutNodes, visibleEdges, activeEdgeIds]);
+  }, [
+    baseLayoutNodes,
+    visibleEdges,
+    activeEdgeIds,
+    activeFocusId,
+    showIntraSectionDerivations,
+    showCrossSectionDerivations,
+  ]);
 
   const handleNodeClick = useCallback(
     (_event: React.MouseEvent, node: AnyFlowNode) => {
@@ -1270,6 +1287,33 @@ export default function EvidenceGraphViewport({
                 ))}
               </div>
             </fieldset>
+            <fieldset>
+              <legend>Derivation Flow</legend>
+              <div className="graph-filter-options">
+                <label htmlFor="filter-flow-intra">
+                  <Checkbox
+                    id="filter-flow-intra"
+                    name="filter_flow_intra"
+                    checked={showIntraSectionDerivations}
+                    onCheckedChange={(checked) =>
+                      setShowIntraSectionDerivations(checked === true)
+                    }
+                  />
+                  Intra-section derivations
+                </label>
+                <label htmlFor="filter-flow-cross">
+                  <Checkbox
+                    id="filter-flow-cross"
+                    name="filter_flow_cross"
+                    checked={showCrossSectionDerivations}
+                    onCheckedChange={(checked) =>
+                      setShowCrossSectionDerivations(checked === true)
+                    }
+                  />
+                  Cross-section bridges
+                </label>
+              </div>
+            </fieldset>
             <div className="graph-filter-footer">
               <span>
                 {visibleNodes.length}/{nodes.length} nodes · {visibleEdges.length}/{edges.length} relations
@@ -1281,6 +1325,8 @@ export default function EvidenceGraphViewport({
                 onClick={() => {
                   setDisabledRelations(new Set());
                   setDisabledKinds(new Set());
+                  setShowIntraSectionDerivations(true);
+                  setShowCrossSectionDerivations(true);
                 }}
                 disabled={activeFilterCount === 0}
               >
@@ -1434,6 +1480,7 @@ export default function EvidenceGraphViewport({
         )}
       </section>
 
+      {selectedId ? <a className="mobile-inspector-link" href="#formula-inspector">View selected evidence</a> : null}
       <ol
         className={`mobile-graph-list ${viewMode === '3d' ? 'is-hidden' : ''}`}
         aria-label="Evidence nodes"
