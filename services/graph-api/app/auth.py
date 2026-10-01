@@ -13,6 +13,15 @@ from typing import Annotated, Literal
 from fastapi import Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
+from app.security import (
+    MAX_PAPER_IMPORT_BYTES,
+    MAX_REQUEST_BODY_BYTES,
+    PayloadTooLargeError,
+    check_payload_size,
+    log_audit_event,
+    workspace_rate_limiter,
+)
+
 HUMAN_ROLES = {"researcher", "reviewer", "admin"}
 READ_PATHS = {
     "/v1/search",
@@ -101,6 +110,20 @@ async def require_service_claims(
         raise HTTPException(status_code=401, detail="Invalid service credentials.")
     if request.headers.getlist("authorization") != [authorization]:
         raise HTTPException(status_code=401, detail="Invalid service credentials.")
+    max_body_bytes = (
+        MAX_PAPER_IMPORT_BYTES
+        if request.url.path == "/v1/imports"
+        else MAX_REQUEST_BODY_BYTES
+    )
+    content_length_header = request.headers.get("content-length")
+    if content_length_header:
+        try:
+            cl = int(content_length_header)
+            check_payload_size(cl, max_bytes=max_body_bytes)
+        except PayloadTooLargeError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except ValueError:
+            pass
     try:
         version, payload, signature = provided.split(".")
         if version != "fgl1":
@@ -127,6 +150,7 @@ async def require_service_claims(
         if claims.method != request.method or claims.target != target:
             raise ValueError("Request target changed")
         raw_body = await request.body()
+        check_payload_size(len(raw_body), max_bytes=max_body_bytes)
         if claims.body_sha256 != hashlib.sha256(raw_body).hexdigest():
             raise ValueError("Request body changed")
         for header, value in (
@@ -142,7 +166,17 @@ async def require_service_claims(
         )
         if len(keys) > 1 or (keys[0] if keys else "") != claims.idempotency_key:
             raise ValueError("Idempotency key changed")
+    except PayloadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     except (ValueError, TypeError, UnicodeError, ValidationError) as exc:
+        log_audit_event(
+            "tamper_detected"
+            if any(k in str(exc).lower() for k in ("signature", "changed", "tampered"))
+            else "auth_failed",
+            actor_id=request.headers.get("x-fgl-actor-id"),
+            workspace_id=request.headers.get("x-fgl-workspace-id"),
+            details={"error": str(exc), "path": request.url.path},
+        )
         raise HTTPException(status_code=401, detail="Invalid service credentials.") from exc
     if claims.actor_role not in HUMAN_ROLES:
         raise HTTPException(status_code=403, detail="A human service role is required.")
@@ -158,6 +192,19 @@ async def require_service_claims(
         raise HTTPException(status_code=403, detail="Service operation denied.")
     if claims.service_role != required_role:
         raise HTTPException(status_code=403, detail="Service scope denied.")
+    allowed, retry_after = workspace_rate_limiter.check(claims.workspace_id)
+    if not allowed:
+        log_audit_event(
+            "quota_exceeded",
+            actor_id=claims.actor_id,
+            workspace_id=claims.workspace_id,
+            details={"retry_after": retry_after, "path": request.url.path},
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="Workspace quota exceeded. Please slow down.",
+            headers={"Retry-After": str(int(retry_after))},
+        )
     # A signed request cannot select another workspace through its payload/query.
     try:
         body = json.loads(raw_body) if raw_body else {}
@@ -168,6 +215,12 @@ async def require_service_claims(
         and "workspace_id" in body
         and body["workspace_id"] != claims.workspace_id
     ) or "workspace_id" in request.query_params:
+        log_audit_event(
+            "cross_workspace_denied",
+            actor_id=claims.actor_id,
+            workspace_id=claims.workspace_id,
+            details={"path": request.url.path},
+        )
         raise HTTPException(status_code=403, detail="Service workspace denied.")
     await consume_service_nonce(request, claims.jti, claims.exp)
     return claims

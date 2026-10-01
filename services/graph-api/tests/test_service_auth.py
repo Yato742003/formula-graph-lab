@@ -15,6 +15,7 @@ from app.auth import ServiceActor, require_human_service_actor, require_research
 from app.main import app, require_search_service
 from app.models import EvidenceSearchResponse
 from app.research_store import Neo4jResearchStore
+from app.security import workspace_rate_limiter
 from tests.service_auth_helpers import TEST_KEY, TEST_WORKSPACE, sign_request
 
 
@@ -41,6 +42,7 @@ def strict_auth(monkeypatch):
             return_value=EvidenceSearchResponse(hits=[], next_cursor=None, semantic_available=False)
         ),
     )
+    workspace_rate_limiter.reset()
     yield
     app.dependency_overrides.clear()
 
@@ -321,3 +323,43 @@ def test_token_without_actor_headers_still_uses_signed_actor_and_workspace(monke
     assert response.status_code == 200
     assert export.await_args.kwargs["workspace_id"] == TEST_WORKSPACE
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_payload_too_large_is_rejected_with_413():
+    client = TestClient(app)
+    body = search_body()
+    headers = sign_request("POST", "/v1/search", body, role="graph_read")
+    headers["content-length"] = str(3 * 1024 * 1024)
+    response = client.post("/v1/search", content=body, headers=headers)
+    assert response.status_code == 413
+    assert "exceeds limit" in response.json()["detail"]
+
+
+def test_workspace_rate_limiting_returns_429(monkeypatch):
+    monkeypatch.setattr(workspace_rate_limiter, "default_limit", 2)
+    client = TestClient(app)
+    body = search_body()
+    h1 = sign_request("POST", "/v1/search", body, role="graph_read")
+    assert client.post("/v1/search", content=body, headers=h1).status_code == 200
+    h2 = sign_request("POST", "/v1/search", body, role="graph_read")
+    assert client.post("/v1/search", content=body, headers=h2).status_code == 200
+    h3 = sign_request("POST", "/v1/search", body, role="graph_read")
+    resp = client.post("/v1/search", content=body, headers=h3)
+    assert resp.status_code == 429
+    assert resp.json()["detail"] == "Workspace quota exceeded. Please slow down."
+    assert "Retry-After" in resp.headers
+
+
+def test_tampered_request_triggers_audit_event(caplog):
+    import logging
+
+    body = search_body()
+    headers = sign_request("POST", "/v1/search", body, role="graph_read")
+    headers["x-fgl-actor-id"] = "tampered-actor"
+    with caplog.at_level(logging.WARNING, logger="fgl.audit"):
+        response = TestClient(app).post("/v1/search", content=body, headers=headers)
+    assert response.status_code == 401
+    audit_msgs = [r.message for r in caplog.records if r.message.startswith("AUDIT: ")]
+    assert len(audit_msgs) >= 1
+    assert "tamper_detected" in audit_msgs[0]
+

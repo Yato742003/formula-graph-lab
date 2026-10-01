@@ -141,7 +141,12 @@ from app.search import (
     SearchCursorCodec,
     SearchDataError,
 )
-from app.security import UnsafePaperUrl, normalize_arxiv_html_url
+from app.security import (
+    PayloadTooLargeError,
+    UnsafePaperUrl,
+    install_log_sanitizer,
+    normalize_arxiv_html_url,
+)
 from app.symbol_contracts import (
     ContractReview,
     ReviewedContractValue,
@@ -173,6 +178,7 @@ from app.worker_auth import (
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    install_log_sanitizer()
     required = ("NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD")
     values = {key: os.getenv(key) for key in required}
     store = None
@@ -236,6 +242,11 @@ app = FastAPI(
     docs_url="/docs" if os.getenv("APP_ENV", "development") != "production" else None,
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(PayloadTooLargeError)
+async def payload_too_large_handler(request: Request, exc: PayloadTooLargeError) -> JSONResponse:
+    return JSONResponse(status_code=413, content={"detail": str(exc)})
 
 
 def get_research_store(request: Request) -> Neo4jResearchStore:
