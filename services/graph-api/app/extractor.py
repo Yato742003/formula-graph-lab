@@ -149,6 +149,12 @@ def _assemble_math(
     return latex, [f[0] for f in fragments], method, min(f[2] for f in fragments)
 
 
+def _extract_prose_text(element: etree._Element) -> str:
+    # Exclude annotation tags to prevent duplicated math variables (e.g. K K, i i)
+    text_nodes = element.xpath(".//text()[not(ancestor::*[local-name()='annotation'])]")
+    return "".join(text_nodes)
+
+
 def _sections(
     root: etree._Element, paper_identity: str,
 ) -> tuple[list[ExtractedSection], dict[etree._Element, ExtractedSection]]:
@@ -160,7 +166,7 @@ def _sections(
             continue
         if any(a.tag in {"nav", "header", "dialog", "footer"} for a in heading.iterancestors()):
             continue
-        title = _clean_text(" ".join(heading.itertext()), limit=1000)
+        title = _clean_text(_extract_prose_text(heading), limit=1000)
         if not title:
             continue
         parent = heading.getparent()
@@ -203,7 +209,7 @@ def _sections(
         if active is not None:
             owners[node] = active
         if node.tag == "p" and active is not None:
-            paragraph = _clean_text(" ".join(node.itertext()), limit=None)
+            paragraph = _clean_text(_extract_prose_text(node), limit=None)
             if paragraph:
                 active.text += ("\n\n" if active.text else "") + paragraph
     return sections, owners
@@ -213,7 +219,7 @@ def _context(element: etree._Element, axis: str) -> str | None:
     candidates = element.xpath(
         f"{axis}::*[self::p or self::figcaption][normalize-space()][1]"
     )
-    return _clean_text(" ".join(candidates[0].itertext())) if candidates else None
+    return _clean_text(_extract_prose_text(candidates[0])) if candidates else None
 
 
 def extract_paper(html_text: str, source_url: str) -> ExtractedPaper:

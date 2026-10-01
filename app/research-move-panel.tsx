@@ -2120,16 +2120,11 @@ export default function ResearchMovePanel({
           <Title>{surface === 'reports' ? 'Saved evidence' : surface === 'workspace' ? 'Create research candidate' : 'Candidate builder'}</Title>
             <Description>
               {surface === 'reports'
-                ? 'Open a saved candidate to inspect scoped checks, replay evidence and export a bundle.'
-                : 'Explore one bounded transformation. The compiler records a hypothesis; independent checks and policy decisions remain separate.'}
+                ? 'Inspect saved candidate checks, evidence replay, and audit bundles.'
+                : 'The compiler records a hypothesis from a frozen objective and reviewed ports.'}
             </Description>
           </Header>
           <div className="research-move-content">
-            <p className="research-move-intro">
-              Compile a positive feature-map mixture from a frozen objective and
-              reviewed ports. This records a hypothesis; it does not prove
-              equivalence or run an experiment.
-            </p>
             <form
               onSubmit={(event) => {
                 event.preventDefault();

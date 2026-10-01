@@ -212,3 +212,20 @@ def test_deduplicates_repeated_rendering_of_the_same_display_equation() -> None:
     )
 
     assert len(paper.equations) == 1
+
+
+def test_extracts_prose_without_duplicated_math_annotations() -> None:
+    paper = extract_paper(
+        "<html><body><section id='S1'><h2>1 Preliminaries</h2>"
+        "<p>For anchor <math><semantics><mrow><mi>i</mi></mrow>"
+        "<annotation encoding='application/x-tex'>i</annotation></semantics></math>, "
+        "we parameterize <math><semantics><mrow><mi>K</mi></mrow>"
+        "<annotation encoding='application/x-tex'>K</annotation></semantics></math> primitives.</p>"
+        "<div id='S1.E1' class='ltx_equation'><math alttext='x=1'></math></div>"
+        "</section></body></html>",
+        "https://arxiv.org/html/2402.08954",
+    )
+
+    assert paper.sections[0].text == "For anchor i, we parameterize K primitives."
+    assert paper.equations[0].preceding_text == "For anchor i, we parameterize K primitives."
+

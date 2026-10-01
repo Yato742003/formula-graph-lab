@@ -1796,14 +1796,9 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
             </div>
           </details>
 
-          <div className="provenance-note">
-            <ShieldCheck size={18} />
-            <div>
-              <strong>Source-bound evidence</strong>
-              <p>
-                Every extracted fact retains its paper version and HTML anchor.
-              </p>
-            </div>
+          <div className="provenance-note" title="Every extracted fact retains its paper version and HTML anchor.">
+            <ShieldCheck size={14} className="text-primary shrink-0" />
+            <p>Source-bound provenance verified</p>
           </div>
         </aside>
 
@@ -2465,11 +2460,9 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                     </>
                   )}
                 </div>
-                <p className="source-context-text">{inspector.sourceText}</p>
-                <details className="source-context-details">
-                  <summary>Open full source context</summary>
-                  <p>{inspector.sourceText}</p>
-                </details>
+                {inspector.sourceText ? (
+                  <p className="source-context-text">{inspector.sourceText}</p>
+                ) : null}
               </section>
 
               <details className="inspector-section inspector-disclosure">
