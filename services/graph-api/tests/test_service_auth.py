@@ -363,3 +363,27 @@ def test_tampered_request_triggers_audit_event(caplog):
     assert len(audit_msgs) >= 1
     assert "tamper_detected" in audit_msgs[0]
 
+
+def test_ops_dashboard_and_job_recovery_endpoints():
+    client = TestClient(app)
+    path = "/v1/research/ops/dashboard"
+    headers = sign_request("GET", path)
+    response = client.get(path, headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] in ("ok", "degraded")
+    assert "subsystems" in data
+    assert "import" in data["subsystems"]
+    assert "checker" in data["subsystems"]
+    assert "worker" in data["subsystems"]
+    assert data["subsystems"]["checker"]["max_ram_bytes"] == 256 * 1024 * 1024
+
+    recover_path = "/v1/research/ops/jobs/recover"
+    post_headers = sign_request("POST", recover_path, b"{}")
+    rec_response = client.post(recover_path, content=b"{}", headers=post_headers)
+    assert rec_response.status_code == 200
+    rec_data = rec_response.json()
+    assert "recovered_count" in rec_data
+    assert "recovered_job_ids" in rec_data
+
+

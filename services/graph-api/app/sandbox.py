@@ -21,6 +21,7 @@ from app.paper_attention_worker import SEQUENCE_LENGTHS as PERFORMER_SEQUENCE_LE
 from app.research_case_worker import PROTOCOL_VERSION as RESEARCH_CASE_PROTOCOL_VERSION
 from app.research_case_worker import SEEDS as RESEARCH_CASE_SEEDS
 from app.research_case_worker import SEQUENCE_LENGTHS as RESEARCH_CASE_SEQUENCE_LENGTHS
+from app.security import worker_execution_limits
 
 MAX_INPUT_BYTES = 192 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024
@@ -71,18 +72,22 @@ def container_command(
         if worker_kind == "performer"
         else None
     )
+    limits = worker_execution_limits()
+    ram_mb = limits.ram_bytes // (1024 * 1024)
+    cpu_cores = limits.cpu_cores
+    effective_timeout_ms = min(timeout_ms, limits.timeout_ms)
     return [
         "docker", "run", "--name", name, "--pull=never", "-i",
         "--network=none", "--read-only", "--cap-drop=ALL",
         "--security-opt=no-new-privileges:true", "--user=65534:65534",
-        "--memory=256m", "--memory-swap=256m", "--cpus=1", "--pids-limit=16",
+        f"--memory={ram_mb}m", f"--memory-swap={ram_mb}m", f"--cpus={cpu_cores}", "--pids-limit=16",
         *([performer_cpu] if performer_cpu else []),
         "--ulimit=nofile=64:64", "--ulimit=core=0:0", "--ulimit=cpu=30:30",
         "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777",
         "--shm-size=4m", "--ipc=private", "--log-driver=none", "--workdir=/opt/worker",
         "--entrypoint=/usr/bin/timeout", image,
         # This daemon-side deadline survives controller death. No shell/model code.
-        "--signal=KILL", f"{timeout_ms / 1000:.3f}s",
+        "--signal=KILL", f"{effective_timeout_ms / 1000:.3f}s",
         "/usr/local/bin/python", "-B", "-m", worker_module,
     ]
 

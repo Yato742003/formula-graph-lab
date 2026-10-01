@@ -22,6 +22,7 @@ from app.formula_ast import (
     ast_node_count,
     parse_formula,
 )
+from app.security import worker_execution_limits
 from app.symbol_contracts import (
     ContractReview,
     SymbolContract,
@@ -332,12 +333,13 @@ def _combined_domain_status(left: str, right: str) -> str:
 def _posix_worker_limits() -> None:
     import resource
 
-    resource.setrlimit(resource.RLIMIT_AS, (MAX_WORKER_RAM_BYTES, MAX_WORKER_RAM_BYTES))
+    limits = worker_execution_limits()
+    resource.setrlimit(resource.RLIMIT_AS, (limits.ram_bytes, limits.ram_bytes))
     resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
 
 
 def _apply_windows_job_limits(
-    process: subprocess.Popen[str], max_bytes: int = MAX_WORKER_RAM_BYTES,
+    process: subprocess.Popen[str], max_bytes: int | None = None,
 ) -> object | None:
     if os.name != "nt":
         return None
@@ -385,8 +387,9 @@ def _apply_windows_job_limits(
             return None
         info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
         info.BasicLimitInformation.LimitFlags = 0x00000100 | 0x00000200 | 0x00002000
-        info.ProcessMemoryLimit = max_bytes
-        info.JobMemoryLimit = max_bytes
+        limit = max_bytes if max_bytes is not None else worker_execution_limits().ram_bytes
+        info.ProcessMemoryLimit = limit
+        info.JobMemoryLimit = limit
         if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
             kernel32.CloseHandle(job)
             return None
@@ -417,6 +420,7 @@ def _run_worker_payload(
     """Execute the fixed worker with CPU, RAM, output, and process isolation."""
     if timeout_ms < 10 or timeout_ms > 30_000:
         raise ValueError("Symbolic timeout must be between 10 and 30000 ms.")
+    timeout_ms = min(timeout_ms, worker_execution_limits().timeout_ms)
     worker_command = command or [sys.executable, "-m", "app.symbolic_worker"]
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     # ponytail: env allowlist, ceiling: host process group, upgrade: sandbox if untrusted workers.

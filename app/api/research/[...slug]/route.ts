@@ -28,7 +28,7 @@ async function forward(request: Request, { params }: Context) {
     return json({ code: 'UNKNOWN_RESEARCH_ROUTE' }, 404);
   }
   const [collection, identifier, action] = slug;
-  const collections = ['problems', 'lineage', 'compatibility', 'candidates', 'proposals', 'evolution'];
+  const collections = ['problems', 'lineage', 'compatibility', 'candidates', 'proposals', 'evolution', 'ops'];
   const isRead = request.method === 'GET';
   const isCompile = !isRead && collection === 'candidates' &&
     identifier === 'compile' && slug.length === 2;
@@ -75,7 +75,11 @@ async function forward(request: Request, { params }: Context) {
     action === 'confirm' && slug.length === 3;
   const isEvolutionBundle = isRead && collection === 'evolution' && isEvolutionId &&
     action === 'bundle' && slug.length === 3;
-  const validRoute = isCompile || isProposalReview || isProposalGenerate || isProposalCapabilities || isAdmission || isVerification || isNumericalFixture || isResearchCase || isProtocolReview || isReplayBundle || isReplayReport || isEvolutionReport || isEvolutionFinalists || isEvolutionStop || isEvolutionGeneration || isEvolutionConfirm || isEvolutionBundle || (
+  const isOps = collection === 'ops' && (
+    (isRead && identifier === 'dashboard' && slug.length === 2) ||
+    (!isRead && identifier === 'jobs' && action === 'recover' && slug.length === 3)
+  );
+  const validRoute = isOps || isCompile || isProposalReview || isProposalGenerate || isProposalCapabilities || isAdmission || isVerification || isNumericalFixture || isResearchCase || isProtocolReview || isReplayBundle || isReplayReport || isEvolutionReport || isEvolutionFinalists || isEvolutionStop || isEvolutionGeneration || isEvolutionConfirm || isEvolutionBundle || (
     collection === 'proposals'
       ? (isRead && slug.length === 1) || isProposalReview || isProposalGenerate || isProposalCapabilities
       : collection === 'evolution'
@@ -122,7 +126,9 @@ async function forward(request: Request, { params }: Context) {
       assertDeclaredLengthWithinLimit(request.headers, 64 * 1024);
       body = await readTextLimited(request.body, 64 * 1024);
       const input = JSON.parse(body);
-      const allowed = isCompile
+      const allowed = isOps
+        ? []
+        : isCompile
         ? ['spec_id', 'mapping_id', 'transform', 'parent_candidate_id', 'proposal_id']
         : isEvolutionFinalists ? ['finalist_ids']
         : isEvolutionStop ? []

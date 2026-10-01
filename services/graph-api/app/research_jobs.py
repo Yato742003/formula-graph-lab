@@ -9,7 +9,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
@@ -31,6 +31,7 @@ from app.research_case import (
 )
 from app.research_compiler import CompiledCandidate, _verify_candidate_identity
 from app.sandbox import IMAGE_ID
+from app.security import log_audit_event
 from app.worker_auth import WorkerPrincipal, configured_credentials
 
 
@@ -887,3 +888,87 @@ class ResearchQueue:
         )).single()
         if row is None:
             raise JobRejected("JOB_RESULT_REQUIRES_RECONCILIATION")
+
+    async def recover_stuck_jobs(self, now: int | None = None) -> dict[str, object]:
+        """Recovers jobs that crashed or timed out while queued or running."""
+        # ponytail: stuck-job recovery runs on-demand during ops health sweep,
+        # ceiling: scans active jobs in single transaction,
+        # upgrade: separate background sweeper cron in Phase 7.
+        current_now = int(time.time()) if now is None else now
+        if not getattr(self, "store", None) or not getattr(self.store, "driver", None):
+            return {
+                "recovered_count": 0,
+                "recovered_job_ids": [],
+                "recovered_at": datetime.now(UTC).isoformat(),
+            }
+        async with self.store.driver.session(database=self.store.database) as session:
+            return await session.execute_write(self._recover_stuck_jobs, current_now)
+
+    async def _recover_stuck_jobs(self, tx, now: int) -> dict[str, object]:
+        await self._lock(tx)
+        cursor = await tx.run(
+            "MATCH (j:ResearchJob) "
+            "WHERE j.state IN ['queued', 'running'] AND j.expires_at <= $now "
+            "SET j.state = 'failed', j.failure_reason = 'JOB_EXPIRED_OR_CRASHED', "
+            "j.recovered_at = $now "
+            "RETURN j.id AS id, j.workspace AS workspace, j.state AS state",
+            now=now,
+        )
+        records = [record async for record in cursor]
+        recovered_ids = [r["id"] for r in records]
+        for r in records:
+            log_audit_event(
+                "job_recovered",
+                workspace_id=r.get("workspace"),
+                details={"job_id": r.get("id"), "reason": "JOB_EXPIRED_OR_CRASHED"},
+            )
+        return {
+            "recovered_count": len(recovered_ids),
+            "recovered_job_ids": recovered_ids,
+            "recovered_at": datetime.now(UTC).isoformat(),
+        }
+
+    async def job_health_metrics(self, now: int | None = None) -> dict[str, object]:
+        """Provides job metrics for operations and health monitoring."""
+        current_now = int(time.time()) if now is None else now
+        if not getattr(self, "store", None) or not getattr(self.store, "driver", None):
+            return {
+                "total": 0,
+                "active_queued": 0,
+                "active_running": 0,
+                "finished": 0,
+                "failed": 0,
+                "stuck": 0,
+            }
+        async with self.store.driver.session(database=self.store.database) as session:
+            cursor = await session.run(
+                "MATCH (j:ResearchJob) "
+                "RETURN count(j) AS total, "
+                "sum(CASE WHEN j.state = 'queued' AND j.expires_at > $now "
+                "THEN 1 ELSE 0 END) AS active_queued, "
+                "sum(CASE WHEN j.state = 'running' AND j.expires_at > $now "
+                "THEN 1 ELSE 0 END) AS active_running, "
+                "sum(CASE WHEN j.state = 'finished' THEN 1 ELSE 0 END) AS finished, "
+                "sum(CASE WHEN j.state = 'failed' THEN 1 ELSE 0 END) AS failed, "
+                "sum(CASE WHEN j.state IN ['queued', 'running'] AND j.expires_at <= $now "
+                "THEN 1 ELSE 0 END) AS stuck",
+                now=current_now,
+            )
+            record = await cursor.single()
+            if not record:
+                return {
+                    "total": 0,
+                    "active_queued": 0,
+                    "active_running": 0,
+                    "finished": 0,
+                    "failed": 0,
+                    "stuck": 0,
+                }
+            return {
+                "total": int(record["total"] or 0),
+                "active_queued": int(record["active_queued"] or 0),
+                "active_running": int(record["active_running"] or 0),
+                "finished": int(record["finished"] or 0),
+                "failed": int(record["failed"] or 0),
+                "stuck": int(record["stuck"] or 0),
+            }

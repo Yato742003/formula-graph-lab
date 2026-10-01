@@ -183,3 +183,53 @@ async def test_admission_rejects_missing_or_changed_source_before_reserving_quot
     for extra in ({"fitness": 1}, {"tolerance": 1}, {"timeout_ms": True}, {"format": "python"}):
         with pytest.raises(JobRejected, match="INVALID_JOB_INPUT"):
             await queue.admit(ACTOR, **{**args, "payload": {**PAYLOAD, **extra}})
+
+
+@pytest.mark.asyncio
+async def test_job_recovery_fallback_without_driver():
+    queue = ResearchQueue(SimpleNamespace(driver=None), KEY)
+    report = await queue.recover_stuck_jobs()
+    assert report["recovered_count"] == 0
+    assert report["recovered_job_ids"] == []
+    metrics = await queue.job_health_metrics()
+    assert metrics == {
+        "total": 0,
+        "active_queued": 0,
+        "active_running": 0,
+        "finished": 0,
+        "failed": 0,
+        "stuck": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_recover_stuck_jobs_execution_and_audit(caplog):
+    import logging
+
+    queue = ResearchQueue(SimpleNamespace(driver=None), KEY)
+
+    class MockCursor:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not hasattr(self, "_yielded"):
+                self._yielded = True
+                return {"id": "stuck_job_1", "workspace": "ws_alpha", "state": "running"}
+            raise StopAsyncIteration
+
+        async def consume(self):
+            return None
+
+    class MockTx:
+        async def run(self, query, **kwargs):
+            return MockCursor()
+
+    with caplog.at_level(logging.WARNING, logger="fgl.audit"):
+        report = await queue._recover_stuck_jobs(MockTx(), now=5000)
+
+    assert report["recovered_count"] == 1
+    assert report["recovered_job_ids"] == ["stuck_job_1"]
+    audit_msgs = [r.message for r in caplog.records if r.message.startswith("AUDIT: ")]
+    assert any("job_recovered" in msg for msg in audit_msgs)
+

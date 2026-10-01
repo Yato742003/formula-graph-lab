@@ -717,6 +717,222 @@ button {
   }
 }
 
+/* --- Operations & Health Dashboard (ui-craft Command layout) --- */
+.ops-dashboard {
+  width: min(1080px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 24px 0 48px;
+}
+
+.ops-hero-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  margin-bottom: 16px;
+}
+
+.ops-hero-status.is-degraded {
+  border-color: color-mix(in oklab, #f59e0b 40%, var(--border));
+  background: color-mix(in oklab, #f59e0b 6%, var(--card));
+}
+
+.ops-hero-status.is-ok {
+  border-color: color-mix(in oklab, #10b981 35%, var(--border));
+  background: color-mix(in oklab, #10b981 5%, var(--card));
+}
+
+.ops-metric-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.ops-metric-tile {
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+}
+
+.ops-metric-tile-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+
+.ops-metric-tile-val {
+  font-family: var(--font-geist-mono, monospace);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.ops-metric-tile-sub {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  margin-top: 2px;
+}
+
+.ops-subsystems-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+}
+
+.ops-card {
+  padding: 18px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: border-color 150ms ease;
+}
+
+.ops-card:hover {
+  border-color: color-mix(in oklab, var(--foreground) 20%, var(--border));
+}
+
+.ops-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.ops-card-title {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--foreground);
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ops-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ops-pill.pill-healthy {
+  background: color-mix(in oklab, #10b981 14%, var(--card));
+  color: #059669;
+}
+
+.ops-pill.pill-degraded {
+  background: color-mix(in oklab, #f59e0b 14%, var(--card));
+  color: #d97706;
+}
+
+.ops-card-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+  margin: 0;
+}
+
+.ops-dl {
+  display: grid;
+  gap: 7px;
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+
+.ops-dl-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 5px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+}
+
+.ops-dl-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.ops-dl-row dt {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.ops-dl-row dd {
+  margin: 0;
+  font-family: var(--font-geist-mono, monospace);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.ops-recover-btn {
+  margin-top: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.ops-recover-btn:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: color-mix(in oklab, var(--primary) 30%, var(--border));
+}
+
+.ops-recover-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.ops-recover-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+@media (max-width: 820px) {
+  .ops-metric-strip {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .ops-subsystems-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 500px) {
+  .ops-metric-strip {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 600px) {
   .standalone-topbar-actions {
     gap: 3px;

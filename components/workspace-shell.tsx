@@ -1,7 +1,7 @@
 'use client';
 
 import { useSyncExternalStore, type ReactNode } from 'react';
-import { BookOpen, Network, ShieldCheck, FileCode2, Sparkles, FileText } from 'lucide-react';
+import { Activity, BookOpen, Network, ShieldCheck, FileCode2, Sparkles, FileText } from 'lucide-react';
 
 const stages = [
   { href: '/graph', label: 'Graph', icon: Network },
@@ -70,6 +70,7 @@ export function WorkspaceShell({
 }) {
   const { pathname, params } = useWorkspaceLocation();
   const helpHref = withContext('/help', params);
+  const opsHref = withContext('/ops', params);
 
   return (
     <main className={`standalone-stage-page ${className}`.trim()}>
@@ -79,6 +80,10 @@ export function WorkspaceShell({
           <div><p className="brand-name">FormulaGraph</p><p className="brand-suffix">LAB / 01</p></div>
         </div>
         <div className="standalone-topbar-actions">
+          <a className="workspace-help-link" href={opsHref} aria-label="Open Operations dashboard" aria-current={pathname === '/ops' ? 'page' : undefined}>
+            <Activity size={14} aria-hidden="true" />
+            Ops
+          </a>
           <a className="workspace-help-link" href={helpHref} aria-label="Open FormulaGraph help" aria-current={pathname === '/help' ? 'page' : undefined}>
             <BookOpen size={14} aria-hidden="true" />
             Help

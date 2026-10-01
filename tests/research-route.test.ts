@@ -731,3 +731,38 @@ it('exports only an authenticated candidate activity replay report', async () =>
   expect(invalid.status).toBe(404);
   expect(fetcher).not.toHaveBeenCalled();
 });
+
+it('forwards ops dashboard and job recovery requests with workspace authentication', async () => {
+  mocks.user.mockResolvedValue({ userId: 'user-1' });
+  mocks.owned.mockResolvedValue(true);
+  const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes('/ops/dashboard')) {
+      return Response.json({ status: 'ok', subsystems: { import: { status: 'healthy' } } });
+    }
+    return Response.json({ recovered_count: 2, recovered_job_ids: ['job-1', 'job-2'] });
+  });
+  vi.stubGlobal('fetch', fetcher);
+
+  const dashRes = await GET(
+    new Request('https://app.test/api/research/ops/dashboard'),
+    context(['ops', 'dashboard']),
+  );
+  expect(dashRes.status).toBe(200);
+  const dashCall = fetcher.mock.calls[0];
+  if (!dashCall) throw new Error('Dashboard call was not forwarded');
+  expect((dashCall[0] as URL).pathname).toBe('/v1/research/ops/dashboard');
+
+  const recRes = await POST(
+    new Request('https://app.test/api/research/ops/jobs/recover', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-idempotency-key': 'recover-step-1' },
+      body: '{}',
+    }),
+    context(['ops', 'jobs', 'recover']),
+  );
+  expect(recRes.status).toBe(200);
+  const recCall = fetcher.mock.calls[1];
+  if (!recCall) throw new Error('Recovery call was not forwarded');
+  expect((recCall[0] as URL).pathname).toBe('/v1/research/ops/jobs/recover');
+});

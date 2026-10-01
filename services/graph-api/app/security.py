@@ -7,6 +7,7 @@ import math
 import os
 import re
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlsplit, urlunsplit
 
@@ -15,7 +16,8 @@ class UnsafePaperUrl(ValueError):
     """Raised when a user-provided paper URL is outside the ingestion policy."""
 
 
-_ALLOWED_HOSTS = {"arxiv.org", "export.arxiv.org"}
+ALLOWED_PAPER_HOSTS = ("arxiv.org", "export.arxiv.org")
+_ALLOWED_HOSTS = set(ALLOWED_PAPER_HOSTS)
 _MODERN_ARXIV_ID = re.compile(r"^(?P<id>\d{4}\.\d{4,5})(?P<version>v\d+)?$")
 
 
@@ -80,6 +82,46 @@ def check_payload_size(
         raise PayloadTooLargeError(
             f"Payload size {content_length} exceeds limit of {max_bytes} bytes."
         )
+
+
+DEFAULT_WORKER_RAM_BYTES = 256 * 1024 * 1024  # 256 MB
+MAX_WORKER_RAM_BYTES = 512 * 1024 * 1024  # 512 MB ceiling
+DEFAULT_WORKER_TIMEOUT_MS = 10_000  # 10s
+MAX_WORKER_TIMEOUT_MS = 30_000  # 30s ceiling
+
+
+@dataclass(frozen=True)
+class WorkerLimits:
+    ram_bytes: int
+    timeout_ms: int
+    cpu_cores: int
+
+
+def worker_execution_limits() -> WorkerLimits:
+    """Returns runtime compute/RAM/timeout execution caps for workers."""
+    try:
+        ram_mb = int(os.getenv("FGL_WORKER_RAM_LIMIT_MB", "256"))
+    except ValueError:
+        ram_mb = 256
+    ram_mb = max(64, min(ram_mb, 512))
+
+    try:
+        timeout_ms = int(os.getenv("FGL_WORKER_TIMEOUT_MS", "10000"))
+    except ValueError:
+        timeout_ms = 10_000
+    timeout_ms = max(1_000, min(timeout_ms, 30_000))
+
+    try:
+        cpu_cores = int(os.getenv("FGL_WORKER_CPU_CORES", "1"))
+    except ValueError:
+        cpu_cores = 1
+    cpu_cores = max(1, min(cpu_cores, 2))
+
+    return WorkerLimits(
+        ram_bytes=ram_mb * 1024 * 1024,
+        timeout_ms=timeout_ms,
+        cpu_cores=cpu_cores,
+    )
 
 
 class WorkspaceRateLimiter:

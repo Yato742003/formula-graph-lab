@@ -14,6 +14,7 @@ from app.security import (
     install_log_sanitizer,
     log_audit_event,
     normalize_arxiv_html_url,
+    worker_execution_limits,
 )
 
 
@@ -184,3 +185,30 @@ def test_install_log_sanitizer_attaches_to_all_relevant_loggers() -> None:
         f for f in logging.getLogger("fgl.audit").filters if isinstance(f, SensitiveDataFilter)
     ]
     assert len(audit_filters) >= 1
+
+
+def test_worker_execution_limits_defaults_and_clamping(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FGL_WORKER_RAM_LIMIT_MB", raising=False)
+    monkeypatch.delenv("FGL_WORKER_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("FGL_WORKER_CPU_CORES", raising=False)
+    limits = worker_execution_limits()
+    assert limits.ram_bytes == 256 * 1024 * 1024
+    assert limits.timeout_ms == 10_000
+    assert limits.cpu_cores == 1
+
+    monkeypatch.setenv("FGL_WORKER_RAM_LIMIT_MB", "1024")
+    monkeypatch.setenv("FGL_WORKER_TIMEOUT_MS", "60000")
+    monkeypatch.setenv("FGL_WORKER_CPU_CORES", "8")
+    clamped = worker_execution_limits()
+    assert clamped.ram_bytes == 512 * 1024 * 1024
+    assert clamped.timeout_ms == 30_000
+    assert clamped.cpu_cores == 2
+
+    monkeypatch.setenv("FGL_WORKER_RAM_LIMIT_MB", "16")
+    monkeypatch.setenv("FGL_WORKER_TIMEOUT_MS", "100")
+    monkeypatch.setenv("FGL_WORKER_CPU_CORES", "0")
+    min_clamped = worker_execution_limits()
+    assert min_clamped.ram_bytes == 64 * 1024 * 1024
+    assert min_clamped.timeout_ms == 1_000
+    assert min_clamped.cpu_cores == 1
+

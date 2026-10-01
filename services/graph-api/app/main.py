@@ -142,10 +142,14 @@ from app.search import (
     SearchDataError,
 )
 from app.security import (
+    ALLOWED_PAPER_HOSTS,
+    MAX_PAPER_IMPORT_BYTES,
+    MAX_REQUEST_BODY_BYTES,
     PayloadTooLargeError,
     UnsafePaperUrl,
     install_log_sanitizer,
     normalize_arxiv_html_url,
+    worker_execution_limits,
 )
 from app.symbol_contracts import (
     ContractReview,
@@ -741,6 +745,91 @@ async def create_problem_spec(
         status_code=200 if replayed else 201,
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.get("/v1/research/ops/dashboard")
+async def ops_dashboard(
+    _auth_ctx: Annotated[tuple[ServiceActor, str], Depends(require_research_service_actor)],
+    request: Request,
+) -> dict[str, object]:
+    queue = getattr(request.app.state, "research_queue", None)
+    if queue is None:
+        try:
+            store = getattr(request.app.state, "evidence_store", None)
+            key = configured_queue_key()
+            if store is not None:
+                queue = ResearchQueue(store, key)
+        except Exception:
+            queue = None
+
+    job_metrics = (
+        await queue.job_health_metrics()
+        if queue is not None
+        else {
+            "total": 0,
+            "active_queued": 0,
+            "active_running": 0,
+            "finished": 0,
+            "failed": 0,
+            "stuck": 0,
+        }
+    )
+
+    limits = worker_execution_limits()
+    image = os.getenv("FGL_SANDBOX_IMAGE", "")
+    status = "degraded" if job_metrics.get("stuck", 0) > 0 else "ok"
+
+    return {
+        "status": status,
+        "checked_at": datetime.now(UTC).isoformat(),
+        "subsystems": {
+            "import": {
+                "status": "ok",
+                "max_body_bytes": MAX_PAPER_IMPORT_BYTES,
+                "allowed_hosts": list(ALLOWED_PAPER_HOSTS),
+            },
+            "checker": {
+                "status": "ok",
+                "max_ram_bytes": limits.ram_bytes,
+                "max_timeout_ms": limits.timeout_ms,
+                "cpu_cores": limits.cpu_cores,
+            },
+            "worker": {
+                "status": "ok" if bool(image) else "local_fallback",
+                "sandbox_image": image or "none",
+                "metrics": job_metrics,
+            },
+        },
+        "quotas": {
+            "request_body_cap_bytes": MAX_REQUEST_BODY_BYTES,
+            "workspace_rate_limit_rpm": 120,
+        },
+    }
+
+
+@app.post("/v1/research/ops/jobs/recover")
+async def ops_recover_jobs(
+    _auth_ctx: Annotated[tuple[ServiceActor, str], Depends(require_research_service_actor)],
+    request: Request,
+) -> dict[str, object]:
+    queue = getattr(request.app.state, "research_queue", None)
+    if queue is None:
+        try:
+            store = getattr(request.app.state, "evidence_store", None)
+            key = configured_queue_key()
+            if store is not None:
+                queue = ResearchQueue(store, key)
+        except Exception:
+            queue = None
+
+    if queue is None:
+        return {
+            "recovered_count": 0,
+            "recovered_job_ids": [],
+            "recovered_at": datetime.now(UTC).isoformat(),
+        }
+
+    return await queue.recover_stuck_jobs()
 
 
 @app.get("/v1/research/problems")
