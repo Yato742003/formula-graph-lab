@@ -17,6 +17,7 @@ import {
 } from '@/lib/research-view';
 
 import {
+  Activity,
   AlertTriangle,
   ArrowRight,
   BookOpenText,
@@ -644,6 +645,7 @@ function LineageSourceRefs({
 export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProps) {
   const { params: workspaceParams } = useWorkspaceLocation();
   const helpHref = withContext('/help', workspaceParams);
+  const opsHref = withContext('/ops', workspaceParams);
   const [selectedId, setSelectedId] = useState<string | null>('scaled');
   const [isImporting, setIsImporting] = useState(false);
   const [imported, setImported] = useState<WorkspaceImportResponse | null>(
@@ -1420,6 +1422,10 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
         </div>
 
         <div className="top-actions">
+          <a className="workspace-help-link" href={opsHref} aria-label="Open Operations dashboard">
+            <Activity size={16} aria-hidden="true" />
+            <span>Ops</span>
+          </a>
           <a className="workspace-help-link" href={helpHref} aria-label="Open FormulaGraph help">
             <BookOpenText size={16} aria-hidden="true" />
             <span>Help</span>

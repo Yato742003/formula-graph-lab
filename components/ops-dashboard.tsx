@@ -353,8 +353,8 @@ export function OpsDashboard() {
                 <HardDrive size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
                 Import Guard
               </h2>
-              <span className={`ops-pill pill-${importStatus}`}>
-                {importStatus}
+              <span className={`ops-pill pill-${importStatus === 'degraded' ? 'degraded' : 'healthy'}`}>
+                {importStatus === 'ok' ? 'Healthy' : importStatus}
               </span>
             </div>
             <p className="ops-card-desc">
@@ -383,8 +383,8 @@ export function OpsDashboard() {
                 <Cpu size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
                 Checker Execution Bounds
               </h2>
-              <span className={`ops-pill pill-${checkerStatus}`}>
-                {checkerStatus}
+              <span className={`ops-pill pill-${checkerStatus === 'degraded' ? 'degraded' : 'healthy'}`}>
+                {checkerStatus === 'ok' ? 'Healthy' : checkerStatus}
               </span>
             </div>
             <p className="ops-card-desc">
@@ -417,8 +417,8 @@ export function OpsDashboard() {
                 <Layers size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
                 Job Queue &amp; Recovery
               </h2>
-              <span className={`ops-pill pill-${workerStatus}`}>
-                {workerStatus}
+              <span className={`ops-pill pill-${stuckJobs > 0 ? 'degraded' : 'healthy'}`}>
+                {workerStatus === 'local_fallback' ? 'Host Isolated' : stuckJobs > 0 ? 'Degraded' : 'Healthy'}
               </span>
             </div>
             <p className="ops-card-desc">
@@ -494,8 +494,8 @@ export function OpsDashboard() {
                 <ShieldCheck size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
                 Quotas &amp; Sanitization
               </h2>
-              <span className={`ops-pill pill-${quotasStatus}`}>
-                {quotasStatus}
+              <span className={`ops-pill pill-${quotasStatus === 'degraded' ? 'degraded' : 'healthy'}`}>
+                {quotasStatus === 'ok' ? 'Healthy' : quotasStatus}
               </span>
             </div>
             <p className="ops-card-desc">
