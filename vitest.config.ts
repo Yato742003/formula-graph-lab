@@ -6,6 +6,7 @@ export default defineConfig({
     alias: {
       '@': fileURLToPath(new URL('.', import.meta.url)),
       'next/link': fileURLToPath(new URL('./node_modules/vinext/dist/shims/link.js', import.meta.url)),
+      'next/server': fileURLToPath(new URL('./node_modules/vinext/dist/shims/server.js', import.meta.url)),
     },
   },
   test: {
