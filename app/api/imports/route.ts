@@ -1,5 +1,6 @@
 import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { getD1 } from '@/db';
+import { isSameOriginRequest } from '@/lib/server/request-origin';
 import { env } from 'cloudflare:workers';
 import { normalizeArxivHtmlUrl, PaperUrlError } from '@/lib/paper-url';
 import {
@@ -31,7 +32,7 @@ export async function POST(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return json({ code: 'AUTH_REQUIRED' }, 401);
 
-  if (request.headers.get('sec-fetch-site') === 'cross-site') {
+  if (!isSameOriginRequest(request)) {
     return json({ code: 'CROSS_SITE_REQUEST_REJECTED' }, 403);
   }
   const mediaType = request.headers

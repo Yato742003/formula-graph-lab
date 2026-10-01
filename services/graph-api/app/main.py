@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from functools import partial
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
 from starlette.concurrency import run_in_threadpool
@@ -37,7 +37,7 @@ from app.evolution import (
 )
 from app.evolution_runner import confirm_finalists, run_generation
 from app.extractor import PaperExtractionError, extract_paper
-from app.fetcher import PaperFetchError, fetch_paper_html
+from app.fetcher import MAX_HTML_BYTES, PaperFetchError, fetch_paper_html
 from app.formula_ast import FormulaParseError, parse_formula
 from app.graph_store import GraphitiResearchStore
 from app.lineage import (
@@ -146,6 +146,7 @@ from app.security import (
     MAX_PAPER_IMPORT_BYTES,
     MAX_REQUEST_BODY_BYTES,
     PayloadTooLargeError,
+    RequestBodyLimitMiddleware,
     UnsafePaperUrl,
     install_log_sanitizer,
     normalize_arxiv_html_url,
@@ -246,6 +247,7 @@ app = FastAPI(
     docs_url="/docs" if os.getenv("APP_ENV", "development") != "production" else None,
     lifespan=lifespan,
 )
+app.add_middleware(RequestBodyLimitMiddleware)
 
 
 @app.exception_handler(PayloadTooLargeError)
@@ -749,9 +751,11 @@ async def create_problem_spec(
 
 @app.get("/v1/research/ops/dashboard")
 async def ops_dashboard(
-    _auth_ctx: Annotated[tuple[ServiceActor, str], Depends(require_research_service_actor)],
+    auth_ctx: Annotated[tuple[ServiceActor, str], Depends(require_research_service_actor)],
     request: Request,
+    response: Response,
 ) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
     queue = getattr(request.app.state, "research_queue", None)
     if queue is None:
         try:
@@ -762,22 +766,16 @@ async def ops_dashboard(
         except Exception:
             queue = None
 
-    job_metrics = (
-        await queue.job_health_metrics()
-        if queue is not None
-        else {
-            "total": 0,
-            "active_queued": 0,
-            "active_running": 0,
-            "finished": 0,
-            "failed": 0,
-            "stuck": 0,
-        }
-    )
+    _, workspace_id = auth_ctx
+    job_metrics = None
+    if queue is not None:
+        # Missing telemetry stays unavailable, never a healthy zero.
+        with suppress(JobRejected, Neo4jError, ServiceUnavailable, OSError):
+            job_metrics = await queue.job_health_metrics(workspace_id)
 
     limits = worker_execution_limits()
     image = os.getenv("FGL_SANDBOX_IMAGE", "")
-    status = "degraded" if job_metrics.get("stuck", 0) > 0 else "ok"
+    status = "degraded" if job_metrics is None or job_metrics.get("stuck", 0) > 0 else "ok"
     quotas_info = {
         "status": "ok",
         "request_body_cap_bytes": MAX_REQUEST_BODY_BYTES,
@@ -788,16 +786,17 @@ async def ops_dashboard(
 
     return {
         "status": status,
+        "workspace_id": workspace_id,
         "checked_at": datetime.now(UTC).isoformat(),
         "subsystems": {
             "import": {
-                "status": "ok",
+                "status": "configured",
                 "max_body_bytes": MAX_PAPER_IMPORT_BYTES,
-                "max_html_bytes": MAX_PAPER_IMPORT_BYTES,
+                "max_html_bytes": MAX_HTML_BYTES,
                 "allowed_hosts": list(ALLOWED_PAPER_HOSTS),
             },
             "checker": {
-                "status": "ok",
+                "status": "configured",
                 "max_ram_bytes": limits.ram_bytes,
                 "ram_limit_mb": limits.ram_bytes // (1024 * 1024),
                 "max_timeout_ms": limits.timeout_ms,
@@ -806,15 +805,17 @@ async def ops_dashboard(
                 "sandbox_available": bool(image),
             },
             "worker": {
-                "status": "ok" if bool(image) else "local_fallback",
+                "status": "unavailable" if job_metrics is None else (
+                    "degraded" if job_metrics.get("stuck", 0) > 0 else "configured"
+                ),
                 "sandbox_image": image or "none",
                 "sandbox_available": bool(image),
                 "metrics": job_metrics,
-                "active_queued": job_metrics.get("active_queued", 0),
-                "active_running": job_metrics.get("active_running", 0),
-                "finished_jobs": job_metrics.get("finished", 0),
-                "failed_jobs": job_metrics.get("failed", 0),
-                "stuck_jobs": job_metrics.get("stuck", 0),
+                "active_queued": job_metrics.get("active_queued") if job_metrics else None,
+                "active_running": job_metrics.get("active_running") if job_metrics else None,
+                "finished_jobs": job_metrics.get("finished") if job_metrics else None,
+                "failed_jobs": job_metrics.get("failed") if job_metrics else None,
+                "stuck_jobs": job_metrics.get("stuck") if job_metrics else None,
             },
             "quotas": quotas_info,
         },
@@ -824,9 +825,11 @@ async def ops_dashboard(
 
 @app.post("/v1/research/ops/jobs/recover")
 async def ops_recover_jobs(
-    _auth_ctx: Annotated[tuple[ServiceActor, str], Depends(require_research_service_actor)],
+    auth_ctx: Annotated[tuple[ServiceActor, str], Depends(require_research_service_actor)],
     request: Request,
+    response: Response,
 ) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
     queue = getattr(request.app.state, "research_queue", None)
     if queue is None:
         try:
@@ -838,13 +841,14 @@ async def ops_recover_jobs(
             queue = None
 
     if queue is None:
-        return {
-            "recovered_count": 0,
-            "recovered_job_ids": [],
-            "recovered_at": datetime.now(UTC).isoformat(),
-        }
+        raise HTTPException(503, "Research queue unavailable.")
 
-    return await queue.recover_stuck_jobs()
+    try:
+        return await queue.recover_stuck_jobs(auth_ctx[1])
+    except JobRejected as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    except (Neo4jError, ServiceUnavailable, OSError) as exc:
+        raise HTTPException(503, "Research queue unavailable.") from exc
 
 
 @app.get("/v1/research/problems")

@@ -75,6 +75,39 @@ async def test_atomic_quota_claim_and_persisted_replay(queue):
     assert not any(secret in rows[0]["envelope"] for secret in ("<html", "formula_a", "qqqqqq"))
 
 
+async def test_ops_metrics_and_recovery_cannot_read_or_mutate_another_workspace(queue):
+    q, actor, target = queue
+    own = next(iter(actor.workspaces))
+    foreign = "other-" + uuid4().hex
+    foreign_job = str(uuid4())
+    ticket = await admit(q, actor, target, "recover-own")
+    try:
+        await q.store.driver.execute_query(
+            "CREATE (:ResearchJob {id:$id, workspace:$workspace, state:'running', "
+            "expires_at:1, reserved_ms:3000})",
+            id=foreign_job, workspace=foreign, database_=q.store.database,
+        )
+        metrics = await q.job_health_metrics(own, now=ticket.envelope.expires_at + 1)
+        assert metrics["total"] == 1 and metrics["stuck"] == 1
+        report = await q.recover_stuck_jobs(own, now=ticket.envelope.expires_at + 1)
+        assert report["recovered_job_ids"] == [ticket.envelope.job_id]
+        again = await q.recover_stuck_jobs(own, now=ticket.envelope.expires_at + 2)
+        assert again["recovered_count"] == 0
+        rows, _, _ = await q.store.driver.execute_query(
+            "MATCH (j:ResearchJob) WHERE j.id IN $ids "
+            "RETURN j.id AS id, j.state AS state, j.reserved_ms AS reserved_ms",
+            ids=[ticket.envelope.job_id, foreign_job], database_=q.store.database,
+        )
+        by_id = {r["id"]: r for r in rows}
+        assert by_id[foreign_job]["state"] == "running"
+        assert by_id[ticket.envelope.job_id]["state"] == "failed"
+        assert by_id[ticket.envelope.job_id]["reserved_ms"] == ticket.envelope.reserved_ms
+    finally:
+        await q.store.driver.execute_query(
+            "MATCH (j:ResearchJob {id:$id}) DELETE j", id=foreign_job, database_=q.store.database,
+        )
+
+
 async def test_hourly_budget_survives_completion_and_retry(queue):
     q, actor, target = queue
     for i in range(4):

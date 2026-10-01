@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 
@@ -6,6 +7,7 @@ import pytest
 from app.security import (
     MAX_REQUEST_BODY_BYTES,
     PayloadTooLargeError,
+    RequestBodyLimitMiddleware,
     SensitiveDataFilter,
     UnsafePaperUrl,
     WorkspaceRateLimiter,
@@ -211,4 +213,69 @@ def test_worker_execution_limits_defaults_and_clamping(monkeypatch: pytest.Monke
     assert min_clamped.ram_bytes == 64 * 1024 * 1024
     assert min_clamped.timeout_ms == 1_000
     assert min_clamped.cpu_cores == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/search", "/v1/imports", "/v1/research/checks"])
+async def test_stream_cap_runs_before_json_parser_and_covers_worker_routes(path):
+    called = False
+
+    async def endpoint(scope, receive, send):
+        nonlocal called
+        called = True
+
+    middleware = RequestBodyLimitMiddleware(endpoint)
+    from app.security import MAX_PAPER_IMPORT_BYTES
+    cap = MAX_PAPER_IMPORT_BYTES if path == "/v1/imports" else MAX_REQUEST_BODY_BYTES
+    messages = iter([
+        {"type": "http.request", "body": b"a" * cap, "more_body": True},
+        {"type": "http.request", "body": b"b", "more_body": True},
+    ])
+    sent = []
+
+    async def receive():
+        return next(messages)  # A third read would fail: stop at the first oversized chunk.
+
+    async def send(message):
+        sent.append(message)
+
+    await middleware({"type": "http", "path": path, "headers": []}, receive, send)
+    assert not called
+    assert sent[0]["status"] == 413
+
+
+def test_sanitizer_covers_nested_args_extras_tracebacks_and_is_idempotent(monkeypatch):
+    import sys
+
+    sentinel = "PRIVATE_VALUE_123456"
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger = logging.getLogger("fgl.test.private_handler")
+    logger.addHandler(handler)
+    try:
+        install_log_sanitizer()
+        before = len(handler.filters)
+        install_log_sanitizer()
+        assert len(handler.filters) == before == 1
+        try:
+            raise ValueError(sentinel)
+        except ValueError:
+            logger.warning("context %s", {"nested": [{"prompt_text": sentinel,
+                           "authorization": "Bearer " + sentinel}]},
+                           extra={"nested": {"source_html": "<p>" + sentinel + "</p>"}},
+                           exc_info=sys.exc_info())
+        text = stream.getvalue()
+        assert sentinel not in text and "REDACTED" in text
+        assert "ValueError" in text
+    finally:
+        logger.removeHandler(handler)
+
+
+def test_audit_redacts_nested_source_and_prompt_without_installed_filters(caplog):
+    with caplog.at_level(logging.WARNING, logger="fgl.audit"):
+        log_audit_event("tamper_detected", details={"nested": [{"prompt": "PRIVATE_PROMPT",
+            "source_html": "<p>PRIVATE_SOURCE</p>", "safe": "Bearer PRIVATE_TOKEN"}]})
+    assert not any(value in caplog.text for value in [
+        "PRIVATE_PROMPT", "PRIVATE_SOURCE", "PRIVATE_TOKEN",
+    ])
 

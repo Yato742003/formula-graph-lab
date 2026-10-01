@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlsplit, urlunsplit
 
+from starlette.responses import JSONResponse
+
 
 class UnsafePaperUrl(ValueError):
     """Raised when a user-provided paper URL is outside the ingestion policy."""
@@ -68,7 +70,7 @@ def arxiv_identity(canonical_url: str) -> tuple[str, int | None]:
 # --- OWASP Controls & Guardrails (FGL-602) ---
 
 MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024  # 2 MB general JSON body cap
-MAX_PAPER_IMPORT_BYTES = 10 * 1024 * 1024  # 10 MB paper HTML cap
+MAX_PAPER_IMPORT_BYTES = 4 * 1024  # Import JSON contains a URL, not uploaded HTML.
 
 
 class PayloadTooLargeError(ValueError):
@@ -82,6 +84,53 @@ def check_payload_size(
         raise PayloadTooLargeError(
             f"Payload size {content_length} exceeds limit of {max_bytes} bytes."
         )
+
+
+class RequestBodyLimitMiddleware:
+    """Bound streamed bodies before FastAPI's JSON parser or auth dependencies run."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        cap = MAX_PAPER_IMPORT_BYTES if scope["path"] == "/v1/imports" else MAX_REQUEST_BODY_BYTES
+        lengths = [value for key, value in scope["headers"] if key.lower() == b"content-length"]
+        if lengths and (len(lengths) != 1 or len(lengths[0]) > 20 or not lengths[0].isdigit()):
+            return await JSONResponse({"detail": "Invalid content length."}, 400)(
+                scope, receive, send
+            )
+        if lengths and int(lengths[0]) > cap:
+            return await JSONResponse({"detail": "Request body exceeds limit."}, 413)(
+                scope, receive, send
+            )
+        chunks, size = [], 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            chunk = message.get("body", b"")
+            size += len(chunk)
+            if size > cap:
+                log_audit_event("payload_limit_exceeded", details={"limit_bytes": cap})
+                return await JSONResponse({"detail": "Request body exceeds limit."}, 413)(
+                    scope, receive, send
+                )
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+        body = b"".join(chunks)
+        delivered = False
+
+        async def bounded_receive():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        return await self.app(scope, bounded_receive, send)
 
 
 DEFAULT_WORKER_RAM_BYTES = 256 * 1024 * 1024  # 256 MB
@@ -176,31 +225,40 @@ _SENSITIVE_KEYS = {
     "raw_html",
     "prompt",
     "body",
+    "source_html", "html", "output_json", "input", "content", "source_text",
 }
 _BEARER_PATTERN = re.compile(r"Bearer\s+[a-zA-Z0-9_\-\.]+", re.IGNORECASE)
-_HTML_PATTERN = re.compile(
-    r"<(html|head|body|script|style|svg|div)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL
-)
+_HTML_PATTERN = re.compile(r"</?[a-z][^>]*>", re.IGNORECASE)
+
+
+def _sensitive_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "_", key.lower())
+    return normalized in _SENSITIVE_KEYS or any(
+        part in normalized for part in ("token", "secret", "password", "api_key", "prompt")
+    )
 
 
 class SensitiveDataFilter(logging.Filter):
     """OWASP FGL-602 log sanitization filter to prevent secret/HTML/prompt leakage."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.msg, str):
-            record.msg = self._sanitize_text(record.msg)
+        record.msg = self._sanitize_value("", record.msg)
 
         if record.args:
             if isinstance(record.args, dict):
                 record.args = {k: self._sanitize_value(k, v) for k, v in record.args.items()}
             elif isinstance(record.args, tuple):
                 record.args = tuple(
-                    self._sanitize_text(str(a)) if isinstance(a, str) else a for a in record.args
+                    self._sanitize_value("", a) for a in record.args
                 )
 
         for key in list(record.__dict__.keys()):
-            if key.lower() in _SENSITIVE_KEYS:
-                record.__dict__[key] = "[REDACTED]"
+            if key not in {"msg", "args", "exc_info", "exc_text", "stack_info"}:
+                record.__dict__[key] = self._sanitize_value(key, record.__dict__[key])
+        if record.exc_info:
+            record.exc_text = f"[REDACTED_EXCEPTION:{record.exc_info[0].__name__}]"
+            record.exc_info = None
+        record.stack_info = None
 
         return True
 
@@ -211,19 +269,27 @@ class SensitiveDataFilter(logging.Filter):
             "GRAPH_API_SERVICE_TOKEN",
             "OPENAI_API_KEY",
             "NEO4J_PASSWORD",
+            "FGL_RESEARCH_QUEUE_SECRET", "SEARCH_CURSOR_SECRET",
         ):
             val = os.getenv(env_var)
             if val and len(val) >= 8 and val in text:
                 text = text.replace(val, "[REDACTED]")
-        if "<html" in text.lower() or "<body" in text.lower():
-            text = _HTML_PATTERN.sub("[REDACTED_HTML]", text)
+        if _HTML_PATTERN.search(text):
+            return "[REDACTED_HTML]"
+        text = text.replace("\r", r"\r").replace("\n", r"\n")
         return text
 
-    def _sanitize_value(self, key: str, value: object) -> object:
-        if key.lower() in _SENSITIVE_KEYS:
+    def _sanitize_value(self, key: str, value: object, depth: int = 0) -> object:
+        if _sensitive_key(key) or depth > 8:
             return "[REDACTED]"
+        if isinstance(value, dict):
+            return {k: self._sanitize_value(str(k), v, depth + 1) for k, v in value.items()}
+        if isinstance(value, (tuple, list)):
+            return type(value)(self._sanitize_value("", v, depth + 1) for v in value)
         if isinstance(value, str):
             return self._sanitize_text(value)
+        if isinstance(value, BaseException):
+            return type(value).__name__
         return value
 
 
@@ -236,36 +302,28 @@ def log_audit_event(
     workspace_id: str | None = None,
     details: dict | None = None,
 ) -> None:
-    """Logs structured immutable audit events (tamper, quota exceeded, access denied)."""
-    sanitized_details = {}
-    if details:
-        for k, v in details.items():
-            if k.lower() in _SENSITIVE_KEYS:
-                sanitized_details[k] = "[REDACTED]"
-            else:
-                sanitized_details[k] = v
+    """Emit sanitized audit telemetry; durability/immutability requires an external sink."""
 
     payload = {
         "timestamp": datetime.now(UTC).isoformat(),
         "audit_event": event_type,
         "actor_id": actor_id or "anonymous",
         "workspace_id": workspace_id or "unknown",
-        "details": sanitized_details,
+        "details": details or {},
     }
+    payload = SensitiveDataFilter()._sanitize_value("", payload)
     _audit_logger.warning("AUDIT: %s", json.dumps(payload, separators=(",", ":")))
 
 
 def install_log_sanitizer() -> None:
     """Installs SensitiveDataFilter on root and uvicorn loggers."""
     log_filter = SensitiveDataFilter()
-    root_logger = logging.getLogger()
-    if log_filter not in root_logger.filters:
-        root_logger.addFilter(log_filter)
-    for handler in root_logger.handlers:
-        if log_filter not in handler.filters:
-            handler.addFilter(log_filter)
-    for name in ("uvicorn", "uvicorn.access", "uvicorn.error", "fgl.audit"):
-        logger = logging.getLogger(name)
-        if log_filter not in logger.filters:
-            logger.addFilter(log_filter)
+    loggers = [logging.getLogger(), *[
+        value for value in logging.Logger.manager.loggerDict.values()
+        if isinstance(value, logging.Logger)
+    ]]
+    for logger in loggers:
+        for target in (logger, *logger.handlers):
+            if not any(isinstance(f, SensitiveDataFilter) for f in target.filters):
+                target.addFilter(log_filter)
 

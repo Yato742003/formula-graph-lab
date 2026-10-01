@@ -889,60 +889,58 @@ class ResearchQueue:
         if row is None:
             raise JobRejected("JOB_RESULT_REQUIRES_RECONCILIATION")
 
-    async def recover_stuck_jobs(self, now: int | None = None) -> dict[str, object]:
+    async def recover_stuck_jobs(
+        self, workspace_id: str, now: int | None = None,
+    ) -> dict[str, object]:
         """Recovers jobs that crashed or timed out while queued or running."""
         # ponytail: stuck-job recovery runs on-demand during ops health sweep,
         # ceiling: scans active jobs in single transaction,
         # upgrade: separate background sweeper cron in Phase 7.
         current_now = int(time.time()) if now is None else now
+        if not workspace_id:
+            raise JobRejected("WORKSPACE_REQUIRED", 403)
         if not getattr(self, "store", None) or not getattr(self.store, "driver", None):
-            return {
-                "recovered_count": 0,
-                "recovered_job_ids": [],
-                "recovered_at": datetime.now(UTC).isoformat(),
-            }
+            raise JobRejected("RESEARCH_QUEUE_UNAVAILABLE", 503)
         async with self.store.driver.session(database=self.store.database) as session:
-            return await session.execute_write(self._recover_stuck_jobs, current_now)
+            report = await session.execute_write(
+                self._recover_stuck_jobs, workspace_id, current_now,
+            )
+        # Managed transactions can retry: emit only after the write has committed.
+        for job_id in report["recovered_job_ids"]:
+            log_audit_event("job_recovered", workspace_id=workspace_id,
+                            details={"job_id": job_id, "reason": "JOB_EXPIRED_OR_CRASHED"})
+        return report
 
-    async def _recover_stuck_jobs(self, tx, now: int) -> dict[str, object]:
+    async def _recover_stuck_jobs(self, tx, workspace_id: str, now: int) -> dict[str, object]:
         await self._lock(tx)
         cursor = await tx.run(
-            "MATCH (j:ResearchJob) "
+            "MATCH (j:ResearchJob {workspace:$workspace}) "
             "WHERE j.state IN ['queued', 'running'] AND j.expires_at <= $now "
             "SET j.state = 'failed', j.failure_reason = 'JOB_EXPIRED_OR_CRASHED', "
             "j.recovered_at = $now "
             "RETURN j.id AS id, j.workspace AS workspace, j.state AS state",
-            now=now,
+            now=now, workspace=workspace_id,
         )
         records = [record async for record in cursor]
         recovered_ids = [r["id"] for r in records]
-        for r in records:
-            log_audit_event(
-                "job_recovered",
-                workspace_id=r.get("workspace"),
-                details={"job_id": r.get("id"), "reason": "JOB_EXPIRED_OR_CRASHED"},
-            )
         return {
             "recovered_count": len(recovered_ids),
             "recovered_job_ids": recovered_ids,
             "recovered_at": datetime.now(UTC).isoformat(),
         }
 
-    async def job_health_metrics(self, now: int | None = None) -> dict[str, object]:
+    async def job_health_metrics(
+        self, workspace_id: str, now: int | None = None,
+    ) -> dict[str, object]:
         """Provides job metrics for operations and health monitoring."""
         current_now = int(time.time()) if now is None else now
+        if not workspace_id:
+            raise JobRejected("WORKSPACE_REQUIRED", 403)
         if not getattr(self, "store", None) or not getattr(self.store, "driver", None):
-            return {
-                "total": 0,
-                "active_queued": 0,
-                "active_running": 0,
-                "finished": 0,
-                "failed": 0,
-                "stuck": 0,
-            }
+            raise JobRejected("RESEARCH_QUEUE_UNAVAILABLE", 503)
         async with self.store.driver.session(database=self.store.database) as session:
             cursor = await session.run(
-                "MATCH (j:ResearchJob) "
+                "MATCH (j:ResearchJob {workspace:$workspace}) "
                 "RETURN count(j) AS total, "
                 "sum(CASE WHEN j.state = 'queued' AND j.expires_at > $now "
                 "THEN 1 ELSE 0 END) AS active_queued, "
@@ -952,7 +950,7 @@ class ResearchQueue:
                 "sum(CASE WHEN j.state = 'failed' THEN 1 ELSE 0 END) AS failed, "
                 "sum(CASE WHEN j.state IN ['queued', 'running'] AND j.expires_at <= $now "
                 "THEN 1 ELSE 0 END) AS stuck",
-                now=current_now,
+                now=current_now, workspace=workspace_id,
             )
             record = await cursor.single()
             if not record:

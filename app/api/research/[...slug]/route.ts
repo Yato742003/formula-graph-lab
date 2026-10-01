@@ -1,5 +1,6 @@
 import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { getD1 } from '@/db';
+import { isSameOriginRequest } from '@/lib/server/request-origin';
 import { D1WorkspaceAccess } from '@/lib/server/evidence-search';
 import { signedGraphHeaders } from '@/lib/server/graph-service-auth';
 import { assertDeclaredLengthWithinLimit, PayloadTooLargeError, readTextLimited } from '@/lib/server/limited-stream';
@@ -18,9 +19,7 @@ type Context = { params: Promise<{ slug: string[] }> };
 async function forward(request: Request, { params }: Context) {
   const user = await getChatGPTUser();
   if (!user) return json({ code: 'AUTH_REQUIRED' }, 401);
-  const origin = request.headers.get('origin');
-  if (request.headers.get('sec-fetch-site') === 'cross-site' ||
-      (origin !== null && origin !== new URL(request.url).origin)) {
+  if (!isSameOriginRequest(request)) {
     return json({ code: 'CROSS_SITE_REQUEST_REJECTED' }, 403);
   }
   const { slug } = await params;

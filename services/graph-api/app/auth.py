@@ -173,9 +173,9 @@ async def require_service_claims(
             "tamper_detected"
             if any(k in str(exc).lower() for k in ("signature", "changed", "tampered"))
             else "auth_failed",
-            actor_id=request.headers.get("x-fgl-actor-id"),
-            workspace_id=request.headers.get("x-fgl-workspace-id"),
-            details={"error": str(exc), "path": request.url.path},
+            # Unverified headers and ValidationError strings can contain arbitrary
+            # credentials/source content. They are not authenticated audit identity.
+            details={"error_type": type(exc).__name__},
         )
         raise HTTPException(status_code=401, detail="Invalid service credentials.") from exc
     if claims.actor_role not in HUMAN_ROLES:

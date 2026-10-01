@@ -370,8 +370,12 @@ def test_ops_dashboard_and_job_recovery_endpoints():
     headers = sign_request("GET", path)
     response = client.get(path, headers=headers)
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     data = response.json()
-    assert data["status"] in ("ok", "degraded")
+    assert data["status"] == "degraded"
+    assert data["workspace_id"] == TEST_WORKSPACE
+    assert data["subsystems"]["worker"]["status"] == "unavailable"
+    assert data["subsystems"]["import"]["max_html_bytes"] == 5 * 1024 * 1024
     assert "subsystems" in data
     assert "import" in data["subsystems"]
     assert "checker" in data["subsystems"]
@@ -381,9 +385,42 @@ def test_ops_dashboard_and_job_recovery_endpoints():
     recover_path = "/v1/research/ops/jobs/recover"
     post_headers = sign_request("POST", recover_path, b"{}")
     rec_response = client.post(recover_path, content=b"{}", headers=post_headers)
-    assert rec_response.status_code == 200
-    rec_data = rec_response.json()
-    assert "recovered_count" in rec_data
-    assert "recovered_job_ids" in rec_data
+    assert rec_response.status_code == 503
+
+
+def test_ops_uses_only_authenticated_workspace_and_does_not_accept_selectors(monkeypatch):
+    queue = SimpleNamespace(
+        job_health_metrics=AsyncMock(return_value={"stuck": 0, "total": 2}),
+        recover_stuck_jobs=AsyncMock(return_value={
+            "recovered_count": 1, "recovered_job_ids": ["own"],
+        }),
+    )
+    monkeypatch.setattr(app.state, "research_queue", queue, raising=False)
+    client = TestClient(app)
+    path = "/v1/research/ops/dashboard"
+    assert client.get(path, headers=sign_request("GET", path)).status_code == 200
+    queue.job_health_metrics.assert_awaited_once_with(TEST_WORKSPACE)
+    path = "/v1/research/ops/jobs/recover"
+    response = client.post(path, content=b"{}", headers=sign_request("POST", path, b"{}"))
+    assert response.status_code == 200
+    queue.recover_stuck_jobs.assert_awaited_once_with(TEST_WORKSPACE)
+    body = b'{"workspace_id":"foreign"}'
+    response = client.post(path, content=body, headers=sign_request("POST", path, body))
+    assert response.status_code == 403
+
+
+def test_auth_failure_never_logs_validation_input_or_unverified_actor(caplog):
+    import logging
+
+    sentinel = "PRIVATE_SOURCE_OR_CREDENTIAL_123"
+    body = search_body()
+    headers = sign_request("POST", "/v1/search", body, role="graph_read",
+                           overrides={"actor_role": sentinel, "extra": {"prompt": sentinel}})
+    headers["x-fgl-actor-id"] = sentinel
+    with caplog.at_level(logging.WARNING, logger="fgl.audit"):
+        response = TestClient(app).post("/v1/search", content=body, headers=headers)
+    assert response.status_code == 401
+    assert "auth_failed" in caplog.text
+    assert sentinel not in caplog.text
 
 
