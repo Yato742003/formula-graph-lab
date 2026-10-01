@@ -105,4 +105,31 @@ describe('OpsDashboard', () => {
     expect(recoverCall).toBeTruthy();
     expect(recoverCall![1]?.method).toBe('POST');
   });
+
+  it('safely handles backend response with top-level quotas and nested metrics without throwing', async () => {
+    const rawBackendData = {
+      status: 'ok',
+      checked_at: '2026-10-01T12:00:00Z',
+      subsystems: {
+        import: { status: 'ok', max_body_bytes: 10485760, allowed_hosts: ['arxiv.org'] },
+        checker: { status: 'ok', max_ram_bytes: 268435456, max_timeout_ms: 10000, cpu_cores: 1 },
+        worker: { status: 'ok', sandbox_image: 'none', metrics: { active_queued: 1, active_running: 2, stuck: 0 } },
+      },
+      quotas: {
+        request_body_cap_bytes: 2097152,
+        workspace_rate_limit_rpm: 120,
+      },
+    };
+    const fetcher = vi.fn(async () => Response.json(rawBackendData));
+    vi.stubGlobal('fetch', fetcher);
+
+    render(<OpsDashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText('All Subsystems Operational')).toBeTruthy();
+      expect(screen.getByText('120 req / min')).toBeTruthy();
+      expect(screen.getByText('256 MB')).toBeTruthy();
+      expect(screen.getByText('3')).toBeTruthy(); // 1 queued + 2 running
+    });
+  });
 });

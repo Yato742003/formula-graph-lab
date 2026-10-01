@@ -778,6 +778,13 @@ async def ops_dashboard(
     limits = worker_execution_limits()
     image = os.getenv("FGL_SANDBOX_IMAGE", "")
     status = "degraded" if job_metrics.get("stuck", 0) > 0 else "ok"
+    quotas_info = {
+        "status": "ok",
+        "request_body_cap_bytes": MAX_REQUEST_BODY_BYTES,
+        "max_request_bytes": MAX_REQUEST_BODY_BYTES,
+        "workspace_rate_limit_rpm": 120,
+        "rate_limit_per_minute": 120,
+    }
 
     return {
         "status": status,
@@ -786,24 +793,32 @@ async def ops_dashboard(
             "import": {
                 "status": "ok",
                 "max_body_bytes": MAX_PAPER_IMPORT_BYTES,
+                "max_html_bytes": MAX_PAPER_IMPORT_BYTES,
                 "allowed_hosts": list(ALLOWED_PAPER_HOSTS),
             },
             "checker": {
                 "status": "ok",
                 "max_ram_bytes": limits.ram_bytes,
+                "ram_limit_mb": limits.ram_bytes // (1024 * 1024),
                 "max_timeout_ms": limits.timeout_ms,
+                "timeout_ms": limits.timeout_ms,
                 "cpu_cores": limits.cpu_cores,
+                "sandbox_available": bool(image),
             },
             "worker": {
                 "status": "ok" if bool(image) else "local_fallback",
                 "sandbox_image": image or "none",
+                "sandbox_available": bool(image),
                 "metrics": job_metrics,
+                "active_queued": job_metrics.get("active_queued", 0),
+                "active_running": job_metrics.get("active_running", 0),
+                "finished_jobs": job_metrics.get("finished", 0),
+                "failed_jobs": job_metrics.get("failed", 0),
+                "stuck_jobs": job_metrics.get("stuck", 0),
             },
+            "quotas": quotas_info,
         },
-        "quotas": {
-            "request_body_cap_bytes": MAX_REQUEST_BODY_BYTES,
-            "workspace_rate_limit_rpm": 120,
-        },
+        "quotas": quotas_info,
     }
 
 

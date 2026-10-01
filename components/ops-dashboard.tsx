@@ -4,39 +4,59 @@ import { Activity, AlertTriangle, CheckCircle2, Cpu, HardDrive, Layers, RefreshC
 import { useCallback, useEffect, useState } from 'react';
 
 interface Subsystems {
-  import: {
-    status: string;
-    allowed_hosts: string[];
-    max_html_bytes: number;
+  import?: {
+    status?: string;
+    allowed_hosts?: string[];
+    max_html_bytes?: number;
+    max_body_bytes?: number;
   };
-  checker: {
-    status: string;
-    ram_limit_mb: number;
-    timeout_ms: number;
-    cpu_cores: number;
-    sandbox_available: boolean;
+  checker?: {
+    status?: string;
+    ram_limit_mb?: number;
+    max_ram_bytes?: number;
+    timeout_ms?: number;
+    max_timeout_ms?: number;
+    cpu_cores?: number;
+    sandbox_available?: boolean;
   };
-  worker: {
-    status: string;
-    active_queued: number;
-    active_running: number;
-    finished_jobs: number;
-    failed_jobs: number;
-    stuck_jobs: number;
+  worker?: {
+    status?: string;
+    active_queued?: number;
+    active_running?: number;
+    finished_jobs?: number;
+    failed_jobs?: number;
+    stuck_jobs?: number;
+    metrics?: {
+      total?: number;
+      active_queued?: number;
+      active_running?: number;
+      finished?: number;
+      failed?: number;
+      stuck?: number;
+    };
   };
-  quotas: {
-    status: string;
-    max_request_bytes: number;
-    rate_limit_per_minute: number;
+  quotas?: {
+    status?: string;
+    max_request_bytes?: number;
+    request_body_cap_bytes?: number;
+    rate_limit_per_minute?: number;
+    workspace_rate_limit_rpm?: number;
   };
 }
 
 interface OpsDashboardData {
   status: 'ok' | 'degraded';
-  workspace_id: string;
-  actor_id: string;
+  workspace_id?: string;
+  actor_id?: string;
   checked_at: string;
-  subsystems: Subsystems;
+  subsystems?: Subsystems;
+  quotas?: {
+    status?: string;
+    max_request_bytes?: number;
+    request_body_cap_bytes?: number;
+    rate_limit_per_minute?: number;
+    workspace_rate_limit_rpm?: number;
+  };
 }
 
 interface RecoveryResult {
@@ -124,7 +144,33 @@ export function OpsDashboard() {
     }
   };
 
-  const isDegraded = data?.status === 'degraded';
+  // Safe normalized telemetry values preventing undefined property crashes
+  const quotas = data?.quotas ?? data?.subsystems?.quotas;
+  const rateLimitRpm = quotas?.rate_limit_per_minute ?? quotas?.workspace_rate_limit_rpm ?? 120;
+  const maxRequestBytes = quotas?.max_request_bytes ?? quotas?.request_body_cap_bytes ?? 2097152;
+  const quotasStatus = quotas?.status ?? 'healthy';
+
+  const importSub = data?.subsystems?.import;
+  const importStatus = importSub?.status ?? 'healthy';
+  const allowedHosts = importSub?.allowed_hosts ?? ['arxiv.org', 'export.arxiv.org'];
+  const maxHtmlBytes = importSub?.max_html_bytes ?? importSub?.max_body_bytes ?? 10485760;
+
+  const checkerSub = data?.subsystems?.checker;
+  const checkerStatus = checkerSub?.status ?? 'healthy';
+  const ramLimitMb = checkerSub?.ram_limit_mb ?? (checkerSub?.max_ram_bytes ? Math.round(checkerSub.max_ram_bytes / (1024 * 1024)) : 256);
+  const timeoutMs = checkerSub?.timeout_ms ?? checkerSub?.max_timeout_ms ?? 10000;
+  const cpuCores = checkerSub?.cpu_cores ?? 1;
+  const sandboxAvailable = checkerSub?.sandbox_available ?? false;
+
+  const workerSub = data?.subsystems?.worker;
+  const metrics = workerSub?.metrics;
+  const workerStatus = workerSub?.status ?? 'healthy';
+  const activeQueued = workerSub?.active_queued ?? metrics?.active_queued ?? 0;
+  const activeRunning = workerSub?.active_running ?? metrics?.active_running ?? 0;
+  const finishedJobs = workerSub?.finished_jobs ?? metrics?.finished ?? 0;
+  const stuckJobs = workerSub?.stuck_jobs ?? metrics?.stuck ?? 0;
+
+  const isDegraded = data?.status === 'degraded' || stuckJobs > 0;
 
   return (
     <div className="ops-dashboard">
@@ -174,8 +220,10 @@ export function OpsDashboard() {
             </div>
             {data && (
               <div style={{ fontSize: '11px', color: 'var(--muted-foreground)' }}>
-                Checked at {new Date(data.checked_at).toLocaleTimeString()} &bull; Workspace:{' '}
-                <code>{data.workspace_id}</code>
+                Checked at {new Date(data.checked_at).toLocaleTimeString()}
+                {data.workspace_id && (
+                  <> &bull; Workspace: <code>{data.workspace_id}</code></>
+                )}
               </div>
             )}
           </div>
@@ -184,7 +232,7 @@ export function OpsDashboard() {
         {data && (
           <div style={{ display: 'flex', gap: '16px', fontSize: '11px', color: 'var(--muted-foreground)' }}>
             <div>
-              Status: <span style={{ fontWeight: 700, color: isDegraded ? '#d97706' : '#059669' }}>{data.status.toUpperCase()}</span>
+              Status: <span style={{ fontWeight: 700, color: isDegraded ? '#d97706' : '#059669' }}>{(data.status || 'OK').toUpperCase()}</span>
             </div>
           </div>
         )}
@@ -198,7 +246,7 @@ export function OpsDashboard() {
               <Activity size={12} aria-hidden="true" /> Subsystems
             </div>
             <div className="ops-metric-tile-val" style={{ color: isDegraded ? '#d97706' : '#059669' }}>
-              {data.status === 'ok' ? 'HEALTHY' : 'DEGRADED'}
+              {isDegraded ? 'DEGRADED' : 'HEALTHY'}
             </div>
             <div className="ops-metric-tile-sub">4 active controllers</div>
           </div>
@@ -208,10 +256,10 @@ export function OpsDashboard() {
               <Layers size={12} aria-hidden="true" /> Active Jobs
             </div>
             <div className="ops-metric-tile-val">
-              {data.subsystems.worker.active_running + data.subsystems.worker.active_queued}
+              {activeRunning + activeQueued}
             </div>
             <div className="ops-metric-tile-sub">
-              {data.subsystems.worker.active_running} running &bull; {data.subsystems.worker.active_queued} queued
+              {activeRunning} running &bull; {activeQueued} queued
             </div>
           </div>
 
@@ -220,10 +268,10 @@ export function OpsDashboard() {
               <Cpu size={12} aria-hidden="true" /> Worker Bound
             </div>
             <div className="ops-metric-tile-val">
-              {data.subsystems.checker.ram_limit_mb} <span style={{ fontSize: '13px', fontWeight: 500 }}>MB</span>
+              {ramLimitMb} <span style={{ fontSize: '13px', fontWeight: 500 }}>MB</span>
             </div>
             <div className="ops-metric-tile-sub">
-              {(data.subsystems.checker.timeout_ms / 1000).toFixed(0)}s timeout &bull; {data.subsystems.checker.cpu_cores} core
+              {(timeoutMs / 1000).toFixed(0)}s timeout &bull; {cpuCores} core
             </div>
           </div>
 
@@ -232,10 +280,10 @@ export function OpsDashboard() {
               <ShieldCheck size={12} aria-hidden="true" /> Ingress Quota
             </div>
             <div className="ops-metric-tile-val">
-              {data.subsystems.quotas.rate_limit_per_minute} <span style={{ fontSize: '13px', fontWeight: 500 }}>RPM</span>
+              {rateLimitRpm} <span style={{ fontSize: '13px', fontWeight: 500 }}>RPM</span>
             </div>
             <div className="ops-metric-tile-sub">
-              {(data.subsystems.quotas.max_request_bytes / (1024 * 1024)).toFixed(0)} MB max payload
+              {(maxRequestBytes / (1024 * 1024)).toFixed(0)} MB max payload
             </div>
           </div>
         </section>
@@ -305,8 +353,8 @@ export function OpsDashboard() {
                 <HardDrive size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
                 Import Guard
               </h2>
-              <span className={`ops-pill pill-${data.subsystems.import.status}`}>
-                {data.subsystems.import.status}
+              <span className={`ops-pill pill-${importStatus}`}>
+                {importStatus}
               </span>
             </div>
             <p className="ops-card-desc">
@@ -315,11 +363,11 @@ export function OpsDashboard() {
             <dl className="ops-dl">
               <div className="ops-dl-row">
                 <dt>Allowed Hosts</dt>
-                <dd>{data.subsystems.import.allowed_hosts.join(', ')}</dd>
+                <dd>{allowedHosts.join(', ')}</dd>
               </div>
               <div className="ops-dl-row">
                 <dt>Max HTML Size</dt>
-                <dd>{(data.subsystems.import.max_html_bytes / (1024 * 1024)).toFixed(0)} MB</dd>
+                <dd>{(maxHtmlBytes / (1024 * 1024)).toFixed(0)} MB</dd>
               </div>
               <div className="ops-dl-row">
                 <dt>SSRF Boundary</dt>
@@ -335,8 +383,8 @@ export function OpsDashboard() {
                 <Cpu size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
                 Checker Execution Bounds
               </h2>
-              <span className={`ops-pill pill-${data.subsystems.checker.status}`}>
-                {data.subsystems.checker.status}
+              <span className={`ops-pill pill-${checkerStatus}`}>
+                {checkerStatus}
               </span>
             </div>
             <p className="ops-card-desc">
@@ -345,19 +393,19 @@ export function OpsDashboard() {
             <dl className="ops-dl">
               <div className="ops-dl-row">
                 <dt>RAM Ceiling</dt>
-                <dd>{data.subsystems.checker.ram_limit_mb} MB</dd>
+                <dd>{ramLimitMb} MB</dd>
               </div>
               <div className="ops-dl-row">
                 <dt>Execution Deadline</dt>
-                <dd>{(data.subsystems.checker.timeout_ms / 1000).toFixed(1)}s</dd>
+                <dd>{(timeoutMs / 1000).toFixed(1)}s</dd>
               </div>
               <div className="ops-dl-row">
                 <dt>CPU Cores Limit</dt>
-                <dd>{data.subsystems.checker.cpu_cores} Core</dd>
+                <dd>{cpuCores} Core</dd>
               </div>
               <div className="ops-dl-row">
                 <dt>Sandbox Engine</dt>
-                <dd>{data.subsystems.checker.sandbox_available ? 'Docker Container' : 'Host Process'}</dd>
+                <dd>{sandboxAvailable ? 'Docker Container' : 'Host Process'}</dd>
               </div>
             </dl>
           </article>
@@ -369,8 +417,8 @@ export function OpsDashboard() {
                 <Layers size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
                 Job Queue &amp; Recovery
               </h2>
-              <span className={`ops-pill pill-${data.subsystems.worker.status}`}>
-                {data.subsystems.worker.status}
+              <span className={`ops-pill pill-${workerStatus}`}>
+                {workerStatus}
               </span>
             </div>
             <p className="ops-card-desc">
@@ -389,30 +437,30 @@ export function OpsDashboard() {
               <div style={{ background: 'var(--accent)', padding: '6px', borderRadius: '6px' }}>
                 <div style={{ fontSize: '10px', color: 'var(--muted-foreground)' }}>Queued</div>
                 <div style={{ fontSize: '13px', fontWeight: 700, fontFamily: 'var(--font-geist-mono)' }}>
-                  {data.subsystems.worker.active_queued}
+                  {activeQueued}
                 </div>
               </div>
               <div style={{ background: 'var(--accent)', padding: '6px', borderRadius: '6px' }}>
                 <div style={{ fontSize: '10px', color: 'var(--muted-foreground)' }}>Running</div>
                 <div style={{ fontSize: '13px', fontWeight: 700, fontFamily: 'var(--font-geist-mono)' }}>
-                  {data.subsystems.worker.active_running}
+                  {activeRunning}
                 </div>
               </div>
               <div style={{ background: 'var(--accent)', padding: '6px', borderRadius: '6px' }}>
                 <div style={{ fontSize: '10px', color: 'var(--muted-foreground)' }}>Finished</div>
                 <div style={{ fontSize: '13px', fontWeight: 700, fontFamily: 'var(--font-geist-mono)' }}>
-                  {data.subsystems.worker.finished_jobs}
+                  {finishedJobs}
                 </div>
               </div>
               <div
                 style={{
-                  background: data.subsystems.worker.stuck_jobs > 0 ? '#ef444415' : 'var(--accent)',
+                  background: stuckJobs > 0 ? '#ef444415' : 'var(--accent)',
                   padding: '6px',
                   borderRadius: '6px',
-                  border: data.subsystems.worker.stuck_jobs > 0 ? '1px solid #ef444440' : 'none',
+                  border: stuckJobs > 0 ? '1px solid #ef444440' : 'none',
                 }}
               >
-                <div style={{ fontSize: '10px', color: data.subsystems.worker.stuck_jobs > 0 ? '#b91c1c' : 'var(--muted-foreground)' }}>
+                <div style={{ fontSize: '10px', color: stuckJobs > 0 ? '#b91c1c' : 'var(--muted-foreground)' }}>
                   Stuck
                 </div>
                 <div
@@ -420,10 +468,10 @@ export function OpsDashboard() {
                     fontSize: '13px',
                     fontWeight: 700,
                     fontFamily: 'var(--font-geist-mono)',
-                    color: data.subsystems.worker.stuck_jobs > 0 ? '#b91c1c' : 'inherit',
+                    color: stuckJobs > 0 ? '#b91c1c' : 'inherit',
                   }}
                 >
-                  {data.subsystems.worker.stuck_jobs}
+                  {stuckJobs}
                 </div>
               </div>
             </div>
@@ -446,8 +494,8 @@ export function OpsDashboard() {
                 <ShieldCheck size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
                 Quotas &amp; Sanitization
               </h2>
-              <span className={`ops-pill pill-${data.subsystems.quotas.status}`}>
-                {data.subsystems.quotas.status}
+              <span className={`ops-pill pill-${quotasStatus}`}>
+                {quotasStatus}
               </span>
             </div>
             <p className="ops-card-desc">
@@ -456,11 +504,11 @@ export function OpsDashboard() {
             <dl className="ops-dl">
               <div className="ops-dl-row">
                 <dt>Ingress Body Limit</dt>
-                <dd>{(data.subsystems.quotas.max_request_bytes / (1024 * 1024)).toFixed(0)} MB</dd>
+                <dd>{(maxRequestBytes / (1024 * 1024)).toFixed(0)} MB</dd>
               </div>
               <div className="ops-dl-row">
                 <dt>Workspace Rate Cap</dt>
-                <dd>{data.subsystems.quotas.rate_limit_per_minute} req / min</dd>
+                <dd>{rateLimitRpm} req / min</dd>
               </div>
               <div className="ops-dl-row">
                 <dt>Log Sanitization</dt>
