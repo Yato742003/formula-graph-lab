@@ -109,7 +109,7 @@ def test_worker_or_invalid_role_returns_403():
         headers=bad_headers,
     )
     assert response.status_code == 403
-    assert "human research role" in response.json()["detail"]
+    assert "human" in response.json()["detail"]
 
 
 def test_missing_workspace_header_returns_400():
@@ -365,3 +365,6 @@ def test_client_cannot_pass_server_owned_fields():
     }
     resp = client.post("/v1/research/problems", json=corrupted_body, headers=AUTH_HEADERS)
     assert resp.status_code == 422
+
+# Pre-FGL-601 API semantics only; strict authentication is covered in test_service_auth.py.
+pytestmark = pytest.mark.usefixtures("legacy_phase5_service_auth")

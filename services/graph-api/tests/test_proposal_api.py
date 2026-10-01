@@ -3,6 +3,7 @@
 import json
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
@@ -524,3 +525,6 @@ def test_proposal_review_rejects_non_human_role_and_client_actor_fields(monkeypa
     human_headers = headers | {"X-Fgl-Actor-Role": "researcher"}
     forged_body = body | {"reviewer_id": "admin", "reviewer_role": "admin"}
     assert client.post(path, json=forged_body, headers=human_headers).status_code == 422
+
+# Pre-FGL-601 API semantics only; strict authentication is covered in test_service_auth.py.
+pytestmark = pytest.mark.usefixtures("legacy_phase5_service_auth")

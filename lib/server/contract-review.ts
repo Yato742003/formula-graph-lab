@@ -1,4 +1,5 @@
 import type { GraphApiConfiguration } from './paper-import';
+import { signedGraphHeaders } from './graph-service-auth';
 import {
   assertDeclaredLengthWithinLimit,
   PayloadTooLargeError,
@@ -145,18 +146,15 @@ export class HttpContractReviewClient {
     }
     let response: Response;
     try {
+      const url = new URL('/v1/contract-reviews', this.configuration.baseUrl);
+      const body = JSON.stringify({ ...input, workspace_id: workspaceId });
       response = await this.fetchImplementation(
-        new URL('/v1/contract-reviews', this.configuration.baseUrl),
+        url,
         {
           method: 'POST',
-          headers: {
-            authorization: `Bearer ${this.configuration.serviceToken}`,
-            'content-type': 'application/json',
-            'idempotency-key': idempotencyKey,
-            'x-fgl-actor-id': actorId,
-            'x-fgl-actor-role': 'researcher',
-          },
-          body: JSON.stringify({ ...input, workspace_id: workspaceId }),
+          headers: await signedGraphHeaders(this.configuration, url, 'POST', body,
+            actorId, workspaceId, { 'idempotency-key': idempotencyKey }),
+          body,
           redirect: 'manual',
           signal: AbortSignal.timeout(20_000),
         },

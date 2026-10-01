@@ -159,3 +159,6 @@ def test_candidate_verification_is_separately_feature_gated_and_accepts_no_claim
         ).status_code
         == 403
     )
+
+# Pre-FGL-601 API semantics only; strict authentication is covered in test_service_auth.py.
+pytestmark = pytest.mark.usefixtures("legacy_phase5_service_auth")

@@ -1,6 +1,7 @@
 import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { getD1 } from '@/db';
 import { D1WorkspaceAccess } from '@/lib/server/evidence-search';
+import { signedGraphHeaders } from '@/lib/server/graph-service-auth';
 import { assertDeclaredLengthWithinLimit, PayloadTooLargeError, readTextLimited } from '@/lib/server/limited-stream';
 import { resolveGraphApiConfiguration, workspaceIdentifierForUser } from '@/lib/server/paper-import';
 import { env } from 'cloudflare:workers';
@@ -161,21 +162,18 @@ async function forward(request: Request, { params }: Context) {
   const configuration = resolveGraphApiConfiguration({
     GRAPH_API_URL: env.GRAPH_API_URL,
     GRAPH_API_SERVICE_TOKEN: env.GRAPH_API_SERVICE_TOKEN,
-  }, env.APP_ENV !== 'development');
+  }, !import.meta.env.DEV || env.APP_ENV !== 'development');
   if (!configuration) return json({ code: 'GRAPH_API_NOT_CONFIGURED' }, 503);
   const upstreamBody = isCompile
     ? JSON.stringify({ ...writeInput, workspace_id: workspaceId })
     : body;
   try {
-    const response = await fetch(new URL('/v1/research/' + slug.join('/') + url.search, configuration.baseUrl), {
-      method: request.method,
-      headers: {
-        authorization: 'Bearer ' + configuration.serviceToken,
-        'x-fgl-actor-id': user.userId,
-        'x-fgl-actor-role': 'researcher',
-        'x-fgl-workspace-id': workspaceId,
-        ...(!isRead ? { 'content-type': 'application/json', 'x-idempotency-key': key } : {}),
-      },
+    const upstreamUrl = new URL('/v1/research/' + slug.join('/') + url.search, configuration.baseUrl);
+    const method = isRead ? 'GET' : 'POST';
+    const response = await fetch(upstreamUrl, {
+      method,
+      headers: await signedGraphHeaders(configuration, upstreamUrl, method, upstreamBody,
+        user.userId, workspaceId, !isRead ? { 'x-idempotency-key': key } : {}),
       body: upstreamBody,
       redirect: 'manual',
       signal: AbortSignal.timeout(isProposalGenerate ? 100_000 : isEvolutionConfirm ? 75_000 : isResearchCase || isEvolutionGeneration ? 45_000 : isNumericalFixture ? 45_000 : 20_000),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import main
@@ -167,3 +168,6 @@ def test_enabled_fixture_endpoint_uses_atomic_queue_result_finish(monkeypatch):
     assert response.json()["performance_claim"] is False
     assert store.atomic_finish
     assert not store.separate_append
+
+# Pre-FGL-601 API semantics only; strict authentication is covered in test_service_auth.py.
+pytestmark = pytest.mark.usefixtures("legacy_phase5_service_auth")

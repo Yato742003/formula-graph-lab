@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import main
@@ -197,3 +198,6 @@ def test_research_case_endpoint_marks_idempotent_replay(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["replayed"] is True
+
+# Pre-FGL-601 API semantics only; strict authentication is covered in test_service_auth.py.
+pytestmark = pytest.mark.usefixtures("legacy_phase5_service_auth")

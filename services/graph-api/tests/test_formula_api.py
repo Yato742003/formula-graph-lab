@@ -1,10 +1,11 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
 
 
 def _client(monkeypatch) -> TestClient:
-    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv("SERVICE_TOKEN", "formula-secret")
     return TestClient(app)
 
@@ -177,3 +178,6 @@ def test_formula_parse_rejects_top_level_approved_field(monkeypatch) -> None:
         },
     )
     assert response.status_code == 422
+
+# Pre-FGL-601 API semantics only; strict authentication is covered in test_service_auth.py.
+pytestmark = pytest.mark.usefixtures("legacy_phase5_service_auth")

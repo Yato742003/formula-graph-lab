@@ -89,7 +89,7 @@ describe('Graph API search client', () => {
     const client = new HttpGraphSearchClient(
       {
         baseUrl: new URL('https://graph.example'),
-        serviceToken: 'service-secret',
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
       },
       fetchImplementation,
     );
@@ -97,6 +97,7 @@ describe('Graph API search client', () => {
     const result = await client.search(
       { query: 'scaled attention', entity_types: ['Equation'] },
       'ws_server_derived',
+      'user-1',
     );
 
     expect(upstreamBody).toMatchObject({
@@ -116,13 +117,13 @@ describe('Graph API search client', () => {
     const client = new HttpGraphSearchClient(
       {
         baseUrl: new URL('https://graph.example'),
-        serviceToken: 'service-secret',
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
       },
       vi.fn(async () => Response.json(malformed)) as unknown as typeof fetch,
     );
 
     await expect(
-      client.search({ query: 'attention' }, 'ws_safe'),
+      client.search({ query: 'attention' }, 'ws_safe', 'user-1'),
     ).rejects.toMatchObject({
       code: 'GRAPH_API_INVALID_RESPONSE',
       status: 502,

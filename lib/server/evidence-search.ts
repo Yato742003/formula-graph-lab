@@ -6,6 +6,7 @@ import type {
   VerificationStatus,
 } from '../import-types';
 import type { GraphApiConfiguration } from './paper-import';
+import { signedGraphHeaders } from './graph-service-auth';
 import {
   assertDeclaredLengthWithinLimit,
   PayloadTooLargeError,
@@ -92,18 +93,18 @@ export class HttpGraphSearchClient {
   async search(
     input: EvidenceSearchInput,
     workspaceId: string,
+    actorId: string,
   ): Promise<EvidenceSearchResponse> {
     let response: Response;
     try {
+      const url = new URL('/v1/search', this.configuration.baseUrl);
+      const body = JSON.stringify({ ...input, workspace_id: workspaceId });
       response = await this.fetchImplementation(
-        new URL('/v1/search', this.configuration.baseUrl),
+        url,
         {
           method: 'POST',
-          headers: {
-            authorization: `Bearer ${this.configuration.serviceToken}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({ ...input, workspace_id: workspaceId }),
+          headers: await signedGraphHeaders(this.configuration, url, 'POST', body, actorId, workspaceId),
+          body,
           redirect: 'manual',
           signal: AbortSignal.timeout(20_000),
         },

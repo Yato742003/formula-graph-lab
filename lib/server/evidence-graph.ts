@@ -9,6 +9,7 @@ import type {
 } from '../import-types';
 import { normalizeArxivHtmlUrl } from '../paper-url';
 import type { GraphApiConfiguration } from './paper-import';
+import { signedGraphHeaders } from './graph-service-auth';
 import {
   assertDeclaredLengthWithinLimit,
   PayloadTooLargeError,
@@ -112,22 +113,20 @@ export class HttpGraphSnapshotClient {
   async load(
     workspaceId: string,
     paper: PersistedPaperSummary,
+    actorId: string,
   ): Promise<GraphApiSnapshot> {
     let response: Response;
     try {
+      const url = new URL('/v1/graphs/snapshot', this.configuration.baseUrl);
+      const body = JSON.stringify({
+        workspace_id: workspaceId, paper_id: paper.paper_id, version: paper.version,
+      });
       response = await this.fetchImplementation(
-        new URL('/v1/graphs/snapshot', this.configuration.baseUrl),
+        url,
         {
           method: 'POST',
-          headers: {
-            authorization: `Bearer ${this.configuration.serviceToken}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            workspace_id: workspaceId,
-            paper_id: paper.paper_id,
-            version: paper.version,
-          }),
+          headers: await signedGraphHeaders(this.configuration, url, 'POST', body, actorId, workspaceId),
+          body,
           redirect: 'manual',
           signal: AbortSignal.timeout(20_000),
         },

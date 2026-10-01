@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -93,11 +94,15 @@ class Neo4jEvidenceStore:
             "FOR (n:ResearchWorkspaceLock) REQUIRE n.group_id IS UNIQUE",
             database_=self.database,
         )
-        for label in ("ResearchJob", "ResearchQueueLock"):
+        for label in ("ResearchJob", "ResearchQueueLock", "ServiceRequestNonce"):
             await self.driver.execute_query(
                 f"CREATE CONSTRAINT fgl_{label.lower()}_id IF NOT EXISTS "
                 f"FOR (n:{label}) REQUIRE n.id IS UNIQUE", database_=self.database,
             )
+        await self.driver.execute_query(
+            "CREATE INDEX fgl_service_nonce_expiry IF NOT EXISTS "
+            "FOR (n:ServiceRequestNonce) ON (n.expires_at)", database_=self.database,
+        )
         for label, constraint in [
             ("Evidence", "fgl_evidence_uuid"),
             ("EvidenceImport", "fgl_import_uuid"),
@@ -127,6 +132,30 @@ class Neo4jEvidenceStore:
 
     async def close(self) -> None:
         await self.driver.close()
+
+    async def consume_service_nonce(self, nonce: str, expires_at: int) -> bool:
+        # One server-owned claim per HTTP request also survives managed TX retries.
+        claim = uuid4().hex
+        async with self.driver.session(database=self.database) as session:
+            return await session.execute_write(
+                self._consume_service_nonce, nonce, expires_at, claim,
+            )
+
+    @staticmethod
+    async def _consume_service_nonce(tx, nonce: str, expires_at: int, claim: str) -> bool:
+        result = await tx.run(
+            "MERGE (n:ServiceRequestNonce {id:$nonce}) "
+            "ON CREATE SET n.claim=$claim, n.expires_at=$expires_at "
+            "RETURN n.claim=$claim AS accepted",
+            nonce=nonce, claim=claim, expires_at=expires_at,
+        )
+        row = await result.single()
+        # Retain expired nonces for another five minutes across replica clock skew.
+        await tx.run(
+            "MATCH (n:ServiceRequestNonce) WHERE n.expires_at < $cutoff "
+            "WITH n LIMIT 100 DELETE n", cutoff=int(time.time()) - 300,
+        )
+        return bool(row and row["accepted"])
 
     async def ingest(self, graph: EvidenceGraph) -> ImportReceipt:
         async with self.driver.session(database=self.database) as session:

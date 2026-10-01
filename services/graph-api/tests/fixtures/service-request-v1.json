@@ -1,0 +1,21 @@
+{
+  "key": "service-test-secret-with-at-least-32-chars",
+  "body": "{\"query\":\"attention\",\"workspace_id\":\"ws_c6c289e49e9c05b2145860387b73bcb18df43fb09a1e4a4a\"}",
+  "claims": {
+    "v": 1,
+    "iss": "fgl-web",
+    "aud": "fgl-graph",
+    "actor_id": "user-1",
+    "actor_role": "researcher",
+    "workspace_id": "ws_c6c289e49e9c05b2145860387b73bcb18df43fb09a1e4a4a",
+    "service_role": "graph_read",
+    "method": "POST",
+    "target": "/v1/search",
+    "body_sha256": "7dd57726ad6f59359914e2602546ec63b8fa12eb971c72629339af67048484d9",
+    "idempotency_key": "",
+    "iat": 1750000000,
+    "exp": 1750000060,
+    "jti": "12345678-1234-4123-8123-123456789abc"
+  },
+  "token": "fgl1.eyJ2IjoxLCJpc3MiOiJmZ2wtd2ViIiwiYXVkIjoiZmdsLWdyYXBoIiwiYWN0b3JfaWQiOiJ1c2VyLTEiLCJhY3Rvcl9yb2xlIjoicmVzZWFyY2hlciIsIndvcmtzcGFjZV9pZCI6IndzX2M2YzI4OWU0OWU5YzA1YjIxNDU4NjAzODdiNzNiY2IxOGRmNDNmYjA5YTFlNGE0YSIsInNlcnZpY2Vfcm9sZSI6ImdyYXBoX3JlYWQiLCJtZXRob2QiOiJQT1NUIiwidGFyZ2V0IjoiL3YxL3NlYXJjaCIsImJvZHlfc2hhMjU2IjoiN2RkNTc3MjZhZDZmNTkzNTk5MTRlMjYwMjU0NmVjNjNiOGZhMTJlYjk3MWM3MjYyOTMzOWFmNjcwNDg0ODRkOSIsImlkZW1wb3RlbmN5X2tleSI6IiIsImlhdCI6MTc1MDAwMDAwMCwiZXhwIjoxNzUwMDAwMDYwLCJqdGkiOiIxMjM0NTY3OC0xMjM0LTQxMjMtODEyMy0xMjM0NTY3ODlhYmMifQ.5PckU-PxozSJ3o6Ti-3Pqfl3gC72GSlbS5X3X0kyXKg"
+}

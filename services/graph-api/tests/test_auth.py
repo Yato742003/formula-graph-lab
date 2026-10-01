@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.evidence_store import ImportReceipt
@@ -36,7 +37,7 @@ def test_production_requires_service_token_configuration(monkeypatch) -> None:
 
 def test_rejects_invalid_service_token_before_fetch(monkeypatch) -> None:
     monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("SERVICE_TOKEN", "correct-secret")
+    monkeypatch.setenv("SERVICE_TOKEN", "correct-secret-with-at-least-32-chars")
 
     response = TestClient(app).post(
         "/v1/extractions/preview",
@@ -242,3 +243,6 @@ def test_graph_snapshot_endpoint_uses_protected_bounded_contract(monkeypatch) ->
         app.dependency_overrides.clear()
     assert response.status_code == 200
     assert response.json() == {"nodes": [], "edges": [], "truncated": False}
+
+# Pre-FGL-601 API semantics only; strict authentication is covered in test_service_auth.py.
+pytestmark = pytest.mark.usefixtures("legacy_phase5_service_auth")

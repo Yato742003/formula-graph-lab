@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -103,3 +104,6 @@ def test_replay_report_recompiles_in_authorized_workspace_and_is_not_cached(monk
         "candidate_id": candidate,
         "activity_id": activity,
     }]
+
+# Pre-FGL-601 API semantics only; strict authentication is covered in test_service_auth.py.
+pytestmark = pytest.mark.usefixtures("legacy_phase5_service_auth")

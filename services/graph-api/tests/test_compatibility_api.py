@@ -112,3 +112,6 @@ def test_compatibility_fails_closed_when_research_store_is_absent():
         "/v1/research/compatibility", headers=AUTH_HEADERS, json=_mapping_payload()
     )
     assert response.status_code == 503
+
+# Pre-FGL-601 API semantics only; strict authentication is covered in test_service_auth.py.
+pytestmark = pytest.mark.usefixtures("legacy_phase5_service_auth")

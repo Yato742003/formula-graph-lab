@@ -6,6 +6,7 @@ import type {
   WorkspaceImportResponse,
 } from '../import-types';
 import { normalizeArxivHtmlUrl } from '../paper-url';
+import { signedGraphHeaders } from './graph-service-auth';
 import {
   assertDeclaredLengthWithinLimit,
   PayloadTooLargeError,
@@ -55,8 +56,8 @@ export function resolveGraphApiConfiguration(
   const rawBase =
     values.GRAPH_API_URL ??
     (production ? undefined : 'http://127.0.0.1:8000');
-  const serviceToken = values.GRAPH_API_SERVICE_TOKEN?.trim();
-  if (!rawBase || !serviceToken || serviceToken.length > 4_096) return null;
+  const serviceToken = values.GRAPH_API_SERVICE_TOKEN;
+  if (!rawBase || !serviceToken || !/^[\x21-\x7e]{32,256}$/.test(serviceToken)) return null;
 
   let baseUrl: URL;
   try {
@@ -88,6 +89,7 @@ export interface GraphImportClient {
   importEvidence(
     canonicalUrl: string,
     workspaceId: string,
+    actorId: string,
   ): Promise<{ paper: ImportedPaper; receipt: EvidenceImportReceipt }>;
 }
 
@@ -97,18 +99,17 @@ export class HttpGraphImportClient implements GraphImportClient {
     private readonly fetchImplementation: typeof fetch = fetch,
   ) {}
 
-  async importEvidence(canonicalUrl: string, workspaceId: string) {
+  async importEvidence(canonicalUrl: string, workspaceId: string, actorId: string) {
     let response: Response;
     try {
+      const url = new URL('/v1/imports', this.configuration.baseUrl);
+      const body = JSON.stringify({ url: canonicalUrl, workspace_id: workspaceId });
       response = await this.fetchImplementation(
-        new URL('/v1/imports', this.configuration.baseUrl),
+        url,
         {
           method: 'POST',
-          headers: {
-            authorization: `Bearer ${this.configuration.serviceToken}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({ url: canonicalUrl, workspace_id: workspaceId }),
+          headers: await signedGraphHeaders(this.configuration, url, 'POST', body, actorId, workspaceId),
+          body,
           // Cloudflare Workers supports manual redirects, not `error`.
           // Keeping redirects manual prevents the bearer token from being
           // forwarded to an unexpected origin.
@@ -368,6 +369,7 @@ export async function runPaperImport(input: {
     const imported = await input.graphClient.importEvidence(
       input.canonicalUrl,
       workspaceId,
+      input.userId,
     );
     const paperId = await stableIdentifier(
       'paper',

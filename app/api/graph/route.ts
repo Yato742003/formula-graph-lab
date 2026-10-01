@@ -46,7 +46,7 @@ export async function GET(request: Request) {
       GRAPH_API_URL: env.GRAPH_API_URL,
       GRAPH_API_SERVICE_TOKEN: env.GRAPH_API_SERVICE_TOKEN,
     },
-    env.APP_ENV !== 'development',
+    !import.meta.env.DEV || env.APP_ENV !== 'development',
   );
   if (!graphConfiguration) {
     return json({ code: 'GRAPH_API_NOT_CONFIGURED' }, 503);
@@ -56,6 +56,7 @@ export async function GET(request: Request) {
     const graph = await new HttpGraphSnapshotClient(graphConfiguration).load(
       workspaceId,
       paper,
+      user.userId,
     );
     return json({ paper, ...graph }, 200);
   } catch (error) {

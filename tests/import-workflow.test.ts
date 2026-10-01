@@ -113,7 +113,7 @@ describe('authenticated paper import workflow', () => {
     const client = new HttpGraphImportClient(
       {
         baseUrl: new URL('https://graph.example'),
-        serviceToken: 'service-secret',
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
       },
       fetchImplementation,
     );
@@ -153,7 +153,7 @@ describe('authenticated paper import workflow', () => {
     const client = new HttpGraphImportClient(
       {
         baseUrl: new URL('https://graph.example'),
-        serviceToken: 'service-secret',
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
       },
       vi.fn(async () =>
         new Response(null, {
@@ -163,7 +163,7 @@ describe('authenticated paper import workflow', () => {
     );
 
     await expect(
-      client.importEvidence('https://arxiv.org/html/2402.08954', 'ws_safe'),
+      client.importEvidence('https://arxiv.org/html/2402.08954', 'ws_safe', 'user-1'),
     ).rejects.toMatchObject({ code: 'GRAPH_API_UNAVAILABLE', status: 502 });
   });
 
@@ -195,13 +195,13 @@ describe('authenticated paper import workflow', () => {
     const client = new HttpGraphImportClient(
       {
         baseUrl: new URL('https://graph.example'),
-        serviceToken: 'service-secret',
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
       },
       vi.fn(async () => Response.json(unpinned)) as unknown as typeof fetch,
     );
 
     await expect(
-      client.importEvidence('https://arxiv.org/html/2402.08954', 'ws_safe'),
+      client.importEvidence('https://arxiv.org/html/2402.08954', 'ws_safe', 'user-1'),
     ).rejects.toMatchObject({
       code: 'GRAPH_API_INVALID_RESPONSE',
       status: 502,
@@ -212,13 +212,13 @@ describe('authenticated paper import workflow', () => {
     const client = new HttpGraphImportClient(
       {
         baseUrl: new URL('https://graph.example'),
-        serviceToken: 'service-secret',
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
       },
       vi.fn(async () => new Response('x'.repeat(2 * 1024 * 1024 + 1), { status: 200 })) as unknown as typeof fetch,
     );
 
     await expect(
-      client.importEvidence('https://arxiv.org/html/2402.08954', 'ws_safe'),
+      client.importEvidence('https://arxiv.org/html/2402.08954', 'ws_safe', 'user-1'),
     ).rejects.toMatchObject({ code: 'GRAPH_API_RESPONSE_TOO_LARGE' });
   });
 });
@@ -229,7 +229,7 @@ describe('Graph API configuration policy', () => {
       resolveGraphApiConfiguration(
         {
           GRAPH_API_URL: 'http://graph.example',
-          GRAPH_API_SERVICE_TOKEN: 'secret',
+          GRAPH_API_SERVICE_TOKEN: 'service-test-secret-with-at-least-32-chars',
         },
         true,
       ),
@@ -245,7 +245,7 @@ describe('Graph API configuration policy', () => {
   it('allows only a loopback HTTP service during development', () => {
     expect(
       resolveGraphApiConfiguration(
-        { GRAPH_API_SERVICE_TOKEN: 'secret' },
+        { GRAPH_API_SERVICE_TOKEN: 'service-test-secret-with-at-least-32-chars' },
         false,
       )?.baseUrl.href,
     ).toBe('http://127.0.0.1:8000/');
@@ -253,7 +253,7 @@ describe('Graph API configuration policy', () => {
       resolveGraphApiConfiguration(
         {
           GRAPH_API_URL: 'http://192.168.1.25:8000',
-          GRAPH_API_SERVICE_TOKEN: 'secret',
+          GRAPH_API_SERVICE_TOKEN: 'service-test-secret-with-at-least-32-chars',
         },
         false,
       ),

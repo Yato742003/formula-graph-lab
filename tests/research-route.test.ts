@@ -12,16 +12,50 @@ vi.mock('cloudflare:workers', () => ({
   env: {
     APP_ENV: 'development',
     GRAPH_API_URL: 'http://localhost:8000',
-    GRAPH_API_SERVICE_TOKEN: 'test-service-secret',
+    GRAPH_API_SERVICE_TOKEN: 'service-test-secret-with-at-least-32-chars',
   },
 }));
 import { GET, POST } from '../app/api/research/[...slug]/route';
+import { workspaceIdentifierForUser } from '../lib/server/paper-import';
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   vi.clearAllMocks();
 });
 const context = (slug: string[]) => ({ params: Promise.resolve({ slug }) });
+
+it('a production build refuses loopback HTTP even when APP_ENV says development', async () => {
+  vi.stubEnv('DEV', false);
+  mocks.user.mockResolvedValue({ userId: 'user-1' });
+  mocks.owned.mockResolvedValue(true);
+  const fetcher = vi.fn();
+  vi.stubGlobal('fetch', fetcher);
+  const response = await GET(new Request('https://app.test/api/research/problems'), context(['problems']));
+  expect(response.status).toBe(503);
+  expect(fetcher).not.toHaveBeenCalled();
+});
+
+it('signs the authenticated owner, not browser identity, role or workspace headers', async () => {
+  mocks.user.mockResolvedValue({ userId: 'user-1' });
+  mocks.owned.mockResolvedValue(true);
+  const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ items: [] }));
+  vi.stubGlobal('fetch', fetcher);
+  const response = await GET(new Request('https://app.test/api/research/problems', { headers: {
+    authorization: 'Bearer browser-token', 'x-fgl-actor-id': 'other-user',
+    'x-fgl-actor-role': 'admin', 'x-fgl-workspace-id': 'foreign-workspace',
+  } }), context(['problems']));
+  expect(response.status).toBe(200);
+  const workspace = await workspaceIdentifierForUser('user-1');
+  expect(mocks.owned).toHaveBeenCalledWith(workspace, 'user-1');
+  const headers = new Headers(fetcher.mock.calls[0][1]?.headers);
+  const encoded = headers.get('authorization')!.split('.')[1];
+  expect(JSON.parse(Buffer.from(encoded, 'base64url').toString())).toMatchObject({
+    actor_id: 'user-1', actor_role: 'researcher', workspace_id: workspace,
+    service_role: 'research_read', method: 'GET', target: '/v1/research/problems',
+  });
+  expect(headers.get('authorization')).not.toContain('browser-token');
+});
 
 it('allows bounded evolution commands but never browser metrics or holdout overrides', async () => {
   mocks.user.mockResolvedValue({ userId: 'user-1' });

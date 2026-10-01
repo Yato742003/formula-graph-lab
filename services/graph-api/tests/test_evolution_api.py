@@ -104,3 +104,6 @@ def test_invalid_start_and_unearned_finalist_fail_closed():
     )
     assert response.status_code == 422
     assert "Pareto-eligible" in response.text
+
+# Pre-FGL-601 API semantics only; strict authentication is covered in test_service_auth.py.
+pytestmark = pytest.mark.usefixtures("legacy_phase5_service_auth")

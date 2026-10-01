@@ -78,7 +78,7 @@ export async function POST(request: Request) {
       GRAPH_API_URL: env.GRAPH_API_URL,
       GRAPH_API_SERVICE_TOKEN: env.GRAPH_API_SERVICE_TOKEN,
     },
-    env.APP_ENV !== 'development',
+    !import.meta.env.DEV || env.APP_ENV !== 'development',
   );
   if (!graphConfiguration) {
     return json({ code: 'GRAPH_API_NOT_CONFIGURED' }, 503);
@@ -88,6 +88,7 @@ export async function POST(request: Request) {
     const result = await new HttpGraphSearchClient(graphConfiguration).search(
       input,
       workspaceId,
+      user.userId,
     );
     return json(result, 200);
   } catch (error) {

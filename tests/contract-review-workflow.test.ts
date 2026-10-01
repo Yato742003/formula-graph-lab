@@ -96,7 +96,7 @@ describe('contract review boundary', () => {
     const client = new HttpContractReviewClient(
       {
         baseUrl: new URL('https://graph.example'),
-        serviceToken: 'service-secret',
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
       },
       fetchImplementation,
     );
@@ -129,7 +129,7 @@ describe('contract review boundary', () => {
     const client = new HttpContractReviewClient(
       {
         baseUrl: new URL('https://graph.example'),
-        serviceToken: 'service-secret',
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
       },
       fetchImplementation,
     );
@@ -166,7 +166,7 @@ describe('contract review boundary', () => {
     const client = new HttpContractReviewClient(
       {
         baseUrl: new URL('https://graph.example'),
-        serviceToken: 'service-secret',
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
       },
       fetchImplementation,
     );

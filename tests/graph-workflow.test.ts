@@ -94,12 +94,12 @@ describe('Graph API snapshot client', () => {
     const client = new HttpGraphSnapshotClient(
       {
         baseUrl: new URL('https://graph.example'),
-        serviceToken: 'service-secret',
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
       },
       fetchImplementation,
     );
 
-    const result = await client.load('ws_server_derived', paper);
+    const result = await client.load('ws_server_derived', paper, 'user-1');
 
     expect(upstreamBody).toEqual({
       workspace_id: 'ws_server_derived',
@@ -147,12 +147,12 @@ describe('Graph API snapshot client', () => {
     const client = new HttpGraphSnapshotClient(
       {
         baseUrl: new URL('https://graph.example'),
-        serviceToken: 'service-secret',
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
       },
       vi.fn(async () => Response.json(withHistory)) as unknown as typeof fetch,
     );
 
-    const result = await client.load('ws_safe', paper);
+    const result = await client.load('ws_safe', paper, 'user-1');
     expect(result.nodes.at(-1)?.version).toBe(6);
     expect(result.edges.at(-1)?.relation).toBe('supersedes');
   });
@@ -163,11 +163,11 @@ describe('Graph API snapshot client', () => {
     const crossVersionClient = new HttpGraphSnapshotClient(
       {
         baseUrl: new URL('https://graph.example'),
-        serviceToken: 'service-secret',
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
       },
       vi.fn(async () => Response.json(crossVersion)) as unknown as typeof fetch,
     );
-    await expect(crossVersionClient.load('ws_safe', paper)).rejects.toMatchObject({
+    await expect(crossVersionClient.load('ws_safe', paper, 'user-1')).rejects.toMatchObject({
       code: 'GRAPH_API_INVALID_RESPONSE',
       status: 502,
     });
@@ -177,11 +177,11 @@ describe('Graph API snapshot client', () => {
     const danglingClient = new HttpGraphSnapshotClient(
       {
         baseUrl: new URL('https://graph.example'),
-        serviceToken: 'service-secret',
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
       },
       vi.fn(async () => Response.json(dangling)) as unknown as typeof fetch,
     );
-    await expect(danglingClient.load('ws_safe', paper)).rejects.toMatchObject({
+    await expect(danglingClient.load('ws_safe', paper, 'user-1')).rejects.toMatchObject({
       code: 'GRAPH_API_INVALID_RESPONSE',
       status: 502,
     });

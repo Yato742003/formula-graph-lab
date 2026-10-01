@@ -1,5 +1,6 @@
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { env } from 'cloudflare:workers';
 
 export type ChatGPTUser = {
   userId: string;
@@ -19,14 +20,20 @@ const SIGN_OUT_PATH = '/signout-with-chatgpt';
 const CALLBACK_PATH = '/callback';
 
 export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
+  // Header identity is valid only behind Sites' trusted identity ingress.
+  // The dev plugin strips supplied identity headers before injecting a local user.
+  const localDevelopment = import.meta.env.DEV && env.APP_ENV === 'development';
+  if (!localDevelopment && env.FGL_TRUST_SITES_IDENTITY !== 'true') return null;
   const requestHeaders = await headers();
   const userId = requestHeaders.get(USER_ID_HEADER);
   const email = requestHeaders.get(USER_EMAIL_HEADER);
-  if (!userId || !email) return null;
+  if (!userId || !/^[\x21-\x7e]{1,200}$/.test(userId) ||
+      !email || email.length > 320 || Array.from(email).some(char =>
+        char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) return null;
 
   const encodedFullName = requestHeaders.get(USER_FULL_NAME_HEADER);
   const fullName =
-    encodedFullName &&
+    encodedFullName && encodedFullName.length <= 2_000 &&
     requestHeaders.get(USER_FULL_NAME_ENCODING_HEADER) === PERCENT_ENCODED_UTF8
       ? safeDecodeURIComponent(encodedFullName)
       : null;
