@@ -6,7 +6,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from app.analysis_versions import canonical_json
 from app.problem_spec import FrozenInput, ProblemSpecSnapshot
@@ -42,6 +42,8 @@ class AdmissionContext(FrozenInput):
     quota_available: bool = False
     restricted_domain_reviewed: bool = False
     quality_constraints_met: bool = False
+    protocol_evidence_scope: Literal["none", "search", "holdout"] = "none"
+    review_result_ids: tuple[str, ...] = Field(default=(), max_length=16)
     retry_count: int = Field(default=0, ge=0, le=1000)
     retry_reason: Literal["none", "timeout", "infrastructure_error", "refuted"] = "none"
 
@@ -116,16 +118,31 @@ class AdmissionReplayInput(FrozenInput):
     quota_available: bool = False
     restricted_domain_reviewed: bool = False
     quality_constraints_met: bool = False
+    protocol_evidence_scope: Literal["none", "search", "holdout"] = "none"
+    review_result_ids: tuple[str, ...] = Field(default=(), max_length=16)
     retry_count: int = Field(default=0, ge=0, le=1000)
     retry_reason: Literal["none", "timeout", "infrastructure_error", "refuted"] = "none"
 
     @model_validator(mode="after")
     def validate_identity(self) -> AdmissionReplayInput:
         payload = self.model_dump(mode="json", exclude={"input_hash"})
+        if self.protocol_evidence_scope == "none":
+            payload.pop("protocol_evidence_scope", None)
+        if not self.review_result_ids:
+            payload.pop("review_result_ids", None)
         expected = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
         if self.input_hash != expected:
             raise ValueError("Admission replay input hash does not match its content.")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_input(self, handler):
+        payload = handler(self)
+        if self.protocol_evidence_scope == "none":
+            payload.pop("protocol_evidence_scope", None)
+        if not self.review_result_ids:
+            payload.pop("review_result_ids", None)
+        return payload
 
 
 def make_admission_replay_input(
@@ -143,6 +160,10 @@ def make_admission_replay_input(
             exclude={"candidate", "spec"},
         ),
     }
+    if context.protocol_evidence_scope == "none":
+        payload.pop("protocol_evidence_scope")
+    if not context.review_result_ids:
+        payload.pop("review_result_ids")
     digest = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
     replay_input = AdmissionReplayInput.model_validate(payload | {"input_hash": digest})
     replay_admission(replay_input, decision, context.candidate, context.spec)
@@ -214,9 +235,11 @@ def decide_admission(
 
     obligations = context.candidate.obligations
     discharged = set(context.discharged_obligation_names)
+    scoped = context.protocol_evidence_scope != "none" and context.restricted_domain_reviewed
     unresolved = [
         item.name for item in obligations
         if item.status == "unresolved" and item.name not in discharged
+        and not (scoped and item.name == "normalization_domain")
     ]
     conditional = [
         item.name for item in obligations
@@ -271,7 +294,9 @@ def decide_admission(
             rule_id = "FGL-V0-EXPERIMENT-RESTRICTED" if conditional else "FGL-V0-EXPERIMENT-READY"
             success_reason = "protocol_and_numerical_gates_passed"
     elif action == "can_enter_parent_pool":
-        if not _static_ready(context, reasons, allow_conditional=False):
+        if context.protocol_evidence_scope == "holdout":
+            reasons.append("holdout_cannot_enter_search_parent_pool")
+        elif not _static_ready(context, reasons, allow_conditional=scoped):
             pass
         elif not context.runtime_artifacts_verified or not context.protocol_frozen:
             reasons.append("experiment_artifacts_or_protocol_unverified")
@@ -287,7 +312,7 @@ def decide_admission(
             reasons.append("human_scope_review_not_accepted")
         elif not context.quality_constraints_met:
             reasons.append("frozen_quality_constraints_not_met")
-        elif unresolved or conditional:
+        elif unresolved or (conditional and not scoped):
             reasons.extend(
                 f"obligation_not_discharged:{item.name}"
                 for item in obligations
@@ -296,7 +321,10 @@ def decide_admission(
         else:
             outcome = "allowed"
             rule_id = "FGL-V0-PARENT-ELIGIBLE"
-            success_reason = "protocol_quality_and_review_gates_passed"
+            success_reason = (
+                "search_protocol_scope_only" if scoped
+                else "protocol_quality_and_review_gates_passed"
+            )
     else:  # can_publish_claim
         if vector is None:
             reasons.append("verification_vector_missing")
@@ -401,6 +429,9 @@ def _static_ready(
     unresolved = [
         item.name for item in context.candidate.obligations
         if item.status == "unresolved" and item.name not in context.discharged_obligation_names
+        and not (context.protocol_evidence_scope != "none"
+                 and context.restricted_domain_reviewed
+                 and item.name == "normalization_domain")
     ]
     if unresolved:
         reasons.extend(f"unresolved_obligation:{name}" for name in unresolved)
@@ -433,5 +464,6 @@ def _result_ids(
             *context.symbolic_result_ids,
             *context.numerical_result_ids,
             *context.empirical_result_ids,
+            *context.review_result_ids,
         )
     return ()

@@ -11,9 +11,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
+from app.admission import AdmissionContext
 from app.analysis_versions import canonical_json
+from app.candidate_verification import (
+    CANDIDATE_CHECKER_VERSION,
+    CandidateCheckResult,
+    discharged_obligations,
+)
 from app.numerical_verification import build_numerical_suite_input
 from app.problem_spec import (
     ArtifactRef,
@@ -253,7 +259,11 @@ class ResearchCaseTrial(FrozenInput):
 
 
 class ResearchCaseReceipt(FrozenInput):
-    schema_version: Literal["research-case-result.v1"] = "research-case-result.v1"
+    schema_version: Literal["research-case-result.v1", "research-case-result.v2"] = (
+        "research-case-result.v1"
+    )
+    evaluation_role: Literal["legacy_full", "search", "holdout"] = "legacy_full"
+    evolution_id: str | None = Field(default=None, pattern=r"^evo_[0-9a-f]{32}$")
     result_id: str = Field(pattern=r"^exp_[0-9a-f]{32}$")
     result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     run_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
@@ -275,7 +285,7 @@ class ResearchCaseReceipt(FrozenInput):
     holdout_mean: float | None = None
     holdout_ci95_low: float | None = None
     holdout_ci95_high: float | None = None
-    trials: tuple[ResearchCaseTrial, ...] = Field(min_length=5, max_length=5)
+    trials: tuple[ResearchCaseTrial, ...] = Field(min_length=2, max_length=5)
     search_cost: dict[str, int | float] = Field(max_length=8)
     claim_scope: Literal["synthetic_operator_only_no_product_claim"] = (
         "synthetic_operator_only_no_product_claim"
@@ -285,41 +295,202 @@ class ResearchCaseReceipt(FrozenInput):
 
     @model_validator(mode="after")
     def validate_identity(self) -> ResearchCaseReceipt:
-        if tuple(item.seed for item in self.trials) != SEEDS:
+        if (set(self.search_cost) != {"candidate_count", "trial_count", "completed_trial_count",
+                                     "wall_time_ms", "cost_usd"}
+                or self.search_cost["candidate_count"] != 1
+                or self.search_cost["trial_count"] != len(self.trials)
+                or self.search_cost["completed_trial_count"] != sum(
+                    trial.outcome in {"passed_suite", "counterexample"} for trial in self.trials
+                )
+                or self.search_cost["cost_usd"] != 0
+                or any(isinstance(value, bool) or not math.isfinite(value) or value < 0
+                       for value in self.search_cost.values())):
+            raise ValueError("Protocol cost must describe the retained zero-cost trials.")
+        if (self.schema_version == "research-case-result.v1") != (
+            self.evaluation_role == "legacy_full"
+        ):
+            raise ValueError("Legacy receipts and scoped receipts require distinct versions.")
+        if self.evaluation_role == "holdout" and self.evolution_id is None:
+            raise ValueError("Holdout receipts require a frozen evolution campaign.")
+        if tuple(item.seed for item in self.trials) != evaluation_seeds(self.evaluation_role):
             raise ValueError("Research case must retain every frozen seed in order.")
         if self.outcome == "inconclusive":
             if self.quality_constraints_met or any(value is not None for value in (
                 self.holdout_mean, self.holdout_ci95_low, self.holdout_ci95_high
             )):
                 raise ValueError("Incomplete research cases cannot claim a holdout result.")
-        elif None in (self.holdout_mean, self.holdout_ci95_low, self.holdout_ci95_high):
+        elif self.evaluation_role != "search" and None in (
+            self.holdout_mean, self.holdout_ci95_low, self.holdout_ci95_high
+        ):
             raise ValueError("Completed research cases require holdout uncertainty.")
+        if self.evaluation_role == "search" and any(value is not None for value in (
+            self.holdout_mean, self.holdout_ci95_low, self.holdout_ci95_high
+        )):
+            raise ValueError("Search receipts cannot expose holdout results.")
         if self.quality_constraints_met != (self.outcome == "supported_on_protocol"):
             raise ValueError("Protocol support must equal the frozen quality decision.")
         correct = all(item.outcome == "passed_suite" for item in self.trials)
         if correct != (self.outcome != "inconclusive"):
             raise ValueError("Protocol outcome must agree with all retained trials.")
         if correct:
-            means = [statistics.fmean(
-                item.candidate_regret_vs_best_parent for item in trial.measurements
-            ) for trial in self.trials if trial.split == "holdout"]
-            mean = statistics.fmean(means)
-            margin = T95_DF1 * statistics.stdev(means) / math.sqrt(2)
-            if (self.holdout_mean, self.holdout_ci95_low, self.holdout_ci95_high) != (
-                mean, mean - margin, mean + margin
-            ) or self.quality_constraints_met != (mean + margin <= self.quality_threshold):
+            mean, low, high = quality_summary(self.trials, self.evaluation_role)
+            if self.evaluation_role != "search" and (
+                self.holdout_mean, self.holdout_ci95_low, self.holdout_ci95_high
+            ) != (mean, low, high):
                 raise ValueError("Holdout summary must reproduce from the frozen trials.")
-        payload = self.model_dump(mode="json", exclude={"result_id", "result_hash"})
+            if self.quality_constraints_met != (high <= self.quality_threshold):
+                raise ValueError("Quality decision must reproduce from the retained trials.")
+        excluded = {"result_id", "result_hash"}
+        if self.evaluation_role == "legacy_full":
+            excluded.update({"evaluation_role", "evolution_id"})
+        payload = self.model_dump(mode="json", exclude=excluded)
         digest = _hash(payload)
         if self.result_hash != digest or self.result_id != f"exp_{digest[:32]}":
             raise ValueError("Research case identity does not match its content.")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_receipt(self, handler):
+        payload = handler(self)
+        if self.evaluation_role == "legacy_full":
+            payload.pop("evaluation_role", None)
+            payload.pop("evolution_id", None)
+        return payload
 
 
 class ResearchCaseReceiptResponse(FrozenInput):
     binding: ImplementationBindingReceipt
     result: ResearchCaseReceipt
     replayed: bool
+
+
+class ResearchCaseReviewRequest(FrozenInput):
+    result_id: str = Field(pattern=r"^exp_[0-9a-f]{32}$")
+    decision: Literal["accept_protocol_scope", "reject"]
+    notes: str = Field(min_length=1, max_length=2000)
+
+
+class ResearchProtocolReview(FrozenInput):
+    review_id: str = Field(pattern=r"^prv_[0-9a-f]{32}$")
+    candidate_id: str = Field(pattern=r"^cand_[0-9a-f]{32}$")
+    result_id: str = Field(pattern=r"^exp_[0-9a-f]{32}$")
+    check_id: str = Field(min_length=1, max_length=200)
+    candidate_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    problem_spec_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reviewer_id: str = Field(min_length=1, max_length=200)
+    reviewer_role: Literal["researcher", "reviewer", "admin"]
+    decision: Literal["accept_protocol_scope", "reject"]
+    notes: str = Field(min_length=1, max_length=2000)
+    scope: Literal["synthetic_operator_only_no_product_claim"]
+    scope_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    authorization: Literal["bounded_parameter_search_for_this_frozen_feature_map_family"]
+    reviewed_at: datetime
+
+    @model_validator(mode="after")
+    def validate_review_time(self):
+        if self.reviewed_at.tzinfo is None or self.reviewed_at.utcoffset() is None:
+            raise ValueError("Protocol review must have a timezone-aware timestamp.")
+        return self
+
+
+def evaluation_seeds(role: str) -> tuple[int, ...]:
+    if role not in {"legacy_full", "search", "holdout"}:
+        raise ValueError("Unknown research evaluation role.")
+    return tuple(seed for seed in SEEDS if role == "legacy_full" or (
+        (SEED_SPLITS[seed] != "holdout") if role == "search"
+        else SEED_SPLITS[seed] == "holdout"
+    ))
+
+
+def protocol_scope_key(binding: ImplementationBindingReceipt) -> str:
+    return _hash([
+        binding.problem_spec_hash, binding.protocol_version, binding.worker_source_sha256,
+        [item.model_dump(mode="json") for item in binding.source_parent_refs],
+    ])
+
+
+def phase_budget_ms(role: str) -> int:
+    return 18_000 if role == "search" else 12_000 if role == "holdout" else MAX_WALL_TIME_MS
+
+
+def quality_summary(
+    trials: tuple[ResearchCaseTrial, ...] | list[ResearchCaseTrial], role: str,
+) -> tuple[float, float, float]:
+    selected = "search" if role == "search" else "holdout"
+    means = [statistics.fmean(
+        item.candidate_regret_vs_best_parent for item in trial.measurements
+    ) for trial in trials if trial.split == selected]
+    mean = statistics.fmean(means)
+    margin = T95_DF1 * statistics.stdev(means) / math.sqrt(2)
+    high = mean + margin
+    if role == "search":
+        # ponytail: fixed two-seed search CI plus independent validation, ceiling:
+        # this synthetic pilot only; upgrade: register a new protocol for larger studies.
+        high = max(high, *(statistics.fmean(
+            item.candidate_regret_vs_best_parent for item in trial.measurements
+        ) for trial in trials if trial.split == "validation"))
+    return mean, mean - margin, high
+
+
+def protocol_admission_context(
+    candidate: CompiledCandidate,
+    spec: ProblemSpecSnapshot,
+    parent: CompiledCandidate,
+    check: CandidateCheckResult,
+    binding: ImplementationBindingReceipt,
+    result: ResearchCaseReceipt,
+    *,
+    reviewed: bool,
+    review_id: str | None = None,
+    mapping_freshness: Literal["current", "stale", "unknown"],
+    mapping_usable: bool,
+    quota_available: bool,
+) -> AdmissionContext:
+    """Server-only bridge. Testing a finite protocol never discharges global domain holes."""
+    binding = ImplementationBindingReceipt.model_validate(binding.model_dump())
+    result = ResearchCaseReceipt.model_validate(result.model_dump())
+    expected = make_implementation_binding(
+        candidate, spec, parent_candidate=parent,
+        execution_image=binding.execution_image, now=binding.created_at,
+    )
+    if (
+        binding != expected or result.evaluation_role == "legacy_full"
+        or check.checker_version != CANDIDATE_CHECKER_VERSION
+        or check.candidate_id != candidate.candidate_id
+        or check.workspace_id != candidate.workspace_id
+        or check.candidate_hash != candidate.content_hash
+        or result.workspace_id != candidate.workspace_id
+        or result.candidate_id != candidate.candidate_id
+        or result.candidate_hash != candidate.content_hash
+        or result.problem_spec_id != spec.spec_id
+        or result.problem_spec_hash != spec.content_hash
+        or result.parent_refs != candidate.parents
+        or result.binding_id != binding.binding_id
+        or result.binding_hash != binding.binding_hash
+        or result.protocol_hash != binding.protocol_hash
+    ):
+        raise ValueError("Protocol evidence is legacy, stale, or outside this candidate scope.")
+    complete = all(trial.outcome == "passed_suite" for trial in result.trials)
+    if reviewed and not review_id:
+        raise ValueError("Human protocol acceptance requires its persisted review identity.")
+    vector = check.vector.model_copy(update={
+        "numerical": "passed_suite" if complete else "not_run",
+        "empirical": result.outcome,
+        "human_review": "accepted_scope" if reviewed else "pending",
+    })
+    return AdmissionContext(
+        candidate=candidate, spec=spec, verification=vector,
+        discharged_obligation_names=tuple(sorted(discharged_obligations(check))),
+        symbolic_result_ids=(check.check_id,),
+        numerical_result_ids=(result.result_id,) if complete else (),
+        empirical_result_ids=(result.result_id,),
+        mapping_freshness=mapping_freshness, mapping_usable=mapping_usable,
+        runtime_artifacts_verified=True, protocol_frozen=True,
+        quota_available=quota_available, restricted_domain_reviewed=reviewed,
+        quality_constraints_met=result.quality_constraints_met,
+        protocol_evidence_scope=result.evaluation_role,
+        review_result_ids=(review_id,) if reviewed else (),
+    )
 
 
 def make_implementation_binding(
@@ -444,6 +615,8 @@ def run_registered_research_case(
     run_id: str,
     worker_runner: Callable[..., dict[str, Any]] = run_research_case_sandbox,
     now: datetime | None = None,
+    evaluation_role: Literal["legacy_full", "search", "holdout"] = "legacy_full",
+    evolution_id: str | None = None,
 ) -> ResearchCaseReceipt:
     threshold = validate_registered_spec(spec)
     recreated = make_implementation_binding(
@@ -458,8 +631,8 @@ def run_registered_research_case(
 
     started = time.monotonic()
     trials = []
-    for seed in SEEDS:
-        remaining_ms = MAX_WALL_TIME_MS - int((time.monotonic() - started) * 1000)
+    for seed in evaluation_seeds(evaluation_role):
+        remaining_ms = phase_budget_ms(evaluation_role) - int((time.monotonic() - started) * 1000)
         if remaining_ms < 10:
             trials.append(ResearchCaseTrial(
                 seed=seed,
@@ -489,27 +662,23 @@ def run_registered_research_case(
     correct = complete and all(
         item.outcome == "passed_suite" and all(item.checks.values()) for item in trials
     )
-    holdout_means: list[float] = []
-    if correct:
-        for trial in trials:
-            if trial.split == "holdout":
-                holdout_means.append(statistics.fmean(
-                    item.candidate_regret_vs_best_parent for item in trial.measurements
-                ))
     holdout_mean = holdout_low = holdout_high = None
     quality_met = False
-    if len(holdout_means) == 2:
-        holdout_mean = statistics.fmean(holdout_means)
-        margin = T95_DF1 * statistics.stdev(holdout_means) / math.sqrt(2)
-        holdout_low, holdout_high = holdout_mean - margin, holdout_mean + margin
-        quality_met = holdout_high <= threshold
+    if correct:
+        mean, low, high = quality_summary(trials, evaluation_role)
+        quality_met = high <= threshold
+        if evaluation_role != "search":
+            holdout_mean, holdout_low, holdout_high = mean, low, high
     outcome = (
         "inconclusive" if not correct
         else "supported_on_protocol" if quality_met
         else "failed_on_protocol"
     )
     payload = {
-        "schema_version": "research-case-result.v1",
+        "schema_version": (
+            "research-case-result.v1" if evaluation_role == "legacy_full"
+            else "research-case-result.v2"
+        ),
         "run_id": run_id,
         "actor_id": actor_id,
         "workspace_id": candidate.workspace_id,
@@ -537,7 +706,7 @@ def run_registered_research_case(
                 item.outcome in {"passed_suite", "counterexample"} for item in trials
             ),
             "wall_time_ms": min(
-                MAX_WALL_TIME_MS, int((time.monotonic() - started) * 1000)
+                phase_budget_ms(evaluation_role), int((time.monotonic() - started) * 1000)
             ),
             "cost_usd": 0,
         },
@@ -547,6 +716,9 @@ def run_registered_research_case(
             "+00:00", "Z"
         ),
     }
+    if evaluation_role != "legacy_full":
+        payload["evaluation_role"] = evaluation_role
+        payload["evolution_id"] = evolution_id
     digest = _hash(payload)
     return ResearchCaseReceipt.model_validate(
         payload | {"result_hash": digest, "result_id": f"exp_{digest[:32]}"}

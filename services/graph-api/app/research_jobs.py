@@ -27,6 +27,7 @@ from app.research_case import (
     ResearchCaseReceipt,
     ResearchCaseReceiptResponse,
     make_implementation_binding,
+    phase_budget_ms,
 )
 from app.research_compiler import CompiledCandidate, _verify_candidate_identity
 from app.sandbox import IMAGE_ID
@@ -106,8 +107,16 @@ def validate_numerical_fixture_payload(payload: dict[str, object]) -> None:
 
 
 def validate_research_case_payload(payload: dict[str, object]) -> None:
+    scope_keys = {"evaluation_role", "evolution_id"}
+    if scope_keys & payload.keys():
+        role, campaign = payload.get("evaluation_role"), payload.get("evolution_id")
+        if (not scope_keys <= payload.keys() or role not in {"search", "holdout"}
+                or (campaign is not None and (
+                    not isinstance(campaign, str) or not re.fullmatch(r"evo_[0-9a-f]{32}", campaign)
+                )) or (role == "holdout" and campaign is None)):
+            raise JobRejected("INVALID_RESEARCH_CASE_SCOPE", 422)
     if (
-        set(payload) != {
+        set(payload) - scope_keys != {
             "candidate_id", "candidate_hash", "binding_id", "binding_hash", "protocol_hash",
             "binding_created_at",
         }
@@ -133,8 +142,11 @@ def validate_research_case_payload(payload: dict[str, object]) -> None:
         raise JobRejected("INVALID_RESEARCH_CASE_INPUT", 422) from exc
 
 
-def research_case_job_payload(binding: ImplementationBindingReceipt) -> dict[str, object]:
-    return {
+def research_case_job_payload(
+    binding: ImplementationBindingReceipt, evaluation_role: str = "legacy_full",
+    evolution_id: str | None = None,
+) -> dict[str, object]:
+    payload = {
         "candidate_id": binding.candidate_id,
         "candidate_hash": binding.candidate_hash,
         "binding_id": binding.binding_id,
@@ -142,6 +154,9 @@ def research_case_job_payload(binding: ImplementationBindingReceipt) -> dict[str
         "protocol_hash": binding.protocol_hash,
         "binding_created_at": binding.created_at.isoformat().replace("+00:00", "Z"),
     }
+    if evaluation_role != "legacy_full":
+        payload.update(evaluation_role=evaluation_role, evolution_id=evolution_id)
+    return payload
 
 
 def verify_envelope(
@@ -344,9 +359,11 @@ class ResearchQueue:
         idempotency_key: str,
         binding: ImplementationBindingReceipt,
         reserved_ms: int,
+        evaluation_role: str = "legacy_full",
+        evolution_id: str | None = None,
     ) -> JobTicket:
         actor.require("experiments:run", workspace_id)
-        payload = research_case_job_payload(binding)
+        payload = research_case_job_payload(binding, evaluation_role, evolution_id)
         validate_research_case_payload(payload)
         if (
             candidate_id != binding.candidate_id
@@ -364,6 +381,7 @@ class ResearchQueue:
             candidate_id=candidate_id,
             binding=binding,
             reserved_ms=reserved_ms,
+            evaluation_role=evaluation_role, evolution_id=evolution_id,
         )
         now = int(time.time())
         job_id = str(uuid5(NAMESPACE_URL, json.dumps(
@@ -385,7 +403,7 @@ class ResearchQueue:
         )
         async with self.store.driver.session(database=self.store.database) as session:
             raw, mac, result, result_mac = await session.execute_write(
-                self._admit, envelope, now
+                self._admit, envelope, now, payload
             )
         ticket = JobTicket(JobEnvelope.model_validate_json(raw), mac, result)
         if not hmac.compare_digest(signature(ticket.envelope, self.key), mac):
@@ -401,7 +419,52 @@ class ResearchQueue:
         await (await tx.run("MERGE (q:ResearchQueueLock {id:'admission.v1'}) "
                            "SET q.serial=coalesce(q.serial,0)+1")).consume()
 
-    async def _admit(self, tx, envelope, now):
+    async def research_case_retry(
+        self, actor, workspace_id, candidate_id, key, role, evolution_id,
+    ):
+        """Recover the original binding timestamp; retries never manufacture a new intent."""
+        actor.require("experiments:run", workspace_id)
+        job_id = str(uuid5(NAMESPACE_URL, json.dumps(
+            [workspace_id, "research_case:run", candidate_id, key]
+        )))
+        rows, _, _ = await self.store.driver.execute_query(
+            "MATCH (j:ResearchJob {id:$id,workspace:$workspace}) "
+            "RETURN j.envelope AS envelope,j.mac AS mac,j.input_payload AS input,"
+            "j.result AS result,j.result_mac AS result_mac",
+            id=job_id, workspace=workspace_id, database_=self.store.database,
+        )
+        if not rows:
+            return None, None
+        row = rows[0]
+        envelope = JobEnvelope.model_validate_json(row["envelope"])
+        if (envelope.actor_id != actor.identity or envelope.target_uuid != candidate_id
+                or envelope.workspace_id != workspace_id
+                or envelope.operation != "research_case:run"
+                or not hmac.compare_digest(signature(envelope, self.key), row["mac"] or "")):
+            raise JobRejected("INVALID_JOB_SIGNATURE", 403)
+        if not row["input"]:
+            raise JobRejected("LEGACY_JOB_REQUIRES_RECONCILIATION")
+        payload = json.loads(row["input"])
+        validate_research_case_payload(payload)
+        if (digest(payload) != envelope.payload_hash
+                or payload.get("evaluation_role") != role
+                or payload.get("evolution_id") != evolution_id):
+            raise JobRejected("JOB_IDEMPOTENCY_CONFLICT")
+        if row["result"] is None:
+            return payload, None
+        if not hmac.compare_digest(
+            self._result_mac(job_id, row["result"]), row["result_mac"] or "",
+        ):
+            raise JobRejected("INVALID_RESULT_SIGNATURE", 403)
+        saved = ResearchCaseReceiptResponse.model_validate_json(row["result"])
+        if (saved.result.run_id != job_id or saved.result.actor_id != actor.identity
+                or saved.result.candidate_id != candidate_id
+                or saved.result.evaluation_role != role or saved.result.evolution_id != evolution_id
+                or research_case_job_payload(saved.binding, role, evolution_id) != payload):
+            raise JobRejected("JOB_RESULT_MISMATCH", 422)
+        return payload, saved.model_copy(update={"replayed": True})
+
+    async def _admit(self, tx, envelope, now, input_payload=None):
         await self._lock(tx)
         old = await (await tx.run(
             "MATCH (j:ResearchJob {id:$id}) RETURN j.envelope AS envelope, "
@@ -432,9 +495,11 @@ class ResearchQueue:
         raw, mac = envelope.model_dump_json(), signature(envelope, self.key)
         await (await tx.run(
             "CREATE (j:ResearchJob {id:$id, workspace:$workspace, envelope:$envelope, "
-            "mac:$mac, state:'queued', issued_at:$issued, expires_at:$expiry, reserved_ms:$ms})",
+            "mac:$mac, state:'queued', issued_at:$issued, expires_at:$expiry, reserved_ms:$ms,"
+            "input_payload:$input})",
             id=envelope.job_id, workspace=envelope.workspace_id, envelope=raw, mac=mac,
             issued=envelope.issued_at, expiry=envelope.expires_at, ms=envelope.reserved_ms,
+            input=json.dumps(input_payload, sort_keys=True) if input_payload is not None else None,
         )).consume()
         return raw, mac, None, None
 
@@ -458,6 +523,8 @@ class ResearchQueue:
                 candidate_id=envelope.target_uuid,
                 binding=binding,
                 reserved_ms=envelope.reserved_ms,
+                evaluation_role=str(payload.get("evaluation_role", "legacy_full")),
+                evolution_id=payload.get("evolution_id"),
             )
         async with self.store.driver.session(database=self.store.database) as session:
             await session.execute_write(self._claim, ticket)
@@ -589,7 +656,17 @@ class ResearchQueue:
         candidate_id: str,
         binding: ImplementationBindingReceipt,
         reserved_ms: int,
+        evaluation_role: str = "legacy_full",
+        evolution_id: str | None = None,
     ) -> None:
+        if evaluation_role == "legacy_full":
+            raise JobRejected("LEGACY_FULL_PROTOCOL_IS_REPLAY_ONLY", 422)
+        await self.store.authorize_protocol_phase(
+            workspace_id=workspace_id, candidate_id=candidate_id,
+            evaluation_role=evaluation_role, evolution_id=evolution_id,
+        )
+        if evolution_id is not None:
+            await self.store.require_protocol_scope_review(binding)
         candidate, spec, parent = await self.store.prepare_registered_research_case(
             workspace_id=workspace_id, candidate_id=candidate_id
         )
@@ -600,7 +677,7 @@ class ResearchQueue:
             execution_image=binding.execution_image,
             now=binding.created_at,
         )
-        if expected != binding or reserved_ms != 30_000:
+        if expected != binding or reserved_ms != phase_budget_ms(evaluation_role):
             raise JobRejected("JOB_INPUT_MISMATCH", 422)
 
     async def _claim(self, tx, ticket):
@@ -711,7 +788,7 @@ class ResearchQueue:
         envelope = ticket.envelope
         binding = ImplementationBindingReceipt.model_validate(binding.model_dump(mode="python"))
         result = ResearchCaseReceipt.model_validate(result.model_dump(mode="python"))
-        payload = research_case_job_payload(binding)
+        payload = research_case_job_payload(binding, result.evaluation_role, result.evolution_id)
         if (
             envelope.operation != "research_case:run"
             or result.run_id != envelope.job_id

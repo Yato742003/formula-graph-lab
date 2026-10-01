@@ -31,9 +31,11 @@ from app.evidence_store import EvidenceSnapshotDataError, Neo4jEvidenceStore
 from app.evolution import (
     EvolutionCampaignResponse,
     EvolutionFinalistsRequest,
+    EvolutionGenerationRequest,
     EvolutionStartRequest,
     build_evolution_report,
 )
+from app.evolution_runner import confirm_finalists, run_generation
 from app.extractor import PaperExtractionError, extract_paper
 from app.fetcher import PaperFetchError, fetch_paper_html
 from app.formula_ast import FormulaParseError, parse_formula
@@ -108,7 +110,9 @@ from app.proposals import (
 )
 from app.research_case import (
     ResearchCaseReceiptResponse,
+    ResearchCaseReviewRequest,
     make_implementation_binding,
+    phase_budget_ms,
     run_registered_research_case,
 )
 from app.research_compiler import CompileCandidateRequest, CompileCandidateResponse
@@ -891,6 +895,28 @@ async def get_evolution_report(
     )
 
 
+@app.get("/v1/research/evolution/{evolution_id}/bundle")
+async def export_evolution_replay_bundle(
+    evolution_id: Annotated[str, Path(pattern=r"^evo_[a-f0-9]{32}$")],
+    auth_ctx: Annotated[tuple[ServiceActor, str], Depends(require_research_service_actor)],
+    r_store: Annotated[Neo4jResearchStore, Depends(get_research_store)] = None,
+):
+    _, workspace_id = auth_ctx
+    try:
+        bundle = await r_store.export_evolution_bundle(
+            workspace_id=workspace_id, evolution_id=evolution_id,
+        )
+    except ResearchReferenceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ResearchValidationError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (ResearchStoreError, Neo4jError, ServiceUnavailable, OSError) as exc:
+        raise HTTPException(status_code=503, detail="Evolution bundle is unavailable.") from exc
+    return JSONResponse(
+        content=bundle.model_dump(mode="json"), headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.post(
     "/v1/research/evolution/{evolution_id}/finalists",
     response_model=EvolutionCampaignResponse,
@@ -1557,49 +1583,9 @@ async def run_research_case(
     if not idempotency_key or len(idempotency_key) > 200 or not idempotency_key.isascii():
         raise HTTPException(status_code=400, detail="A bounded ASCII idempotency key is required.")
     try:
-        image = configured_image()
-        worker = configured_worker_principal("experiment", workspace_id)
-        candidate, spec, parent_candidate = await r_store.prepare_registered_research_case(
-            workspace_id=workspace_id, candidate_id=candidate_id
+        persisted = await execute_research_case(
+            r_store, workspace_id, candidate_id, idempotency_key,
         )
-        binding = make_implementation_binding(
-            candidate,
-            spec,
-            parent_candidate=parent_candidate,
-            execution_image=image,
-        )
-        queue = ResearchQueue(r_store, configured_queue_key())
-        payload = research_case_job_payload(binding)
-        reserved_ms = 30_000
-        ticket = await queue.admit_research_case(
-            worker,
-            workspace_id=workspace_id,
-            candidate_id=candidate_id,
-            idempotency_key=idempotency_key,
-            binding=binding,
-            reserved_ms=reserved_ms,
-        )
-        if ticket.result is not None:
-            saved = ResearchCaseReceiptResponse.model_validate_json(ticket.result)
-            persisted = saved.model_copy(update={"replayed": True})
-        else:
-            await queue.claim(ticket, worker, payload, image)
-            result = await run_in_threadpool(
-                run_registered_research_case,
-                binding,
-                candidate,
-                spec,
-                parent_candidate=parent_candidate,
-                actor_id=worker.identity,
-                run_id=ticket.envelope.job_id,
-            )
-            persisted = await queue.finish_research_case(
-                ticket,
-                research_store=r_store,
-                idempotency_key=idempotency_key,
-                binding=binding,
-                result=result,
-            )
     except JobRejected as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     except ResearchReferenceNotFoundError as exc:
@@ -1617,6 +1603,135 @@ async def run_research_case(
         status_code=200 if persisted.replayed else 201,
         headers={"Cache-Control": "no-store"},
     )
+
+
+async def execute_research_case(
+    store, workspace_id, candidate_id, idempotency_key, *,
+    evaluation_role="search", evolution_id=None,
+):
+    """One shared, authenticated queue path for manual search and campaign execution."""
+    image = configured_image()
+    worker = configured_worker_principal("experiment", workspace_id)
+    queue = ResearchQueue(store, configured_queue_key())
+    retry_payload, saved = await queue.research_case_retry(
+        worker, workspace_id, candidate_id, idempotency_key, evaluation_role, evolution_id,
+    )
+    if saved is not None:
+        return saved
+    candidate, spec, parent = await store.prepare_registered_research_case(
+        workspace_id=workspace_id, candidate_id=candidate_id,
+    )
+    binding = make_implementation_binding(
+        candidate, spec, parent_candidate=parent, execution_image=image,
+        now=datetime.fromisoformat(retry_payload["binding_created_at"].replace("Z", "+00:00"))
+        if retry_payload else None,
+    )
+    payload = research_case_job_payload(binding, evaluation_role, evolution_id)
+    ticket = await queue.admit_research_case(
+        worker, workspace_id=workspace_id, candidate_id=candidate_id,
+        idempotency_key=idempotency_key, binding=binding,
+        reserved_ms=phase_budget_ms(evaluation_role),
+        evaluation_role=evaluation_role, evolution_id=evolution_id,
+    )
+    if ticket.result is not None:
+        saved = ResearchCaseReceiptResponse.model_validate_json(ticket.result)
+        return saved.model_copy(update={"replayed": True})
+    await queue.claim(ticket, worker, payload, image)
+    result = await run_in_threadpool(
+        run_registered_research_case, binding, candidate, spec, parent_candidate=parent,
+        actor_id=worker.identity, run_id=ticket.envelope.job_id,
+        evaluation_role=evaluation_role, evolution_id=evolution_id,
+    )
+    return await queue.finish_research_case(
+        ticket, research_store=store, idempotency_key=idempotency_key,
+        binding=binding, result=result,
+    )
+
+
+@app.post(
+    "/v1/research/evolution/{evolution_id}/generation",
+    dependencies=[
+        Depends(require_research_case_enabled), Depends(require_research_compiler_enabled),
+    ],
+)
+async def run_evolution_generation(
+    evolution_id: Annotated[str, Path(pattern=r"^evo_[a-f0-9]{32}$")],
+    body: EvolutionGenerationRequest,
+    auth_ctx: Annotated[tuple[ServiceActor, str], Depends(require_research_service_actor)],
+    x_idempotency_key: Annotated[str | None, Header()] = None,
+    r_store: Annotated[Neo4jResearchStore, Depends(get_research_store)] = None,
+):
+    return await evolution_execution_response(
+        run_generation, r_store, auth_ctx, evolution_id, x_idempotency_key, body,
+    )
+
+
+@app.post(
+    "/v1/research/evolution/{evolution_id}/confirm",
+    dependencies=[Depends(require_research_case_enabled)],
+)
+async def confirm_evolution_campaign(
+    evolution_id: Annotated[str, Path(pattern=r"^evo_[a-f0-9]{32}$")],
+    body: CandidateCheckRequest,
+    auth_ctx: Annotated[tuple[ServiceActor, str], Depends(require_research_service_actor)],
+    x_idempotency_key: Annotated[str | None, Header()] = None,
+    r_store: Annotated[Neo4jResearchStore, Depends(get_research_store)] = None,
+):
+    return await evolution_execution_response(
+        confirm_finalists, r_store, auth_ctx, evolution_id, x_idempotency_key,
+    )
+
+
+async def evolution_execution_response(function, store, auth_ctx, evolution_id, key, body=None):
+    actor, workspace = auth_ctx
+    args = (store, workspace, evolution_id, actor.actor_id, key or "")
+    try:
+        campaign, replayed = await function(
+            *args, *((body,) if body is not None else ()), execute_research_case,
+        )
+    except JobRejected as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    except ResearchReferenceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ResearchAuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (ResearchValidationError, IdempotencyConflictError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ResearchStoreError, Neo4jError, ServiceUnavailable, OSError) as exc:
+        raise HTTPException(status_code=503, detail="Evolution execution is unavailable.") from exc
+    return JSONResponse(
+        content=EvolutionCampaignResponse(
+            campaign=campaign, replayed=replayed,
+        ).model_dump(mode="json"),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/v1/research/candidates/{candidate_id}/research-case/reviews")
+async def review_research_case_scope(
+    candidate_id: Annotated[str, Path(pattern=r"^cand_[a-f0-9]{32}$")],
+    body: ResearchCaseReviewRequest,
+    auth_ctx: Annotated[tuple[ServiceActor, str], Depends(require_research_service_actor)],
+    x_idempotency_key: Annotated[str | None, Header()] = None,
+    r_store: Annotated[Neo4jResearchStore, Depends(get_research_store)] = None,
+):
+    actor, workspace = auth_ctx
+    try:
+        review = await r_store.review_research_case(
+            workspace_id=workspace, candidate_id=candidate_id, actor_id=actor.actor_id,
+            actor_role=actor.role, idempotency_key=x_idempotency_key or "", request=body,
+        )
+    except ResearchReferenceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ResearchValidationError, IdempotencyConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ResearchAuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (ResearchStoreError, Neo4jError, ServiceUnavailable, OSError) as exc:
+        raise HTTPException(
+            status_code=503, detail="Protocol review storage is unavailable."
+        ) from exc
+    return JSONResponse(content=review, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/v1/research/candidates")

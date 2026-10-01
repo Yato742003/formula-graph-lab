@@ -16,7 +16,7 @@ from datetime import datetime
 from fractions import Fraction
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 from app.formula_ast import AstNode, ParsedFormula, ParsedSymbol
 
@@ -147,6 +147,8 @@ class ReviewedContractValue(BaseModel):
     category: SymbolCategory
     shape: tuple[int | str, ...] | None = None
     feature_rank: int | None = Field(default=None, gt=0, le=100_000, strict=True)
+    # Function input domain/shape stay distinct from its reviewed output codomain.
+    feature_output_domain: Literal["strictly_positive_real"] | None = None
     domain: SymbolDomain = "real"
     constraints: list[str] = Field(default_factory=list)
     scope: str | None = None
@@ -168,9 +170,23 @@ class ReviewedContractValue(BaseModel):
 
     @model_validator(mode="after")
     def validate_feature_rank(self) -> ReviewedContractValue:
-        if self.feature_rank is not None and self.category != "vector":
-            raise ValueError("Feature rank is only valid for a reviewed vector contract.")
+        if self.category == "function" and self.feature_rank is not None:
+            if (self.feature_output_domain is None or self.domain != "real"
+                    or not self.shape or len(self.shape) != 1
+                    or type(self.shape[0]) is not int or self.shape[0] <= 0):
+                raise ValueError("A feature-map function needs a real input and positive output.")
+        elif self.feature_output_domain is not None:
+            raise ValueError("An output codomain requires a ranked feature-map function.")
+        elif self.feature_rank is not None and self.category != "vector":
+            raise ValueError("Feature rank requires a reviewed vector or feature-map function.")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_contract(self, handler):
+        payload = handler(self)
+        if self.feature_output_domain is None:
+            payload.pop("feature_output_domain", None)
+        return payload
 
 
 class ContractReview(BaseModel):

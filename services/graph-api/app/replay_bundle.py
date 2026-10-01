@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from datetime import date, datetime
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 from app.admission import AdmissionDecision, AdmissionReplayInput, replay_admission
 from app.analysis_versions import canonical_json
@@ -29,6 +30,9 @@ from app.proposals import ProposalReviewRecord, ResearchProposal, parse_source_s
 from app.research_case import (
     ImplementationBindingReceipt,
     ResearchCaseReceipt,
+    ResearchProtocolReview,
+    protocol_admission_context,
+    protocol_scope_key,
     run_registered_research_case,
 )
 from app.research_case_worker import evaluate as evaluate_research_case
@@ -43,6 +47,24 @@ from app.symbol_contracts import ContractReview
 
 _HASH = r"^[0-9a-f]{64}$"
 MAX_BUNDLE_BYTES = 2 * 1024 * 1024
+FLOAT64_REPLAY_ABS_TOL = 1e-12
+
+
+def _same_scientific_result(actual, expected):
+    """Pinned float64 replay tolerance only; decisions/thresholds/IDs stay exact."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(
+            _same_scientific_result(actual[key], value) for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _same_scientific_result(a, e) for a, e in zip(actual, expected, strict=True)
+        )
+    if isinstance(expected, float):
+        return math.isclose(actual, expected, rel_tol=0, abs_tol=FLOAT64_REPLAY_ABS_TOL)
+    return actual == expected
 
 
 class ReplaySourceReference(FrozenInput):
@@ -109,7 +131,15 @@ class CompilerReplayBundle(FrozenInput):
         default=(), max_length=32,
     )
     research_cases: tuple[ResearchCaseReceipt, ...] = Field(default=(), max_length=32)
+    protocol_reviews: tuple[ResearchProtocolReview, ...] = Field(default=(), max_length=32)
     bundle_hash: str = Field(pattern=_HASH)
+
+    @model_serializer(mode="wrap")
+    def serialize_bundle(self, handler):
+        payload = handler(self)
+        if not self.protocol_reviews:
+            payload.pop("protocol_reviews", None)
+        return payload
 
     @model_validator(mode="after")
     def validate_bundle(self) -> CompilerReplayBundle:
@@ -212,7 +242,43 @@ class CompilerReplayBundle(FrozenInput):
         if self.activity.compiler_context_json is None:
             raise ValueError("Replay bundle requires a versioned compiler context.")
         context = CompileContext.model_validate_json(self.activity.compiler_context_json)
+        reviews_by_id = {item.review_id: item for item in self.protocol_reviews}
+        if len(reviews_by_id) != len(self.protocol_reviews):
+            raise ValueError("Protocol review identities must be unique.")
         for decision_id, replay_input in replay_inputs_by_id.items():
+            if replay_input.protocol_evidence_scope != "none":
+                if len(replay_input.empirical_result_ids) != 1 or (
+                    len(replay_input.symbolic_result_ids) != 1
+                    or len(replay_input.review_result_ids) > 1
+                ):
+                    raise ValueError("Scoped admission needs exact experiment/check/review refs.")
+                receipt = next((r for r in self.research_cases
+                                if r.result_id == replay_input.empirical_result_ids[0]), None)
+                check = next((c for c in self.candidate_checks
+                              if c.check_id == replay_input.symbolic_result_ids[0]), None)
+                review = reviews_by_id.get(replay_input.review_result_ids[0]) \
+                    if replay_input.review_result_ids else None
+                if receipt is None or check is None or candidate_parent is None:
+                    raise ValueError("Scoped admission evidence is missing from the bundle.")
+                binding = bindings_by_id[receipt.binding_id]
+                if replay_input.review_result_ids and (
+                    review is None or review.decision != "accept_protocol_scope"
+                    or review.problem_spec_hash != context.spec.content_hash
+                    or review.scope_key != protocol_scope_key(binding)
+                    or review.reviewed_at > decisions_by_id[decision_id].decided_at
+                ):
+                    raise ValueError("Protocol review does not authorize this frozen family.")
+                authoritative = protocol_admission_context(
+                    self.candidate, context.spec, candidate_parent, check, binding, receipt,
+                    reviewed=review is not None, review_id=review.review_id if review else None,
+                    mapping_freshness=replay_input.mapping_freshness,
+                    mapping_usable=replay_input.mapping_usable,
+                    quota_available=replay_input.quota_available,
+                )
+                expected = authoritative.model_dump(exclude={"candidate", "spec"})
+                if any(getattr(replay_input, field) != getattr(authoritative, field)
+                       for field in expected):
+                    raise ValueError("Scoped admission flags disagree with retained evidence.")
             replay_admission(
                 replay_input,
                 decisions_by_id[decision_id],
@@ -340,6 +406,7 @@ class CompilerReplayBundle(FrozenInput):
                     "admission_replay_inputs",
                     "implementation_bindings",
                     "research_cases",
+                    "protocol_reviews",
                 },
             )
             legacy_hash = hashlib.sha256(
@@ -349,6 +416,7 @@ class CompilerReplayBundle(FrozenInput):
                 self.admission_replay_inputs
                 or self.implementation_bindings
                 or self.research_cases
+                or self.protocol_reviews
                 or self.bundle_hash != legacy_hash
             ):
                 raise ValueError("Replay bundle hash does not match its immutable content.")
@@ -374,6 +442,8 @@ def make_compiler_replay_bundle(**values: object) -> CompilerReplayBundle:
         "research_cases": [],
         **{key: to_json_value(value) for key, value in values.items()},
     }
+    if not identity.get("protocol_reviews"):
+        identity.pop("protocol_reviews", None)
     bundle_hash = hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
     return CompilerReplayBundle.model_validate(identity | {"bundle_hash": bundle_hash})
 
@@ -441,6 +511,8 @@ def replay_candidate_from_bundle(bundle: CompilerReplayBundle) -> CompiledCandid
             run_id=receipt.run_id,
             worker_runner=lambda payload, **_kwargs: evaluate_research_case(payload),
             now=receipt.created_at,
+            evaluation_role=receipt.evaluation_role,
+            evolution_id=receipt.evolution_id,
         )
         expected = receipt.model_dump(mode="json")
         actual = reproduced.model_dump(mode="json")
@@ -451,7 +523,13 @@ def replay_candidate_from_bundle(bundle: CompilerReplayBundle) -> CompiledCandid
         expected.pop("result_hash", None)
         actual.pop("result_id", None)
         actual.pop("result_hash", None)
-        if canonical_json(actual) != canonical_json(expected):
+        # Original environment/measurements remain immutable in the receipt.
+        # CPython patch/libm differences may change final float64 bits, never the
+        # frozen threshold or support decision. Other runtime fields stay exact.
+        for item in (*expected["trials"], *actual["trials"]):
+            version = item["environment"].get("python", "")
+            item["environment"]["python"] = ".".join(version.split(".")[:2])
+        if not _same_scientific_result(actual, expected):
             raise ValueError(
                 "Current-version research-case outcome does not reproduce from this bundle."
             )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -45,9 +45,15 @@ from app.compatibility import (
 from app.episodes import workspace_group_id
 from app.evolution import (
     EvolutionCampaign,
+    EvolutionEvaluation,
+    MetricSample,
     freeze_finalists,
+    make_confirmation_evaluation,
+    make_evaluation,
+    record_confirmation,
     reserve_generation,
     select_parents,
+    settle_generation,
     start_campaign,
     stop_campaign,
 )
@@ -101,7 +107,13 @@ from app.research_case import (
     ImplementationBindingReceipt,
     ResearchCaseReceipt,
     ResearchCaseReceiptResponse,
+    ResearchCaseReviewRequest,
+    ResearchProtocolReview,
     make_implementation_binding,
+    phase_budget_ms,
+    protocol_admission_context,
+    protocol_scope_key,
+    quality_summary,
     validate_registered_spec,
 )
 from app.research_case_worker import SEEDS as RESEARCH_CASE_SEEDS
@@ -410,6 +422,8 @@ class Neo4jResearchStore:
             "positive": "strictly_positive_real",
             "non_negative": "non_negative_real",
         }.get(str(contract.get("domain", "unknown")), str(contract.get("domain", "unknown")))
+        if accepted_contract and contract.get("category") == "function":
+            domain = contract.get("feature_output_domain") or "unknown"
         if domain not in {
             "real",
             "strictly_positive_real",
@@ -2132,6 +2146,12 @@ class Neo4jResearchStore:
             mapping_freshness=mapping_freshness,
             mapping_usable=mapping_usable,
         )
+        protocol_context = await self._tx_protocol_admission_context(
+            tx, group_id, candidate, spec, candidate_check,
+            mapping_freshness=mapping_freshness, mapping_usable=mapping_usable,
+        )
+        if protocol_context is not None:
+            context = protocol_context
         decision = decide_admission(
             context,
             action=request.action,
@@ -2168,6 +2188,116 @@ class Neo4jResearchStore:
             tx, receipt_key, group_id, intent_hash, response_payload
         )
         return AdmissionEvaluationResponse(decision=decision, replayed=False)
+
+    async def _tx_protocol_admission_context(
+        self, tx, group_id, candidate, spec, check, *,
+        mapping_freshness, mapping_usable, result_id=None,
+    ) -> AdmissionContext | None:
+        if check is None or len(candidate.parents) != 1:
+            return None
+        row = await (await tx.run(
+            "MATCH (c:ResearchCandidate {candidate_id:$candidate_id,group_id:$group})-"
+            "[:HAS_IMPLEMENTATION_BINDING]->(b:ResearchImplementationBinding {group_id:$group})-"
+            "[:PRODUCED_EXPERIMENT_RESULT]->(r:ResearchExperimentResult {group_id:$group}) "
+            "WHERE ($result_id IS NULL AND r.evaluation_role='search') OR r.result_id=$result_id "
+            "RETURN b.payload AS binding,r.payload AS result "
+            "ORDER BY r.created_at DESC,r.result_id DESC LIMIT 1",
+            candidate_id=candidate.candidate_id, group=group_id, result_id=result_id,
+        )).single()
+        if row is None:
+            return None
+        parent_row = await (await tx.run(
+            "MATCH (p:ResearchCandidate {candidate_id:$id,group_id:$group}) "
+            "RETURN p.payload AS payload", id=candidate.parents[0].entity_id, group=group_id,
+        )).single()
+        if parent_row is None:
+            raise ResearchStoreError("Protocol evidence parent is missing.")
+        result = ResearchCaseReceipt.model_validate_json(row["result"])
+        binding = ImplementationBindingReceipt.model_validate_json(row["binding"])
+        review = await (await tx.run(
+            "MATCH (v:ResearchProtocolReview {group_id:$group,scope_key:$scope_key}) "
+            "RETURN v.decision AS decision,v.review_id AS review_id "
+            "ORDER BY v.reviewed_at DESC,v.review_id DESC LIMIT 1",
+            group=group_id, scope_key=protocol_scope_key(binding),
+        )).single()
+        return protocol_admission_context(
+            candidate, spec, CompiledCandidate.model_validate_json(parent_row["payload"]),
+            check, binding, result,
+            reviewed=review is not None and review["decision"] == "accept_protocol_scope",
+            review_id=review["review_id"] if review is not None else None,
+            mapping_freshness=mapping_freshness, mapping_usable=mapping_usable,
+            # Eligibility does not spend quota; execution reserves it in ResearchQueue.
+            quota_available=True,
+        )
+
+    async def review_research_case(
+        self, *, workspace_id: str, candidate_id: str, actor_id: str, actor_role: str,
+        idempotency_key: str, request: ResearchCaseReviewRequest,
+    ) -> dict[str, object]:
+        self._validate_evolution_write(actor_id, idempotency_key)
+        if actor_role not in {"researcher", "reviewer", "admin"}:
+            raise ResearchAuthorizationError("Only a human may review protocol scope.")
+        if self.driver is None:
+            raise ResearchStoreError("Protocol reviews require durable storage.")
+        group = workspace_group_id(workspace_id)
+        key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()
+        receipt_key = f"{group}:protocol-review:{key_hash}"
+        intent = self._stable_hash([candidate_id, actor_id, request.model_dump(mode="json")])
+
+        async def write(tx):
+            await lock_research_workspace(tx, group)
+            saved = await self._read_create_receipt(tx, receipt_key, group, intent)
+            if saved is not None:
+                return json.loads(saved)
+            row = await (await tx.run(
+                "MATCH (c:ResearchCandidate {candidate_id:$candidate,group_id:$group})-"
+                "[:HAS_EXPERIMENT_RESULT]->(r:ResearchExperimentResult {result_id:$result,"
+                "group_id:$group,evaluation_role:'search'}) "
+                "MATCH (c)-[:HAS_CANDIDATE_CHECK]->(k:ResearchCandidateCheck {group_id:$group}) "
+                "MATCH (c)-[:HAS_IMPLEMENTATION_BINDING]->(b:ResearchImplementationBinding "
+                "{group_id:$group})-[:PRODUCED_EXPERIMENT_RESULT]->(r) "
+                "RETURN r.payload AS result,k.payload AS check,b.payload AS binding "
+                "ORDER BY k.created_at DESC LIMIT 1",
+                candidate=candidate_id, result=request.result_id, group=group,
+            )).single()
+            if row is None:
+                raise ResearchReferenceNotFoundError(
+                    "Scoped search result or checker was not found."
+                )
+            result = ResearchCaseReceipt.model_validate_json(row["result"])
+            check = CandidateCheckResult.model_validate_json(row["check"])
+            binding = ImplementationBindingReceipt.model_validate_json(row["binding"])
+            if result.evaluation_role != "search" or check.candidate_hash != result.candidate_hash:
+                raise ResearchValidationError("Protocol review evidence does not match.")
+            payload = {
+                "review_id": "prv_" + self._stable_hash([receipt_key, intent])[:32],
+                "candidate_id": candidate_id, "result_id": result.result_id,
+                "check_id": check.check_id, "candidate_hash": result.candidate_hash,
+                "problem_spec_hash": result.problem_spec_hash,
+                "reviewer_id": actor_id, "reviewer_role": actor_role,
+                "decision": request.decision, "notes": request.notes,
+                "scope": "synthetic_operator_only_no_product_claim",
+                "scope_key": protocol_scope_key(binding),
+                "authorization": "bounded_parameter_search_for_this_frozen_feature_map_family",
+                "reviewed_at": datetime.now(UTC).isoformat(),
+            }
+            payload = ResearchProtocolReview.model_validate(payload).model_dump(mode="json")
+            await tx.run(
+                "MATCH (r:ResearchExperimentResult {result_id:$result,group_id:$group}) "
+                "CREATE (v:ResearchProtocolReview {review_id:$review_id,group_id:$group,"
+                "check_id:$check_id,scope_key:$scope_key,decision:$decision,"
+                "reviewed_at:$reviewed_at,payload:$payload}) "
+                "CREATE (r)-[:HAS_PROTOCOL_REVIEW]->(v)",
+                result=result.result_id, group=group, review_id=payload["review_id"],
+                check_id=check.check_id, decision=request.decision,
+                scope_key=payload["scope_key"],
+                reviewed_at=payload["reviewed_at"], payload=canonical_json(payload),
+            )
+            await self._save_create_receipt(tx, receipt_key, group, intent, canonical_json(payload))
+            return payload
+
+        async with self.driver.session(database=self.database) as session:
+            return await session.execute_write(write)
 
     async def verify_candidate(
         self,
@@ -2684,6 +2814,62 @@ class Neo4jResearchStore:
             )
         return candidate, spec, parent
 
+    async def authorize_protocol_phase(
+        self, *, workspace_id: str, candidate_id: str, evaluation_role: str,
+        evolution_id: str | None,
+    ) -> None:
+        if self.driver is None:
+            raise ResearchStoreError("Scoped research execution requires durable storage.")
+        async with self.driver.session(database=self.database) as session:
+            await session.execute_read(
+                self._tx_authorize_protocol_phase, workspace_group_id(workspace_id),
+                candidate_id, evaluation_role, evolution_id,
+                True,
+            )
+
+    async def require_protocol_scope_review(self, binding: ImplementationBindingReceipt) -> None:
+        rows, _, _ = await self.driver.execute_query(
+            "MATCH (r:ResearchProtocolReview {group_id:$group,scope_key:$scope}) "
+            "RETURN r.decision AS decision ORDER BY r.reviewed_at DESC,r.review_id DESC LIMIT 1",
+            group=workspace_group_id(binding.workspace_id), scope=protocol_scope_key(binding),
+            database_=self.database,
+        )
+        if not rows or rows[0]["decision"] != "accept_protocol_scope":
+            raise ResearchValidationError("The frozen feature-map family needs human scope review.")
+
+    @staticmethod
+    async def _tx_authorize_protocol_phase(
+        tx, group, candidate_id, role, evolution_id, execution_start=False,
+    ):
+        if role == "search" and evolution_id is None:
+            return
+        if role not in {"search", "holdout"} or evolution_id is None:
+            raise ResearchValidationError(
+                "Only scoped search or locked holdout execution is allowed."
+            )
+        row = await (await tx.run(
+            "MATCH (e:EvolutionCampaign {evolution_id:$id,group_id:$group}) "
+            "MATCH (c:ResearchCandidate {candidate_id:$candidate,group_id:$group}) "
+            "RETURN e.payload AS campaign,c.payload AS candidate",
+            id=evolution_id, candidate=candidate_id, group=group,
+        )).single()
+        if row is None:
+            raise ResearchReferenceNotFoundError("Campaign or candidate was not found.")
+        campaign = EvolutionCampaign.model_validate_json(row["campaign"])
+        candidate = CompiledCandidate.model_validate_json(row["candidate"])
+        if candidate.problem_spec_hash != campaign.spec.content_hash:
+            raise ResearchValidationError("Candidate is outside the frozen campaign.")
+        if role == "holdout" and (
+            campaign.status != "finalists_frozen" or candidate_id not in campaign.finalist_ids
+        ):
+            raise ResearchValidationError("Holdout is locked until this finalist is frozen.")
+        if role == "search" and campaign.status != "active":
+            raise ResearchValidationError("Search cannot resume after finalist freeze or stop.")
+        if execution_start:
+            elapsed = (datetime.now(UTC) - campaign.events[0].occurred_at).total_seconds() * 1000
+            if elapsed + phase_budget_ms(role) > campaign.spec.definition.budget.wall_time_ms:
+                raise ResearchValidationError("The frozen wall-time budget cannot fit this phase.")
+
     def research_case_receipt_identity(
         self,
         *,
@@ -2835,6 +3021,10 @@ class Neo4jResearchStore:
                 "Candidate compatibility mapping is not current and usable."
             )
 
+        if result.evaluation_role != "legacy_full":
+            await self._tx_authorize_protocol_phase(
+                tx, group_id, candidate_id, result.evaluation_role, result.evolution_id,
+            )
         binding_payload = canonical_json(binding.model_dump(mode="json"))
         result_payload = canonical_json(result.model_dump(mode="json"))
         for label, identity, payload in (
@@ -2860,7 +3050,7 @@ class Neo4jResearchStore:
                 await tx.run(
                     f"CREATE (r:{label} {{{identity_field}:$identity, group_id:$group, "
                     "workspace_id:$workspace, candidate_id:$candidate_id, "
-                    "created_at:$created_at, payload:$payload})",
+                    "created_at:$created_at, payload:$payload, evaluation_role:$evaluation_role})",
                     identity=identity,
                     group=group_id,
                     workspace=workspace_id,
@@ -2870,6 +3060,7 @@ class Neo4jResearchStore:
                         else result.created_at
                     ).isoformat(),
                     payload=payload,
+                    evaluation_role=result.evaluation_role,
                 )
         await tx.run(
             "MATCH (c:ResearchCandidate {candidate_id:$candidate_id, group_id:$group}) "
@@ -4371,6 +4562,14 @@ class Neo4jResearchStore:
                 research_cases.append(
                     ResearchCaseReceipt.model_validate_json(item["result"])
                 )
+            review_ids = {ref for item in admission_replay_inputs for ref in item.review_result_ids}
+            review_rows = await session.run(
+                "MATCH (r:ResearchProtocolReview {group_id:$group}) "
+                "WHERE r.review_id IN $ids RETURN r.payload AS payload ORDER BY r.review_id",
+                group=group_id, ids=sorted(review_ids),
+            )
+            protocol_reviews = [ResearchProtocolReview.model_validate_json(item["payload"])
+                                async for item in review_rows]
 
         if any(len(items) > 32 for items in (
             checks, admissions, fixtures, implementation_bindings, research_cases
@@ -4394,6 +4593,7 @@ class Neo4jResearchStore:
                 numerical_fixtures=tuple(fixtures),
                 implementation_bindings=tuple(implementation_bindings),
                 research_cases=tuple(research_cases),
+                protocol_reviews=tuple(protocol_reviews),
             )
         except ValueError as exc:
             raise ResearchStoreError(
@@ -4795,6 +4995,7 @@ class Neo4jResearchStore:
         operation: str,
         intent: object,
         mutate: Callable[[EvolutionCampaign], EvolutionCampaign],
+        validate: Callable[[Any], Awaitable[None]] | None = None,
     ) -> tuple[EvolutionCampaign, bool]:
         self._validate_evolution_write(actor_id, idempotency_key)
         group_id = workspace_group_id(workspace_id)
@@ -4803,6 +5004,8 @@ class Neo4jResearchStore:
         intent_hash = self._stable_hash([workspace_id, evolution_id, actor_id, operation, intent])
 
         if self.driver is None:
+            if validate is not None:
+                raise ResearchStoreError("Evidence-backed evolution requires durable storage.")
             receipt = self._mem_idemp.get(receipt_key)
             if receipt is not None:
                 if receipt["intent_hash"] != intent_hash:
@@ -4835,6 +5038,8 @@ class Neo4jResearchStore:
             )
             if receipt is not None:
                 return EvolutionCampaign.model_validate_json(receipt), True
+            if validate is not None:
+                await validate(tx)
             result = await tx.run(
                 "MATCH (e:EvolutionCampaign {evolution_id:$evolution_id,group_id:$group}) "
                 "RETURN e.payload AS payload,e.revision AS revision LIMIT 1",
@@ -4877,6 +5082,7 @@ class Neo4jResearchStore:
         compute_reserved: float,
         actor_id: str,
         idempotency_key: str,
+        request_context: object = None,
     ) -> tuple[EvolutionCampaign, bool]:
         return await self._mutate_evolution_campaign(
             workspace_id=workspace_id,
@@ -4884,7 +5090,9 @@ class Neo4jResearchStore:
             actor_id=actor_id,
             idempotency_key=idempotency_key,
             operation="reserve",
-            intent=[candidate_slots, compute_reserved],
+            intent=[candidate_slots, compute_reserved] if request_context is None else (
+                [candidate_slots, compute_reserved, request_context]
+            ),
             mutate=lambda campaign: reserve_generation(
                 campaign,
                 candidate_slots=candidate_slots,
@@ -4956,3 +5164,188 @@ class Neo4jResearchStore:
             intent=[],
             mutate=lambda campaign: stop_campaign(campaign, actor_id=actor_id),
         )
+
+    async def settle_evolution_from_results(
+        self, *, workspace_id: str, evolution_id: str, reservation_id: str | None,
+        candidate_results: tuple[tuple[str, str], ...], actor_id: str, idempotency_key: str,
+        search_parent_ids: tuple[str, ...] = (), confirmation: bool = False,
+    ) -> tuple[EvolutionCampaign, bool]:
+        """Resolve every metric and gate inside the same transaction as campaign settlement."""
+        evaluations: list[EvolutionEvaluation] = []
+        candidates: list[CompiledCandidate] = []
+        group = workspace_group_id(workspace_id)
+
+        async def validate(tx):
+            evaluations.clear()
+            candidates.clear()
+            campaign_row = await (await tx.run(
+                "MATCH (e:EvolutionCampaign {evolution_id:$id,group_id:$group}) "
+                "RETURN e.payload AS payload", id=evolution_id, group=group,
+            )).single()
+            if campaign_row is None:
+                raise ResearchReferenceNotFoundError("Evolution campaign was not found.")
+            campaign = EvolutionCampaign.model_validate_json(campaign_row["payload"])
+            if search_parent_ids:
+                selection = campaign.selections[-1] if campaign.selections else None
+                if selection is None or selection.candidate_ids != search_parent_ids:
+                    raise ResearchValidationError("Search parents must be the persisted selection.")
+            for candidate_id, result_id in candidate_results:
+                candidate, spec, _ = await self._tx_prepare_candidate_numerical_fixture(
+                    tx, group, workspace_id, candidate_id, RESEARCH_CASE_SEEDS[0],
+                )
+                if spec.content_hash != campaign.spec.content_hash:
+                    raise ResearchValidationError("Candidate is outside the frozen campaign.")
+                row = await (await tx.run(
+                    "MATCH (c:ResearchCandidate {candidate_id:$id,group_id:$group})-"
+                    "[:HAS_CANDIDATE_CHECK]->(k:ResearchCandidateCheck {group_id:$group}) "
+                    "RETURN k.payload AS payload ORDER BY k.created_at DESC LIMIT 1",
+                    id=candidate_id, group=group,
+                )).single()
+                check = CandidateCheckResult.model_validate_json(row["payload"]) if row else None
+                context = await self._tx_protocol_admission_context(
+                    tx, group, candidate, spec, check,
+                    result_id=None if confirmation else result_id,
+                    mapping_freshness="current", mapping_usable=True,
+                )
+                if context is None:
+                    raise ResearchValidationError("Scoped search evidence is missing.")
+                result_row = await (await tx.run(
+                    "MATCH (c:ResearchCandidate {candidate_id:$candidate,group_id:$group})-"
+                    "[:HAS_EXPERIMENT_RESULT]->(r:ResearchExperimentResult "
+                    "{result_id:$result,group_id:$group}) RETURN r.payload AS payload",
+                    candidate=candidate_id, result=result_id, group=group,
+                )).single()
+                if result_row is None:
+                    raise ResearchReferenceNotFoundError("Evaluation result was not found.")
+                result = ResearchCaseReceipt.model_validate_json(result_row["payload"])
+                role = "holdout" if confirmation else "search"
+                if result.evaluation_role != role or (
+                    result.evolution_id not in {None, evolution_id}
+                ) or (confirmation and result.evolution_id != evolution_id):
+                    raise ResearchValidationError("Result cannot be used in this campaign phase.")
+                # Resolve and validate the exact result binding, even when selection
+                # uses the latest search receipt for the current human-scope gate.
+                await self._tx_protocol_admission_context(
+                    tx, group, candidate, spec, check, result_id=result_id,
+                    mapping_freshness="current", mapping_usable=True,
+                )
+                decision = decide_admission(
+                    context, action="can_enter_parent_pool", actor_id=actor_id,
+                )
+                replay_input = make_admission_replay_input(context, decision)
+                await tx.run(
+                    "MATCH (c:ResearchCandidate {candidate_id:$candidate,group_id:$group}) "
+                    "MERGE (d:ResearchAdmissionDecision {decision_id:$id,group_id:$group}) "
+                    "ON CREATE SET d.workspace_id=$workspace,d.candidate_id=$candidate,"
+                    "d.policy_version=$policy,d.payload=$payload,d.replay_input_payload=$input,"
+                    "d.created_at=$created MERGE (c)-[:HAS_ADMISSION_DECISION]->(d)",
+                    candidate=candidate_id, group=group, id=decision.decision_id,
+                    workspace=workspace_id, policy=decision.policy_version,
+                    payload=canonical_json(decision.model_dump(mode="json")),
+                    input=canonical_json(replay_input.model_dump(mode="json")),
+                    created=decision.decided_at.isoformat(),
+                )
+                eligible = decision.allowed and result.quality_constraints_met
+                cost = float(result.search_cost["wall_time_ms"]) / 1000
+                metric = spec.definition.metrics
+                if len(metric) != 1 or metric[0].name != result.primary_metric:
+                    raise ResearchValidationError(
+                        "The registered pilot supports its frozen metric only."
+                    )
+                metrics = (MetricSample(
+                    name=metric[0].name, unit=metric[0].unit, direction=metric[0].direction,
+                    value=quality_summary(result.trials, role)[0],
+                ),) if eligible else ()
+                refs = (result.result_id, *decision.input_result_ids)
+                if confirmation and eligible:
+                    evaluation = make_confirmation_evaluation(
+                        candidate, spec=spec, metrics=metrics, result_ids=refs,
+                        compute_cost=cost, admission=decision,
+                    )
+                else:
+                    outcome = "eligible" if eligible else "invalid"
+                    if any(item.outcome == "timeout" for item in result.trials):
+                        outcome = "timeout"
+                    elif any(item.outcome == "error" for item in result.trials):
+                        outcome = "infrastructure_error"
+                    evaluation = make_evaluation(
+                        candidate, spec=spec, outcome=outcome, metrics=metrics,
+                        result_ids=refs, compute_cost=cost, admission=decision,
+                        failure_reason=None if eligible else (
+                            "protocol_quality_or_current_admission_not_supported"
+                        ), search_parent_ids=search_parent_ids,
+                    )
+                    if confirmation:
+                        payload = evaluation.model_dump(mode="json", exclude={"evaluation_id"})
+                        if not evaluation.search_parent_ids:
+                            payload.pop("search_parent_ids", None)
+                        payload["data_role"] = "holdout"
+                        evaluation = EvolutionEvaluation(
+                            evaluation_id="eev_" + self._stable_hash(payload)[:32], **payload,
+                        )
+                evaluations.append(evaluation)
+                candidates.append(candidate)
+                for parent_id in search_parent_ids:
+                    await tx.run(
+                        "MATCH (c:ResearchCandidate {candidate_id:$child,group_id:$group}) "
+                        "MATCH (p:ResearchCandidate {candidate_id:$parent,group_id:$group}) "
+                        "MERGE (c)-[:EVOLVED_FROM {evolution_id:$evolution}]->(p)",
+                        child=candidate_id, parent=parent_id, group=group, evolution=evolution_id,
+                    )
+
+        return await self._mutate_evolution_campaign(
+            workspace_id=workspace_id, evolution_id=evolution_id, actor_id=actor_id,
+            idempotency_key=idempotency_key, operation="confirm" if confirmation else "settle",
+            intent=[reservation_id, candidate_results, search_parent_ids], validate=validate,
+            mutate=lambda campaign: record_confirmation(
+                campaign, tuple(evaluations), actor_id=actor_id,
+            ) if confirmation else settle_generation(
+                campaign, reservation_id=reservation_id, evaluations=tuple(evaluations),
+                resolved_candidates=tuple(candidates), actor_id=actor_id,
+            ),
+        )
+
+    async def evolution_candidate_context(self, *, workspace_id: str, candidate_id: str):
+        candidate, spec, parent = await self.prepare_registered_research_case(
+            workspace_id=workspace_id, candidate_id=candidate_id,
+        )
+        rows, _, _ = await self.driver.execute_query(
+            "MATCH (a:TransformationActivity {group_id:$group})-[:PRODUCED]->"
+            "(c:ResearchCandidate {candidate_id:$id,group_id:$group}) "
+            "RETURN a.payload AS payload ORDER BY a.created_at DESC LIMIT 1",
+            id=candidate_id, group=workspace_group_id(workspace_id), database_=self.database,
+        )
+        if not rows:
+            raise ResearchReferenceNotFoundError("Candidate compiler context is missing.")
+        activity = TransformationActivity.model_validate_json(rows[0]["payload"])
+        if activity.compiler_context_json is None:
+            raise ResearchValidationError("Evolution requires a versioned compiler context.")
+        return candidate, spec, parent, CompileContext.model_validate_json(
+            activity.compiler_context_json
+        )
+
+    async def export_evolution_bundle(self, *, workspace_id: str, evolution_id: str):
+        from app.evolution_replay import make_evolution_bundle
+
+        campaign = await self.get_evolution_campaign(
+            workspace_id=workspace_id, evolution_id=evolution_id,
+        )
+        if campaign is None:
+            raise ResearchReferenceNotFoundError("Evolution campaign was not found.")
+        ids = sorted({e.candidate_id for e in campaign.evaluations})
+        if not ids or len(ids) > 32:
+            raise ResearchValidationError("Pilot replay needs 1–32 evaluated candidates.")
+        bundles = []
+        for candidate_id in ids:
+            rows, _, _ = await self.driver.execute_query(
+                "MATCH (a:TransformationActivity {group_id:$group})-[:PRODUCED]->"
+                "(c:ResearchCandidate {candidate_id:$id,group_id:$group}) "
+                "RETURN a.activity_id AS id ORDER BY a.created_at DESC LIMIT 1",
+                group=workspace_group_id(workspace_id), id=candidate_id, database_=self.database,
+            )
+            if not rows:
+                raise ResearchStoreError("Evolution compiler activity is missing.")
+            bundles.append(await self.export_compiler_replay_bundle(
+                workspace_id=workspace_id, candidate_id=candidate_id, activity_id=rows[0]["id"],
+            ))
+        return make_evolution_bundle(campaign, bundles)

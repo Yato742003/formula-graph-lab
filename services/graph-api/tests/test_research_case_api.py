@@ -74,6 +74,7 @@ def test_research_case_endpoint_finishes_atomically(monkeypatch):
         run_id=RUN_ID,
         worker_runner=lambda payload, **_kwargs: evaluate(payload),
         now=NOW,
+        evaluation_role="search",
     )
 
     class FakeStore:
@@ -89,10 +90,14 @@ def test_research_case_endpoint_finishes_atomically(monkeypatch):
                 envelope=SimpleNamespace(job_id=RUN_ID),
             )
 
+        async def research_case_retry(self, *_args):
+            return None, None
+
         async def admit_research_case(self, worker, **kwargs):
             assert worker.identity == "experiment-worker"
             assert kwargs["binding"] == binding
-            assert kwargs["reserved_ms"] == 30_000
+            assert kwargs["reserved_ms"] == 18_000
+            assert kwargs["evaluation_role"] == "search"
             return self.ticket
 
         async def claim(self, ticket, worker, payload, image):
@@ -155,6 +160,7 @@ def test_research_case_endpoint_marks_idempotent_replay(monkeypatch):
         run_id=RUN_ID,
         worker_runner=lambda payload, **_kwargs: evaluate(payload),
         now=NOW,
+        evaluation_role="search",
     )
     saved = ResearchCaseReceiptResponse(binding=binding, result=result, replayed=False)
 
@@ -168,6 +174,9 @@ def test_research_case_endpoint_marks_idempotent_replay(monkeypatch):
                 result=saved.model_dump_json(),
                 envelope=SimpleNamespace(job_id=RUN_ID),
             )
+
+        async def research_case_retry(self, *_args):
+            return None, saved.model_copy(update={"replayed": True})
 
         async def admit_research_case(self, *_args, **_kwargs):
             return self.ticket

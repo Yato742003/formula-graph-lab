@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from app.admission import AdmissionDecision
 from app.analysis_versions import canonical_json
@@ -41,6 +41,10 @@ class EvolutionStartRequest(FrozenInput):
 
 class EvolutionFinalistsRequest(FrozenInput):
     finalist_ids: tuple[str, ...] = Field(min_length=1, max_length=128)
+
+
+class EvolutionGenerationRequest(FrozenInput):
+    seed_candidate_id: str | None = Field(default=None, pattern=r"^cand_[0-9a-f]{32}$")
 
 
 class MetricSample(FrozenInput):
@@ -81,6 +85,7 @@ class EvolutionEvaluation(FrozenInput):
     compute_cost: float = Field(ge=0)
     attempt: int = Field(default=1, ge=1, le=1 + MAX_RETRIES_PER_CANDIDATE)
     data_role: Literal["search", "validation", "holdout"]
+    search_parent_ids: tuple[str, ...] = Field(default=(), max_length=2)
 
     @model_validator(mode="after")
     def validate_evaluation(self) -> EvolutionEvaluation:
@@ -100,10 +105,19 @@ class EvolutionEvaluation(FrozenInput):
         elif self.failure_reason is None:
             raise ValueError("A non-eligible outcome requires a bounded reason.")
         identity = self.model_dump(mode="json", exclude={"evaluation_id"})
+        if not self.search_parent_ids:
+            identity.pop("search_parent_ids", None)
         digest = hashlib.sha256(canonical_json(identity).encode()).hexdigest()
         if self.evaluation_id != f"eev_{digest[:32]}":
             raise ValueError("Evolution evaluation identity does not match its content.")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_evaluation(self, handler):
+        payload = handler(self)
+        if not self.search_parent_ids:
+            payload.pop("search_parent_ids", None)
+        return payload
 
 
 class GenerationReservation(FrozenInput):
@@ -333,6 +347,7 @@ def reserve_generation(
     actor_id: str,
     now: datetime | None = None,
 ) -> EvolutionCampaign:
+    now = _utc(now)
     _require_active(campaign)
     reason = _automatic_stop_reason(campaign, now=now)
     if reason:
@@ -403,6 +418,7 @@ def make_evaluation(
     data_role: Literal["search", "validation"] = "search",
     admission: AdmissionDecision | None = None,
     failure_reason: str | None = None,
+    search_parent_ids: tuple[str, ...] = (),
 ) -> EvolutionEvaluation:
     _verify_candidate_identity(candidate)
     if (
@@ -441,6 +457,8 @@ def make_evaluation(
         "attempt": attempt,
         "data_role": data_role,
     }
+    if search_parent_ids:
+        payload["search_parent_ids"] = search_parent_ids
     digest = hashlib.sha256(canonical_json(payload).encode()).hexdigest()
     return EvolutionEvaluation(evaluation_id=f"eev_{digest[:32]}", **payload)
 
@@ -465,6 +483,8 @@ def make_confirmation_evaluation(
         admission=admission,
     )
     payload = evaluation.model_dump(mode="json", exclude={"evaluation_id"})
+    if not evaluation.search_parent_ids:
+        payload.pop("search_parent_ids", None)
     payload["data_role"] = "holdout"
     digest = hashlib.sha256(canonical_json(payload).encode()).hexdigest()
     return EvolutionEvaluation(evaluation_id=f"eev_{digest[:32]}", **payload)
@@ -479,6 +499,7 @@ def settle_generation(
     actor_id: str,
     now: datetime | None = None,
 ) -> EvolutionCampaign:
+    now = _utc(now)
     _require_active(campaign)
     reservation = next(
         (
@@ -559,6 +580,7 @@ def select_parents(
     actor_id: str,
     now: datetime | None = None,
 ) -> tuple[EvolutionCampaign, ParentSelection]:
+    now = _utc(now)
     _require_active(campaign)
     if type(count) is not int or count <= 0:
         raise ValueError("Parent count must be a positive integer.")
@@ -660,8 +682,12 @@ def record_confirmation(
     actor_id: str,
     now: datetime | None = None,
 ) -> EvolutionCampaign:
+    now = _utc(now)
     if campaign.status != "finalists_frozen" or not evaluations:
         raise ValueError("Confirmation requires frozen finalists and retained results.")
+    cost = sum((_decimal(item.compute_cost) for item in evaluations), Decimal(0))
+    if _spent_compute(campaign) + cost > _decimal(campaign.spec.definition.budget.compute_budget):
+        raise ValueError("Confirmation exceeds the frozen total compute budget.")
     if len({item.evaluation_id for item in evaluations}) != len(evaluations):
         raise ValueError("Confirmation results must be unique receipts.")
     if (
@@ -729,11 +755,19 @@ class EvolutionReport(FrozenInput):
     confirmation_compute_cost: float = Field(ge=0)
     compute_unit: str
     compared_candidates: tuple[EvolutionEvaluation, ...]
+    confirmation_evaluations: tuple[EvolutionEvaluation, ...] = ()
     pareto_archive: tuple[str, ...]
     finalist_ids: tuple[str, ...]
     winner_ids: tuple[str, ...]
     selections: tuple[ParentSelection, ...]
     events: tuple[CampaignEvent, ...]
+
+    @model_serializer(mode="wrap")
+    def serialize_report(self, handler):
+        payload = handler(self)
+        if not self.confirmation_evaluations:
+            payload.pop("confirmation_evaluations", None)
+        return payload
 
     @model_validator(mode="after")
     def validate_report(self) -> EvolutionReport:
@@ -765,6 +799,7 @@ def build_evolution_report(campaign: EvolutionCampaign) -> EvolutionReport:
         ),
         "compute_unit": campaign.spec.definition.budget.compute_unit,
         "compared_candidates": campaign.evaluations,
+        "confirmation_evaluations": campaign.confirmation_evaluations,
         "pareto_archive": campaign.pareto_archive,
         "finalist_ids": campaign.finalist_ids,
         "winner_ids": campaign.winner_ids,

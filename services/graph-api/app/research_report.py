@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from app.admission import AdmissionDecision
 from app.analysis_versions import canonical_json
@@ -57,6 +57,7 @@ class FixtureEvidence(FrozenInput):
 
 
 class ResearchCaseEvidence(FrozenInput):
+    evaluation_role: Literal["legacy_full", "search", "holdout"] = "legacy_full"
     result_id: str = Field(pattern=r"^exp_[0-9a-f]{32}$")
     binding_id: str = Field(pattern=r"^bind_[0-9a-f]{32}$")
     outcome: Literal["supported_on_protocol", "failed_on_protocol", "inconclusive"]
@@ -66,6 +67,13 @@ class ResearchCaseEvidence(FrozenInput):
     claim_scope: Literal["synthetic_operator_only_no_product_claim"]
     replay_status: Literal["replayed", "stored_only"]
     performance_claim: Literal[False] = False
+
+    @model_serializer(mode="wrap")
+    def retain_legacy_identity(self, handler):
+        result = handler(self)
+        if self.evaluation_role == "legacy_full":
+            result.pop("evaluation_role", None)
+        return result
 
 
 class CompilerReplayReport(FrozenInput):
@@ -215,10 +223,9 @@ def _fixture_evidence(item: NumericalFixtureReceipt) -> FixtureEvidence:
     )
 
 
-def _research_case_evidence(
-    item: ResearchCaseReceipt, *, replayed: bool
-) -> ResearchCaseEvidence:
+def _research_case_evidence(item: ResearchCaseReceipt, *, replayed: bool) -> ResearchCaseEvidence:
     return ResearchCaseEvidence(
+        evaluation_role=item.evaluation_role,
         result_id=item.result_id,
         binding_id=item.binding_id,
         outcome=item.outcome,

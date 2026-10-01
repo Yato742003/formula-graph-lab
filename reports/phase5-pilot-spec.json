@@ -1,0 +1,103 @@
+{
+  "task": "Compare one frozen feature-map mashup with rank-matched parents.",
+  "method_family": "linear-attention",
+  "metrics": [
+    {
+      "name": "candidate_regret_vs_best_parent",
+      "unit": "mean-absolute-error",
+      "direction": "minimize"
+    }
+  ],
+  "quality_constraints": [
+    {
+      "metric": "candidate_regret_vs_best_parent",
+      "relation": "<=",
+      "threshold": 0.01
+    }
+  ],
+  "baselines": [
+    {
+      "name": "exact-causal-softmax",
+      "version": "1",
+      "sha256": "ada0eb8a2727d421946d8b49566df27f31e33058ddd4d576c0112fbb414a14cf",
+      "readiness": "unverified"
+    },
+    {
+      "name": "positive-random-exp",
+      "version": "1",
+      "sha256": "c37dd61962774cc7f4fa72b53c1d577e1af361095ee8574fbd7768819eb0e580",
+      "readiness": "unverified"
+    },
+    {
+      "name": "positive-elu",
+      "version": "1",
+      "sha256": "680ab392ec1bf7caa18f1cc92f62c774395c44ef0d76d6b8dcebeb67b005e6be",
+      "readiness": "unverified"
+    }
+  ],
+  "dataset": {
+    "artifact_hash": "cde07838f7e77880f2ca4c21f33e5ff0db3c81f2ce057487b0abe117fdeb4054",
+    "version": "1",
+    "splits": [
+      {
+        "role": "search",
+        "split_hash": "d5228c6a4307e007bf9e252f7dafa205b25959fa4f422d51597b18a8e5c21ccb"
+      },
+      {
+        "role": "validation",
+        "split_hash": "87da661283fba0ae3981f1d656463184763a9e5d771348e6a43357a079a552aa"
+      },
+      {
+        "role": "holdout",
+        "split_hash": "064c1e57924d081b61d0d40d97250fd52aade1c6c156eccdbae6e254c7e876e7"
+      }
+    ]
+  },
+  "model": {
+    "status": "not_applicable",
+    "reason": "Operator-only synthetic case."
+  },
+  "tokenizer": {
+    "status": "not_applicable",
+    "reason": "No text model is used."
+  },
+  "hardware": {
+    "target": "cpu"
+  },
+  "backend": {
+    "name": "python-stdlib",
+    "version": "3.12"
+  },
+  "dtype": "float64",
+  "evaluator": {
+    "name": "fgl-attention-mashup",
+    "protocol_version": "attention-mashup-cpu-synthetic.v1",
+    "implementation_hash": "ac619a7eab5592f7c05c0ad1a0ac4e4f12afcfb2ceb5851744ac01d9b0cc6e5a",
+    "config_hash": "f49042111b7688e9b2f441aa3f49be709b4eb9ce4236fb7070708bedf837ffb7"
+  },
+  "seeds": [
+    42,
+    43,
+    44,
+    45,
+    46
+  ],
+  "budget": {
+    "max_candidates": 2,
+    "max_generations": 2,
+    "wall_time_ms": 600000,
+    "compute_budget": 60,
+    "compute_unit": "CPU-seconds"
+  },
+  "allowed_transforms": [
+    {
+      "name": "mix_positive_feature_maps",
+      "version": "1"
+    },
+    {
+      "name": "lower_mixture_to_concatenation",
+      "version": "1"
+    }
+  ],
+  "stop_conditions": []
+}

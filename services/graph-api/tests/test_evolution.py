@@ -182,6 +182,18 @@ def _eligible(
     )
 
 
+def test_reservation_and_ledger_share_one_clock_when_now_is_not_supplied(monkeypatch):
+    from app import evolution
+
+    campaign = start_campaign(_spec(), actor_id="researcher", now=NOW)
+    ticks = iter(NOW + timedelta(microseconds=i) for i in range(1, 20))
+    monkeypatch.setattr(evolution, "_utc", lambda value: value if value else next(ticks))
+    reserved = reserve_generation(
+        campaign, candidate_slots=1, compute_reserved=1, actor_id="controller"
+    )
+    assert reserved.reservations[-1].reserved_at == reserved.events[-1].occurred_at
+
+
 def test_pareto_archive_is_seeded_deterministic_and_preserves_full_parentage():
     spec = _spec()
     campaign = start_campaign(spec, actor_id="researcher", now=NOW)
