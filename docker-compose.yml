@@ -5,8 +5,8 @@ services:
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD}
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
     volumes:
       - neo4j_data:/data
     healthcheck:
@@ -23,12 +23,18 @@ services:
     build:
       context: ./services/graph-api
     restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
     environment:
       APP_ENV: production
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:?set NEO4J_PASSWORD}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GRAPHITI_TELEMETRY_ENABLED: 'false'
       FGL_ENABLE_PROPOSALS: ${FGL_ENABLE_PROPOSALS:-false}
       FGL_ENABLE_PROPOSAL_GENERATION: ${FGL_ENABLE_PROPOSAL_GENERATION:-false}
       FGL_PROPOSAL_MODEL: ${FGL_PROPOSAL_MODEL:-}
@@ -40,7 +46,7 @@ services:
       SERVICE_TOKEN: ${SERVICE_TOKEN:?set SERVICE_TOKEN}
       SEARCH_CURSOR_SECRET: ${SEARCH_CURSOR_SECRET:-}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       neo4j:
         condition: service_healthy

@@ -1,0 +1,8 @@
+*
+!app/
+!app/*.py
+!pyproject.toml
+!uv.lock
+!Dockerfile
+!tests/
+!tests/sandbox_probe.py
