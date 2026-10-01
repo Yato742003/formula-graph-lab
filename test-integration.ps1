@@ -1,3 +1,4 @@
+param([string[]]$TestPaths = @(), [switch]$ShowOutput)
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
 $composeFile = Join-Path $projectRoot 'docker-compose.test.yml'
@@ -25,7 +26,9 @@ try {
     $env:TEST_NEO4J_URI = 'bolt://' + $testAddress
     Push-Location (Join-Path $projectRoot 'services\graph-api')
     try {
-        & $pythonExe -m pytest -m integration --tb=short
+        $pytestOutputArgs = @()
+        if ($ShowOutput) { $pytestOutputArgs += '-s' }
+        & $pythonExe -m pytest -m integration --tb=short @TestPaths @pytestOutputArgs
         $testExit = $LASTEXITCODE
     } finally {
         Pop-Location
