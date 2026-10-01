@@ -2603,7 +2603,8 @@ button {
 .flow-evidence-node {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  width: 280px;
+  width: 320px;
+  box-sizing: border-box;
   min-height: 116px;
   gap: 0.4rem;
   padding: 0.85rem 0.9rem 0.8rem;
@@ -2649,7 +2650,9 @@ button {
 .flow-evidence-node.is-compact {
   display: flex;
   align-items: center;
-  width: 205px;
+  width: 220px;
+  min-width: 220px;
+  max-width: 220px;
   min-height: 44px;
   padding: 6px 10px;
   border-radius: 8px;
@@ -2775,6 +2778,7 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
   letter-spacing: -0.01em;
+  max-width: 220px;
 }
 
 .section-swimlane-badge {
@@ -2901,10 +2905,19 @@ button {
   margin: 0;
 }
 
-.flow-evidence-node.graph-node-equation {
-  width: auto;
-  min-width: 290px;
-  max-width: 520px;
+.flow-evidence-node.graph-node-equation:not(.is-compact) {
+  width: 320px;
+  min-width: 320px;
+  max-width: 320px;
+  box-sizing: border-box;
+}
+
+.flow-evidence-node.graph-node-paper:not(.is-compact),
+.flow-evidence-node.graph-node-version:not(.is-compact) {
+  width: 280px;
+  min-width: 280px;
+  max-width: 280px;
+  box-sizing: border-box;
 }
 
 .flow-evidence-node .node-latex-math::-webkit-scrollbar,

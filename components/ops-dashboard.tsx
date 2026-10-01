@@ -65,6 +65,42 @@ interface RecoveryResult {
   recovered_at: string;
 }
 
+function parseDashboard(value: unknown): OpsDashboardData {
+  if (!value || typeof value !== 'object' ||
+      !['ok', 'degraded'].includes((value as OpsDashboardData).status) ||
+      typeof (value as OpsDashboardData).checked_at !== 'string') {
+    throw new Error('Operations telemetry response is invalid.');
+  }
+  const data = value as OpsDashboardData;
+  for (const group of [data.subsystems?.import, data.subsystems?.checker,
+    data.subsystems?.worker, data.subsystems?.quotas, data.quotas]) {
+    if (group === undefined) continue;
+    if (group === null || typeof group !== 'object' || Array.isArray(group)) {
+      throw new Error('Operations telemetry response is invalid.');
+    }
+    for (const [key, field] of Object.entries(group)) {
+      if (key === 'allowed_hosts') {
+        if (!Array.isArray(field) || !field.every(host => typeof host === 'string')) {
+          throw new Error('Operations host policy is invalid.');
+        }
+      } else if (key === 'metrics') {
+        if (field !== null && (typeof field !== 'object' || Array.isArray(field) ||
+            Object.values(field).some(metric => typeof metric !== 'number' || !Number.isFinite(metric) || metric < 0))) {
+          throw new Error('Operations queue metrics are invalid.');
+        }
+      } else if (field !== null && !['status', 'sandbox_image', 'sandbox_available'].includes(key) &&
+          (typeof field !== 'number' || !Number.isFinite(field) || field < 0)) {
+        throw new Error('Operations numeric limits are invalid.');
+      }
+    }
+  }
+  return value as OpsDashboardData;
+}
+
+function pillClass(status: string) {
+  return status === 'ok' || status === 'healthy' ? 'healthy' : 'degraded';
+}
+
 export function OpsDashboard() {
   const [data, setData] = useState<OpsDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -82,7 +118,7 @@ export function OpsDashboard() {
       if (!response.ok) {
         throw new Error(`Failed to load ops telemetry: HTTP ${response.status}`);
       }
-      const json = (await response.json()) as OpsDashboardData;
+      const json = parseDashboard(await response.json());
       setData(json);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error loading operations data');
@@ -98,7 +134,7 @@ export function OpsDashboard() {
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`Failed to load ops telemetry: HTTP ${response.status}`);
-        return (await response.json()) as OpsDashboardData;
+        return parseDashboard(await response.json());
       })
       .then((json) => {
         if (active) {
@@ -148,15 +184,15 @@ export function OpsDashboard() {
   const quotas = data?.quotas ?? data?.subsystems?.quotas;
   const rateLimitRpm = quotas?.rate_limit_per_minute ?? quotas?.workspace_rate_limit_rpm ?? 120;
   const maxRequestBytes = quotas?.max_request_bytes ?? quotas?.request_body_cap_bytes ?? 2097152;
-  const quotasStatus = quotas?.status ?? 'healthy';
+  const quotasStatus = quotas?.status ?? 'unknown';
 
   const importSub = data?.subsystems?.import;
-  const importStatus = importSub?.status ?? 'healthy';
+  const importStatus = importSub?.status ?? 'unknown';
   const allowedHosts = importSub?.allowed_hosts ?? ['arxiv.org', 'export.arxiv.org'];
-  const maxHtmlBytes = importSub?.max_html_bytes ?? importSub?.max_body_bytes ?? 10485760;
+  const maxHtmlBytes = importSub?.max_html_bytes;
 
   const checkerSub = data?.subsystems?.checker;
-  const checkerStatus = checkerSub?.status ?? 'healthy';
+  const checkerStatus = checkerSub?.status ?? 'unknown';
   const ramLimitMb = checkerSub?.ram_limit_mb ?? (checkerSub?.max_ram_bytes ? Math.round(checkerSub.max_ram_bytes / (1024 * 1024)) : 256);
   const timeoutMs = checkerSub?.timeout_ms ?? checkerSub?.max_timeout_ms ?? 10000;
   const cpuCores = checkerSub?.cpu_cores ?? 1;
@@ -164,13 +200,15 @@ export function OpsDashboard() {
 
   const workerSub = data?.subsystems?.worker;
   const metrics = workerSub?.metrics;
-  const workerStatus = workerSub?.status ?? 'healthy';
+  const workerStatus = workerSub?.status ?? 'unknown';
   const activeQueued = workerSub?.active_queued ?? metrics?.active_queued ?? 0;
   const activeRunning = workerSub?.active_running ?? metrics?.active_running ?? 0;
   const finishedJobs = workerSub?.finished_jobs ?? metrics?.finished ?? 0;
   const stuckJobs = workerSub?.stuck_jobs ?? metrics?.stuck ?? 0;
 
-  const isDegraded = data?.status === 'degraded' || stuckJobs > 0;
+  const unavailable = Boolean(error) || !data || !importSub || !checkerSub || !workerSub ||
+    workerStatus === 'unavailable';
+  const isDegraded = unavailable || data?.status === 'degraded' || stuckJobs > 0;
 
   return (
     <div className="ops-dashboard">
@@ -214,9 +252,11 @@ export function OpsDashboard() {
             <div style={{ fontWeight: 650, fontSize: '13px', color: 'var(--foreground)' }}>
               {loading && !data
                 ? 'Connecting to graph service...'
+                : unavailable
+                ? 'Operations telemetry unavailable'
                 : isDegraded
-                ? 'System Degraded: Stuck jobs detected'
-                : 'All Subsystems Operational'}
+                ? 'Workspace queue needs attention'
+                : 'Workspace queue telemetry available'}
             </div>
             {data && (
               <div style={{ fontSize: '11px', color: 'var(--muted-foreground)' }}>
@@ -246,9 +286,9 @@ export function OpsDashboard() {
               <Activity size={12} aria-hidden="true" /> Subsystems
             </div>
             <div className="ops-metric-tile-val" style={{ color: isDegraded ? '#d97706' : '#059669' }}>
-              {isDegraded ? 'DEGRADED' : 'HEALTHY'}
+              {unavailable ? 'UNKNOWN' : isDegraded ? 'DEGRADED' : 'REPORTED'}
             </div>
-            <div className="ops-metric-tile-sub">4 active controllers</div>
+            <div className="ops-metric-tile-sub">Configuration is not a live execution check</div>
           </div>
 
           <div className="ops-metric-tile">
@@ -256,10 +296,10 @@ export function OpsDashboard() {
               <Layers size={12} aria-hidden="true" /> Active Jobs
             </div>
             <div className="ops-metric-tile-val">
-              {activeRunning + activeQueued}
+              {unavailable ? '—' : activeRunning + activeQueued}
             </div>
             <div className="ops-metric-tile-sub">
-              {activeRunning} running &bull; {activeQueued} queued
+              {unavailable ? 'Queue metrics unavailable' : `${activeRunning} running · ${activeQueued} queued`}
             </div>
           </div>
 
@@ -280,10 +320,10 @@ export function OpsDashboard() {
               <ShieldCheck size={12} aria-hidden="true" /> Ingress Quota
             </div>
             <div className="ops-metric-tile-val">
-              {rateLimitRpm} <span style={{ fontSize: '13px', fontWeight: 500 }}>RPM</span>
+              {quotas ? rateLimitRpm : '—'} <span style={{ fontSize: '13px', fontWeight: 500 }}>RPM</span>
             </div>
             <div className="ops-metric-tile-sub">
-              {(maxRequestBytes / (1024 * 1024)).toFixed(0)} MB max payload
+              {quotas ? `${(maxRequestBytes / (1024 * 1024)).toFixed(0)} MB max payload` : 'Quota configuration unknown'}
             </div>
           </div>
         </section>
@@ -353,7 +393,7 @@ export function OpsDashboard() {
                 <HardDrive size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
                 Import Guard
               </h2>
-              <span className={`ops-pill pill-${importStatus === 'degraded' ? 'degraded' : 'healthy'}`}>
+              <span className={`ops-pill pill-${pillClass(importStatus)}`}>
                 {importStatus === 'ok' ? 'Healthy' : importStatus}
               </span>
             </div>
@@ -367,11 +407,11 @@ export function OpsDashboard() {
               </div>
               <div className="ops-dl-row">
                 <dt>Max HTML Size</dt>
-                <dd>{(maxHtmlBytes / (1024 * 1024)).toFixed(0)} MB</dd>
+                <dd>{typeof maxHtmlBytes === 'number' ? `${(maxHtmlBytes / (1024 * 1024)).toFixed(0)} MB` : 'Unknown'}</dd>
               </div>
               <div className="ops-dl-row">
                 <dt>SSRF Boundary</dt>
-                <dd style={{ color: '#059669' }}>Strict Allowlist</dd>
+                <dd>{importSub?.allowed_hosts ? 'Allowlist configured' : 'Unknown'}</dd>
               </div>
             </dl>
           </article>
@@ -383,7 +423,7 @@ export function OpsDashboard() {
                 <Cpu size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
                 Checker Execution Bounds
               </h2>
-              <span className={`ops-pill pill-${checkerStatus === 'degraded' ? 'degraded' : 'healthy'}`}>
+              <span className={`ops-pill pill-${pillClass(checkerStatus)}`}>
                 {checkerStatus === 'ok' ? 'Healthy' : checkerStatus}
               </span>
             </div>
@@ -417,12 +457,12 @@ export function OpsDashboard() {
                 <Layers size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
                 Job Queue &amp; Recovery
               </h2>
-              <span className={`ops-pill pill-${stuckJobs > 0 ? 'degraded' : 'healthy'}`}>
-                {workerStatus === 'local_fallback' ? 'Host Isolated' : stuckJobs > 0 ? 'Degraded' : 'Healthy'}
+              <span className={`ops-pill pill-${unavailable || stuckJobs > 0 ? 'degraded' : pillClass(workerStatus)}`}>
+                {unavailable ? 'Unavailable' : stuckJobs > 0 ? 'Degraded' : workerStatus}
               </span>
             </div>
             <p className="ops-card-desc">
-              Active job counters and automatic recovery of expired or crashed worker executions.
+              Workspace job counters. Sweeping marks expired jobs failed; it does not rerun them.
             </p>
 
             <div
@@ -480,7 +520,7 @@ export function OpsDashboard() {
               type="button"
               className="ops-recover-btn"
               onClick={() => { void handleRecover(); }}
-              disabled={recovering}
+              disabled={recovering || unavailable}
             >
               <RefreshCw size={12} className={recovering ? 'animate-spin' : ''} aria-hidden="true" />
               {recovering ? 'Sweeping Queue...' : 'Sweep & Recover Stuck Jobs'}
@@ -494,7 +534,7 @@ export function OpsDashboard() {
                 <ShieldCheck size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
                 Quotas &amp; Sanitization
               </h2>
-              <span className={`ops-pill pill-${quotasStatus === 'degraded' ? 'degraded' : 'healthy'}`}>
+              <span className={`ops-pill pill-${pillClass(quotasStatus)}`}>
                 {quotasStatus === 'ok' ? 'Healthy' : quotasStatus}
               </span>
             </div>
@@ -512,7 +552,7 @@ export function OpsDashboard() {
               </div>
               <div className="ops-dl-row">
                 <dt>Log Sanitization</dt>
-                <dd style={{ color: '#059669' }}>Active &bull; Redacted</dd>
+                <dd>Requires deployment log-sink verification</dd>
               </div>
             </dl>
           </article>

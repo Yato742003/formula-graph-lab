@@ -211,7 +211,7 @@ export default function ProblemSpecPanel({ showEvolution = true }: { showEvoluti
     notice.includes('before continuing');
 
   return (
-    <section aria-label="ProblemSpec editor" className="max-w-5xl mx-auto p-4 md:p-8 space-y-6">
+    <section aria-label="ProblemSpec editor" className="max-w-7xl mx-auto p-4 md:p-6 space-y-6">
       {/* Header with Visual Status */}
       <header className="rounded-xl border border-border/60 bg-card p-5 shadow-xs space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -351,8 +351,11 @@ export default function ProblemSpecPanel({ showEvolution = true }: { showEvoluti
 
       {snapshot && showEvolution ? <EvolutionPanel key={snapshot.spec_id} specId={snapshot.spec_id} /> : null}
 
-      {/* Main Spec Editor Form */}
-      <form onSubmit={event => { if (step === 3) void freeze(event); else { event.preventDefault(); continueSetup(); } }} className="space-y-6">
+      {/* 2-Column Responsive Workbench Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        <div className="lg:col-span-8 space-y-6">
+          {/* Main Spec Editor Form */}
+          <form onSubmit={event => { if (step === 3) void freeze(event); else { event.preventDefault(); continueSetup(); } }} className="space-y-6">
         <fieldset disabled={busy || snapshot !== null} className="space-y-6">
           {/* Card 1: Core Research Identity */}
           {step === 1 ? <div className="p-5 rounded-xl border border-border/60 bg-card shadow-xs space-y-4">
@@ -366,8 +369,70 @@ export default function ProblemSpecPanel({ showEvolution = true }: { showEvoluti
                 onClick={loadBenchmarkTemplate}
                 className="text-xs px-2.5 py-1 rounded bg-secondary hover:bg-secondary/80 text-secondary-foreground font-medium transition-colors cursor-pointer"
               >
-                Load 3DGS Benchmark Spec
+                Use 3DGS question
               </button>
+            </div>
+
+            {/* Quick Start Research Presets */}
+            <div className="space-y-2 pb-1">
+              <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider block">
+                Example questions — manifests and artifacts still required:
+              </span>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={loadBenchmarkTemplate}
+                  className="p-2.5 text-left rounded-lg border border-border/70 bg-muted/20 hover:bg-primary/5 hover:border-primary/40 transition-all group cursor-pointer"
+                >
+                  <div className="flex items-center justify-between mb-0.5">
+                    <span className="text-xs font-semibold text-foreground group-hover:text-primary">
+                      3DGS Compression
+                    </span>
+                    <Badge variant="outline" className="text-[9px] py-0 h-4">Draft example</Badge>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground line-clamp-2">
+                    Gaussian Splatting anchor latent entropy coding
+                  </p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTask('Measure causal attention latency and memory footprint under varying sequence lengths (arXiv:1706.03762)');
+                    setFamily('attention');
+                    setDtype('float32');
+                  }}
+                  className="p-2.5 text-left rounded-lg border border-border/70 bg-muted/20 hover:bg-primary/5 hover:border-primary/40 transition-all group cursor-pointer"
+                >
+                  <div className="flex items-center justify-between mb-0.5">
+                    <span className="text-xs font-semibold text-foreground group-hover:text-primary">
+                      Scaled Attention
+                    </span>
+                    <Badge variant="outline" className="text-[9px] py-0 h-4">Transformer</Badge>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground line-clamp-2">
+                    Causal attention latency across sequence lengths
+                  </p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTask('Verify Ashtekar-Barbero connection commutators under spatial diffeomorphism invariance');
+                    setFamily('gauge_gravity');
+                    setDtype('float64');
+                  }}
+                  className="p-2.5 text-left rounded-lg border border-border/70 bg-muted/20 hover:bg-primary/5 hover:border-primary/40 transition-all group cursor-pointer"
+                >
+                  <div className="flex items-center justify-between mb-0.5">
+                    <span className="text-xs font-semibold text-foreground group-hover:text-primary">
+                      Quantum Gravity
+                    </span>
+                    <Badge variant="outline" className="text-[9px] py-0 h-4">Theory</Badge>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground line-clamp-2">
+                    Ashtekar connection commutators & invariants
+                  </p>
+                </button>
+              </div>
             </div>
 
             <div className="space-y-3">
@@ -554,9 +619,43 @@ export default function ProblemSpecPanel({ showEvolution = true }: { showEvoluti
           )}
         </div> : null}
       </form>
+    </div>
+
+    {/* Right Column: Spec Integrity & Snapshot History */}
+    <div className="lg:col-span-4 space-y-5">
+      <div className="rounded-xl border border-border/60 bg-card p-4 shadow-xs space-y-3">
+        <div className="flex items-center gap-2 border-b border-border/40 pb-2">
+          <Boxes size={15} className="text-primary" />
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-foreground">
+            G1 ProblemSpec Invariants
+          </h3>
+        </div>
+        <div className="space-y-2 text-xs">
+          <div className="flex items-center justify-between p-2 rounded-md bg-muted/30">
+            <span className="text-muted-foreground">Identity & Dtype</span>
+            <span className={`font-mono text-[11px] font-medium ${task && family ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
+              {task && family ? `${family} · ${dtype}` : 'Drafting'}
+            </span>
+          </div>
+          <div className="flex items-center justify-between p-2 rounded-md bg-muted/30">
+            <span className="text-muted-foreground">Manifest Specifications</span>
+            <span className="font-mono text-[11px] font-medium text-primary">
+              {sections.filter(([key]) => {
+                try { JSON.parse(fields[key]); return true; } catch { return false; }
+              }).length}/{sections.length} JSON readable
+            </span>
+          </div>
+          <div className="flex items-center justify-between p-2 rounded-md bg-muted/30">
+            <span className="text-muted-foreground">Invariant Gate</span>
+            <span className={`font-mono text-[11px] font-medium ${snapshot ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'}`}>
+              {snapshot ? `G1 Frozen (v${snapshot.version})` : 'G1 Pending Freeze'}
+            </span>
+          </div>
+        </div>
+      </div>
 
       {/* History Drawer */}
-      <section aria-label="ProblemSpec history" className="rounded-xl border border-border/60 bg-card p-5 shadow-xs space-y-3">
+      <section aria-label="ProblemSpec history" className="rounded-xl border border-border/60 bg-card p-4 shadow-xs space-y-3">
         <div className="flex items-center justify-between border-b border-border/40 pb-2.5">
           <div className="flex items-center gap-2">
             <History size={16} className="text-primary" />
@@ -619,6 +718,8 @@ export default function ProblemSpecPanel({ showEvolution = true }: { showEvoluti
           </button>
         </div>
       </section>
+    </div>
+  </div>
     </section>
   );
 }

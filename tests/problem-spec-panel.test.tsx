@@ -44,6 +44,17 @@ function fill() {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('ProblemSpec persistence workflow', () => {
+  it('labels examples as drafts and reports JSON readability rather than verified manifests', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ items: [], total: 0 })));
+    render(<ProblemSpecPanel />);
+    expect(screen.queryByText(/verified benchmark templates/i)).toBeNull();
+    expect(screen.getByText('13/13 JSON readable')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Use 3DGS question' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to manifest' }));
+    fireEvent.change(screen.getByLabelText('Metrics and directions (JSON)'), { target: { value: '{' } });
+    expect(screen.getByText('12/13 JSON readable')).toBeTruthy();
+    expect(screen.queryByText(/Sections Configured/)).toBeNull();
+  });
   it('retries an unchanged failed save with the same key and preserves entered values', async () => {
     const requests: RequestInit[] = [];
     vi.stubGlobal('fetch', vi.fn(async (_url, init?: RequestInit) => {

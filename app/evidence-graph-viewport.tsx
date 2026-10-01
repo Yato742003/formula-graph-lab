@@ -482,17 +482,17 @@ function layoutNodes(
   const flowNodes: AnyFlowNode[] = [];
   const assignedNodeIds = new Set<string>();
 
-  const cardWidth = isCompact ? 205 : 280;
-  const cardHeight = isCompact ? 58 : 150;
-  const cardGap = isCompact ? 14 : 22;
-  const swimlanePadX = 18;
+  const cardWidth = isCompact ? 220 : 320;
+  const cardHeight = isCompact ? 58 : 155;
+  const cardGap = isCompact ? 14 : 20;
+  const swimlanePadX = 20;
   const swimlanePadTop = 64;
-  const swimlanePadBottom = 22;
-  const swimlaneGap = isCompact ? 36 : 56;
+  const swimlanePadBottom = 24;
+  const swimlaneGap = isCompact ? 36 : 48;
 
   const rootNodes = nodes.filter((n) => n.kind === 'Paper' || n.kind === 'PaperVersion');
   const hasPaperRoot = rootNodes.length > 0;
-  const paperColWidth = isCompact ? 205 : 250;
+  const paperColWidth = isCompact ? 220 : 280;
   const laneInnerWidth = cardWidth;
   const laneTotalWidth = laneInnerWidth + swimlanePadX * 2;
 

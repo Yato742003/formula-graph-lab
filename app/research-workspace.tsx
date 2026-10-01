@@ -2064,7 +2064,7 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                             : researchLoadNotice}
                         </output>
 
-                        <div className="compatibility-empty-card rounded-xl border border-border/60 bg-card/60 p-4 space-y-3 shadow-xs">
+                        <div className="compatibility-empty-card rounded-xl border border-border/60 bg-card/60 p-4 space-y-4 shadow-xs">
                           <div className="flex items-start justify-between gap-3">
                             <div className="flex items-center gap-2">
                               <ShieldCheck size={18} className="text-primary" />
@@ -2080,6 +2080,7 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                               <span key={gate} title={`${gate}: not run`}>{gate}</span>
                             ))}
                           </div>
+
                           <div className="flex items-center justify-between gap-3 pt-2 border-t border-border/40">
                             <span className="text-xs text-muted-foreground">Select a formula pair to add a mapping.</span>
                             <Button
@@ -2341,6 +2342,34 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                     <code>{inspector.expression}</code>
                   );
                 })()}
+                <div className="flex items-center gap-2 pt-2 border-t border-border/40 mt-2.5">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2.5 text-xs gap-1.5 flex-1 font-medium hover:border-primary/50 transition-colors"
+                    onClick={() => {
+                      selectCompatibilityView();
+                    }}
+                    title="Open compatibility; select and review a mapping there"
+                  >
+                    <ShieldCheck size={13} className="text-primary" />
+                    <span>Open Compatibility</span>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2.5 text-xs gap-1.5 flex-1 font-medium hover:border-primary/50 transition-colors"
+                    onClick={() => {
+                      selectPrimaryView('research');
+                    }}
+                    title="Open the research question and experiment manifest"
+                  >
+                    <FileCode2 size={13} className="text-primary" />
+                    <span>Open Spec</span>
+                  </Button>
+                </div>
               </div>
 
               {inspector.formulaAnalysis ? (

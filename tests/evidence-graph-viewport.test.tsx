@@ -153,7 +153,10 @@ describe('EvidenceGraphViewport', () => {
       'utf8',
     );
     expect(css).toMatch(/\.flow-evidence-node \.node-latex-math\s*\{[^}]*overflow-x:\s*auto/);
-    expect(css).toMatch(/\.flow-evidence-node\s*\{[^}]*width:\s*280px/);
+    expect(/\.flow-evidence-node\s*\{[^}]*width:\s*320px/.test(css)).toBe(true);
+    expect(/\.flow-evidence-node\.is-compact\s*\{[^}]*width:\s*220px/.test(css)).toBe(true);
+    // Detailed kind-specific dimensions must not override the compact layout.
+    expect(css.includes('.flow-evidence-node.graph-node-equation:not(.is-compact)')).toBe(true);
   });
 
   it('provides a compact 2D Map / 3D Space view switcher', async () => {

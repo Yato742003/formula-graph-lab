@@ -57,7 +57,7 @@ describe('OpsDashboard', () => {
     expect(screen.getByRole('heading', { name: 'Operations & Health Dashboard' })).toBeTruthy();
 
     await waitFor(() => {
-      expect(screen.getByText('All Subsystems Operational')).toBeTruthy();
+      expect(screen.getByText('Workspace queue telemetry available')).toBeTruthy();
       expect(screen.getByText('Import Guard')).toBeTruthy();
       expect(screen.getByText('Checker Execution Bounds')).toBeTruthy();
       expect(screen.getByText('Job Queue & Recovery')).toBeTruthy();
@@ -126,10 +126,33 @@ describe('OpsDashboard', () => {
     render(<OpsDashboard />);
 
     await waitFor(() => {
-      expect(screen.getByText('All Subsystems Operational')).toBeTruthy();
+      expect(screen.getByText('Workspace queue telemetry available')).toBeTruthy();
       expect(screen.getByText('120 req / min')).toBeTruthy();
       expect(screen.getByText('256 MB')).toBeTruthy();
       expect(screen.getByText('3')).toBeTruthy(); // 1 queued + 2 running
     });
+  });
+
+  it('does not report healthy telemetry when the request fails or fields are missing', async () => {
+    const fetcher = vi.fn(async () => new Response('{}', { status: 503 }));
+    vi.stubGlobal('fetch', fetcher);
+    render(<OpsDashboard />);
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.getByText('Operations telemetry unavailable')).toBeTruthy();
+    expect(screen.queryByText('All Subsystems Operational')).toBeNull();
+    cleanup();
+    fetcher.mockImplementation(async () => Response.json({ status: 'ok', checked_at: '2026-10-01', subsystems: {} }));
+    render(<OpsDashboard />);
+    await waitFor(() => expect(screen.getByText('Operations telemetry unavailable')).toBeTruthy());
+    expect(screen.getByRole('button', { name: /Sweep & Recover/ }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('rejects malformed telemetry rather than crashing while rendering', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...mockDashboardData,
+      subsystems: { ...mockDashboardData.subsystems, import: { allowed_hosts: 'not-an-array' } },
+    })));
+    render(<OpsDashboard />);
+    expect((await screen.findByRole('alert')).textContent).toContain('host policy is invalid');
+    expect(screen.getByText('Operations telemetry unavailable')).toBeTruthy();
   });
 });
