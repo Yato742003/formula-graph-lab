@@ -1,5 +1,9 @@
 # Review bản cập nhật Sprint 6 — 2026-10-01
 
+Checkpoint tiếp theo sau commit/push: [FGL602_FGL603_HARDENING.md](FGL602_FGL603_HARDENING.md).
+Báo cáo dưới đây giữ kết quả lịch sử của lượt review ban đầu; checkpoint mới
+ghi rõ phần đã harden, kết quả scan Linux còn fail và các gate chưa hoàn tất.
+
 ## Phạm vi và kết luận
 
 Đọc commit `88277cd` (601), `4abd6da` (602), `a0ffb1b`, `5d5235c`,
