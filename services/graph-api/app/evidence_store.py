@@ -20,6 +20,7 @@ from app.models import (
     EvidenceGraphSnapshotRequest,
     EvidenceGraphSnapshotResponse,
 )
+from app.observability import emit_event
 from app.research_lock import lock_research_workspace
 from app.search import (
     EvidenceCandidate,
@@ -94,7 +95,7 @@ class Neo4jEvidenceStore:
             "FOR (n:ResearchWorkspaceLock) REQUIRE n.group_id IS UNIQUE",
             database_=self.database,
         )
-        for label in ("ResearchJob", "ResearchQueueLock", "ServiceRequestNonce"):
+        for label in ("ResearchJob", "ResearchQueueLock", "ServiceRequestNonce", "WorkspaceRate"):
             await self.driver.execute_query(
                 f"CREATE CONSTRAINT fgl_{label.lower()}_id IF NOT EXISTS "
                 f"FOR (n:{label}) REQUIRE n.id IS UNIQUE", database_=self.database,
@@ -102,6 +103,10 @@ class Neo4jEvidenceStore:
         await self.driver.execute_query(
             "CREATE INDEX fgl_service_nonce_expiry IF NOT EXISTS "
             "FOR (n:ServiceRequestNonce) ON (n.expires_at)", database_=self.database,
+        )
+        await self.driver.execute_query(
+            "CREATE INDEX fgl_workspace_rate_expiry IF NOT EXISTS "
+            "FOR (n:WorkspaceRate) ON (n.expires_at)", database_=self.database,
         )
         for label, constraint in [
             ("Evidence", "fgl_evidence_uuid"),
@@ -132,6 +137,34 @@ class Neo4jEvidenceStore:
 
     async def close(self) -> None:
         await self.driver.close()
+
+    async def check_workspace_rate(self, workspace_id: str) -> tuple[bool, int]:
+        async with self.driver.session(database=self.database) as session:
+            return await session.execute_write(self._check_workspace_rate, workspace_id)
+
+    @staticmethod
+    async def _check_workspace_rate(tx, workspace_id: str) -> tuple[bool, int]:
+        # The write acquires the node lock before reading history. DB time is
+        # authoritative across replicas; no process-local quota/reset fallback.
+        result = await tx.run(
+            "MERGE (w:WorkspaceRate {id:$workspace}) "
+            "SET w.revision=coalesce(w.revision,0)+1 "
+            "WITH w, timestamp() AS now "
+            "WITH w, now, [t IN coalesce(w.requests,[]) WHERE t > now-60000] AS recent "
+            "WITH w, now, recent, size(recent)<120 AS allowed "
+            "SET w.requests=CASE WHEN allowed THEN recent+[now] ELSE recent END, "
+            "w.expires_at=now+60000 "
+            "RETURN allowed, CASE WHEN allowed THEN 0 "
+            "ELSE toInteger(ceil((recent[0]+60000-now)/1000.0)) END AS retry_after",
+            workspace=workspace_id,
+        )
+        row = await result.single(strict=True)
+        # Only transient rate history is eligible, never evidence or reservations.
+        await tx.run(
+            "MATCH (w:WorkspaceRate) WHERE w.expires_at < timestamp() AND w.id<>$workspace "
+            "WITH w LIMIT 100 DELETE w", workspace=workspace_id,
+        )
+        return bool(row["allowed"]), max(0 if row["allowed"] else 1, row["retry_after"])
 
     async def consume_service_nonce(self, nonce: str, expires_at: int) -> bool:
         # One server-owned claim per HTTP request also survives managed TX retries.
@@ -275,10 +308,10 @@ class Neo4jEvidenceStore:
                 persisted.created_at,
             )
         effective = CheckResult.model_validate_json(effective_payload)
-        logger.info("check_result_receipt", extra={
-            "event": "check_result_receipt", "check_id": effective.check_id,
-            "outcome": effective.outcome, "replayed": replayed,
-        })
+        emit_event("check_result_receipt", check_id=effective.check_id,
+                   target_uuid=effective.target_uuid, workspace_id=workspace_id,
+                   checker_version=effective.checker_version, outcome=effective.outcome,
+                   duration_ms=effective.duration_ms, replayed=replayed)
         return CheckResultReceipt(result=effective, replayed=replayed)
 
     async def lookup_check_result(

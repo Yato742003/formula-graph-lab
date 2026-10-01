@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import collections
+import asyncio
 import json
 import logging
-import math
 import os
 import re
-import time
+from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import MappingProxyType
 from urllib.parse import urlsplit, urlunsplit
 
 from starlette.responses import JSONResponse
@@ -71,6 +72,9 @@ def arxiv_identity(canonical_url: str) -> tuple[str, int | None]:
 
 MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024  # 2 MB general JSON body cap
 MAX_PAPER_IMPORT_BYTES = 4 * 1024  # Import JSON contains a URL, not uploaded HTML.
+request_context: ContextVar[Mapping[str, str]] = ContextVar(
+    "fgl_request_context", default=MappingProxyType({}),
+)
 
 
 class PayloadTooLargeError(ValueError):
@@ -89,8 +93,9 @@ def check_payload_size(
 class RequestBodyLimitMiddleware:
     """Bound streamed bodies before FastAPI's JSON parser or auth dependencies run."""
 
-    def __init__(self, app):
+    def __init__(self, app, body_timeout_seconds: float = 10.0):
         self.app = app
+        self.body_timeout_seconds = body_timeout_seconds
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -105,22 +110,28 @@ class RequestBodyLimitMiddleware:
             return await JSONResponse({"detail": "Request body exceeds limit."}, 413)(
                 scope, receive, send
             )
-        chunks, size = [], 0
-        while True:
-            message = await receive()
-            if message["type"] == "http.disconnect":
-                return
-            chunk = message.get("body", b"")
-            size += len(chunk)
-            if size > cap:
-                log_audit_event("payload_limit_exceeded", details={"limit_bytes": cap})
-                return await JSONResponse({"detail": "Request body exceeds limit."}, 413)(
-                    scope, receive, send
-                )
-            chunks.append(chunk)
-            if not message.get("more_body", False):
-                break
-        body = b"".join(chunks)
+        body_buffer = bytearray()
+        try:
+            async with asyncio.timeout(self.body_timeout_seconds):
+                while True:
+                    message = await receive()
+                    if message["type"] == "http.disconnect":
+                        return
+                    chunk = message.get("body", b"")
+                    if len(body_buffer) + len(chunk) > cap:
+                        log_audit_event("payload_limit_exceeded", details={"limit_bytes": cap})
+                        return await JSONResponse({"detail": "Request body exceeds limit."}, 413)(
+                            scope, receive, send
+                        )
+                    body_buffer.extend(chunk)
+                    if not message.get("more_body", False):
+                        break
+        except TimeoutError:
+            log_audit_event("body_read_timeout")
+            return await JSONResponse({"detail": "Request body read timed out."}, 408)(
+                scope, receive, send
+            )
+        body = bytes(body_buffer)
         delivered = False
 
         async def bounded_receive():
@@ -173,48 +184,6 @@ def worker_execution_limits() -> WorkerLimits:
     )
 
 
-class WorkspaceRateLimiter:
-    """Sliding-window in-memory rate limiter per workspace."""
-
-    # ponytail: in-memory sliding window rate limiter, ceiling: single-node instance,
-    # upgrade: Redis / Cloudflare Rate Limiting for distributed rate enforcement.
-    def __init__(self, default_limit: int = 120, window_seconds: float = 60.0):
-        self.default_limit = default_limit
-        self.window_seconds = window_seconds
-        self._history: dict[str, collections.deque[float]] = collections.defaultdict(
-            collections.deque
-        )
-
-    def check(
-        self,
-        workspace_id: str,
-        limit: int | None = None,
-        now: float | None = None,
-    ) -> tuple[bool, float]:
-        """Returns (is_allowed, retry_after_seconds)."""
-        limit = limit or self.default_limit
-        current_time = now if now is not None else time.monotonic()
-        cutoff = current_time - self.window_seconds
-        queue = self._history[workspace_id]
-
-        while queue and queue[0] <= cutoff:
-            queue.popleft()
-
-        if len(queue) >= limit:
-            oldest = queue[0]
-            retry_after = max(1.0, math.ceil((oldest + self.window_seconds) - current_time))
-            return False, retry_after
-
-        queue.append(current_time)
-        return True, 0.0
-
-    def reset(self) -> None:
-        self._history.clear()
-
-
-workspace_rate_limiter = WorkspaceRateLimiter()
-
-
 _SENSITIVE_KEYS = {
     "token",
     "secret",
@@ -242,6 +211,8 @@ class SensitiveDataFilter(logging.Filter):
     """OWASP FGL-602 log sanitization filter to prevent secret/HTML/prompt leakage."""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        for key, value in request_context.get().items():
+            record.__dict__[key] = value
         record.msg = self._sanitize_value("", record.msg)
 
         if record.args:
@@ -280,6 +251,9 @@ class SensitiveDataFilter(logging.Filter):
         return text
 
     def _sanitize_value(self, key: str, value: object, depth: int = 0) -> object:
+        # These are bounded usage counters, not credential-bearing token values.
+        if key in {"input_tokens", "output_tokens"} and type(value) is int and 0 <= value <= 10**7:
+            return value
         if _sensitive_key(key) or depth > 8:
             return "[REDACTED]"
         if isinstance(value, dict):
@@ -310,6 +284,7 @@ def log_audit_event(
         "actor_id": actor_id or "anonymous",
         "workspace_id": workspace_id or "unknown",
         "details": details or {},
+        "request_id": request_context.get().get("request_id"),
     }
     payload = SensitiveDataFilter()._sanitize_value("", payload)
     _audit_logger.warning("AUDIT: %s", json.dumps(payload, separators=(",", ":")))

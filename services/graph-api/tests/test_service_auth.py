@@ -15,19 +15,26 @@ from app.auth import ServiceActor, require_human_service_actor, require_research
 from app.main import app, require_search_service
 from app.models import EvidenceSearchResponse
 from app.research_store import Neo4jResearchStore
-from app.security import workspace_rate_limiter
 from tests.service_auth_helpers import TEST_KEY, TEST_WORKSPACE, sign_request
 
 
 class Nonces:
     def __init__(self):
         self.used = set()
+        self.rate_calls = []
+        self.limit = 120
 
     async def consume_service_nonce(self, nonce, _expires_at):
         if nonce in self.used:
             return False
         self.used.add(nonce)
         return True
+
+    async def check_workspace_rate(self, workspace_id):
+        if self.rate_calls.count(workspace_id) >= self.limit:
+            return False, 60
+        self.rate_calls.append(workspace_id)
+        return True, 0
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +49,6 @@ def strict_auth(monkeypatch):
             return_value=EvidenceSearchResponse(hits=[], next_cursor=None, semantic_available=False)
         ),
     )
-    workspace_rate_limiter.reset()
     yield
     app.dependency_overrides.clear()
 
@@ -336,7 +342,7 @@ def test_payload_too_large_is_rejected_with_413():
 
 
 def test_workspace_rate_limiting_returns_429(monkeypatch):
-    monkeypatch.setattr(workspace_rate_limiter, "default_limit", 2)
+    monkeypatch.setattr(app.state.evidence_store, "limit", 2)
     client = TestClient(app)
     body = search_body()
     h1 = sign_request("POST", "/v1/search", body, role="graph_read")
@@ -348,6 +354,30 @@ def test_workspace_rate_limiting_returns_429(monkeypatch):
     assert resp.status_code == 429
     assert resp.json()["detail"] == "Workspace quota exceeded. Please slow down."
     assert "Retry-After" in resp.headers
+
+
+def test_replay_and_cross_workspace_denials_do_not_consume_quota():
+    client = TestClient(app)
+    body = search_body()
+    headers = sign_request("POST", "/v1/search", body, role="graph_read")
+    assert client.post("/v1/search", content=body, headers=headers).status_code == 200
+    assert client.post("/v1/search", content=body, headers=headers).status_code == 401
+    foreign_body = search_body("ws_" + "f" * 48)
+    assert client.post("/v1/search", content=foreign_body, headers=sign_request(
+        "POST", "/v1/search", foreign_body, role="graph_read",
+    )).status_code == 403
+    assert app.state.evidence_store.rate_calls == [TEST_WORKSPACE]
+
+
+def test_rate_storage_outage_fails_closed(monkeypatch):
+    monkeypatch.setattr(app.state.evidence_store, "check_workspace_rate",
+                        AsyncMock(side_effect=OSError("PRIVATE_DATABASE_ERROR")))
+    body = search_body()
+    response = TestClient(app).post("/v1/search", content=body, headers=sign_request(
+        "POST", "/v1/search", body, role="graph_read",
+    ))
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Workspace quota unavailable."
 
 
 def test_tampered_request_triggers_audit_event(caplog):

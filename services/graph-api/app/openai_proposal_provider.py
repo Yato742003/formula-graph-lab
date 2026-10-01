@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
+import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
 
+from app.observability import emit_event
 from app.proposals import MAX_PROPOSAL_BYTES
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 MAX_PROMPT_BYTES = 32 * 1024
 MAX_OUTPUT_TOKENS = 8_000
+MAX_RESPONSE_BYTES = 256 * 1024
 
 
 class ProposalProviderError(RuntimeError):
@@ -111,39 +116,84 @@ async def request_proposal_draft(
     """Call Responses with no tools/storage and bounded JSON output; validate locally."""
     provider = config or OpenAIProposalConfig.from_environment()
     prompt_bytes = len(prompt.encode("utf-8"))
-    provider.require_budget(prompt_bytes)
+    reserved_cost = provider.require_budget(prompt_bytes)
+    started = time.perf_counter()
+    telemetry: dict[str, object] = {
+        "provider": "openai",
+        "model": provider.model,
+        "reserved_cost_usd": format(reserved_cost, "f"),
+        "usage_state": "unknown",
+    }
     try:
         owned_client = client is None
         if client is None:
             client = httpx.AsyncClient(timeout=provider.timeout_seconds)
         try:
-            response = await client.post(
-                OPENAI_RESPONSES_URL,
-                headers={"Authorization": f"Bearer {provider.api_key}"},
-                json={
-                    "model": provider.model,
-                    "store": False,
-                    "max_output_tokens": provider.max_output_tokens,
-                    "text": {"format": {"type": "json_object"}},
-                    "input": prompt,
-                },
-            )
+            # A total deadline, not a read timeout that resets on every byte.
+            async with (
+                asyncio.timeout(provider.timeout_seconds),
+                client.stream(
+                    "POST",
+                    OPENAI_RESPONSES_URL,
+                    headers={"Authorization": f"Bearer {provider.api_key}"},
+                    timeout=provider.timeout_seconds,
+                    json={
+                        "model": provider.model,
+                        "store": False,
+                        "max_output_tokens": provider.max_output_tokens,
+                        "text": {"format": {"type": "json_object"}},
+                        "input": prompt,
+                    },
+                ) as response,
+            ):
+                telemetry["status_code"] = response.status_code
+                if response.status_code < 200 or response.status_code >= 300:
+                    raise ProposalProviderError("PROPOSAL_PROVIDER_REJECTED_REQUEST")
+                raw = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(raw) + len(chunk) > MAX_RESPONSE_BYTES:
+                        raise ProposalProviderError("PROPOSAL_OUTPUT_SIZE_INVALID")
+                    raw.extend(chunk)
         finally:
             if owned_client:
                 await client.aclose()
-    except (httpx.TimeoutException, httpx.TransportError) as exc:
-        raise ProposalProviderError("PROPOSAL_PROVIDER_UNAVAILABLE") from exc
-    if response.status_code < 200 or response.status_code >= 300:
-        raise ProposalProviderError("PROPOSAL_PROVIDER_REJECTED_REQUEST")
-    try:
-        payload = response.json()
+        payload = json.loads(raw)
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        if isinstance(usage, dict) and all(
+            type(usage.get(k)) is int and 0 <= usage[k] <= 10**7
+            for k in ("input_tokens", "output_tokens")
+        ):
+            estimated = (
+                Decimal(usage["input_tokens"]) * provider.input_usd_per_million
+                + Decimal(usage["output_tokens"]) * provider.output_usd_per_million
+            ) / Decimal(1_000_000)
+            telemetry.update(
+                usage_state="provider_reported",
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                estimated_cost_usd=format(estimated, "f"),
+            )
         text = _extract_output_text(payload)
         if len(text.encode("utf-8")) > MAX_PROPOSAL_BYTES:
             raise ProposalProviderError("PROPOSAL_OUTPUT_SIZE_INVALID")
         # Keep JSON as text so the canonical proposal parser can reject duplicate keys.
+        telemetry["outcome"] = "completed"
         return text
+    except (TimeoutError, httpx.TimeoutException, httpx.TransportError) as exc:
+        telemetry["outcome"] = "unavailable"
+        raise ProposalProviderError("PROPOSAL_PROVIDER_UNAVAILABLE") from exc
+    except ProposalProviderError as exc:
+        telemetry["outcome"] = str(exc)
+        raise
     except (ValueError, TypeError, KeyError, RecursionError) as exc:
+        telemetry["outcome"] = "invalid_output"
         raise ProposalProviderError("PROPOSAL_PROVIDER_OUTPUT_INVALID") from exc
+    finally:
+        emit_event(
+            "proposal_provider_request",
+            **telemetry,
+            duration_ms=round((time.perf_counter() - started) * 1000, 3),
+        )
 
 
 def _extract_output_text(payload: Any) -> str:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from functools import partial
@@ -83,6 +84,7 @@ from app.numerical_verification import (
     make_numerical_fixture_receipt,
     run_candidate_numerical_fixture,
 )
+from app.observability import RequestTelemetryMiddleware, configure_telemetry, emit_event
 from app.openai_proposal_provider import (
     OpenAIProposalConfig,
     ProposalProviderError,
@@ -183,6 +185,7 @@ from app.worker_auth import (
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    configure_telemetry()
     install_log_sanitizer()
     required = ("NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD")
     values = {key: os.getenv(key) for key in required}
@@ -198,13 +201,20 @@ async def lifespan(application: FastAPI):
                 values["NEO4J_PASSWORD"] or "",
             )
             await store.initialize()
-            if os.getenv("OPENAI_API_KEY", "").strip():
+            # Proposal credentials must not silently activate Graphiti's separate
+            # LLM/embedding spend. Production stays closed until that path has
+            # its own durable reservations, metering and reconciliation gate.
+            if (os.getenv("FGL_ENABLE_SEMANTIC_ENRICHMENT", "false") == "true"
+                    and os.getenv("APP_ENV", "production") == "development"
+                    and os.getenv("OPENAI_API_KEY", "").strip()):
                 semantic_store = GraphitiResearchStore.connect(
                     values["NEO4J_URI"] or "",
                     values["NEO4J_USER"] or "",
                     values["NEO4J_PASSWORD"] or "",
                 )
                 await semantic_store.initialize()
+            elif os.getenv("FGL_ENABLE_SEMANTIC_ENRICHMENT", "false") == "true":
+                emit_event("semantic_enrichment_denied", reason="production_budget_gate_open")
             cursor_secret = os.getenv("SEARCH_CURSOR_SECRET") or os.getenv("SERVICE_TOKEN")
             if cursor_secret:
                 try:
@@ -248,6 +258,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(RequestBodyLimitMiddleware)
+app.add_middleware(RequestTelemetryMiddleware)
 
 
 @app.exception_handler(PayloadTooLargeError)
@@ -330,7 +341,11 @@ async def import_evidence(
     _: None = Depends(require_service_token),
     store: Neo4jEvidenceStore = Depends(require_evidence_store),  # noqa: B008
 ) -> EvidenceImportResponse:
+    started = time.perf_counter()
     paper = await extract_request(body.url)
+    emit_event("paper_extracted", paper_id=paper.paper_id, source_hash=paper.source_sha256,
+               equation_count=len(paper.equations), section_count=len(paper.sections),
+               duration_ms=round((time.perf_counter()-started)*1000, 3))
     try:
         graph = build_evidence_graph(paper, workspace_id=body.workspace_id)
         receipt = await store.ingest(graph)
@@ -338,6 +353,9 @@ async def import_evidence(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (Neo4jError, ServiceUnavailable, OSError) as exc:
         raise HTTPException(status_code=503, detail="Exact evidence storage failed.") from exc
+    emit_event("exact_graph_written", import_uuid=receipt.import_uuid,
+               node_count=receipt.node_count, edge_count=receipt.edge_count,
+               replayed=receipt.replayed, duration_ms=round((time.perf_counter()-started)*1000, 3))
     semantic_store = getattr(http_request.app.state, "semantic_store", None)
     if semantic_store is not None:
         try:
@@ -346,12 +364,16 @@ async def import_evidence(
                 paper=paper,
                 receipts=store,
             )
+            emit_event("semantic_enrichment_completed", import_uuid=receipt.import_uuid)
         except EnrichmentNeedsReconciliation as exc:
+            emit_event("semantic_enrichment_uncertain", import_uuid=receipt.import_uuid)
             raise HTTPException(
                 status_code=409,
                 detail="Semantic enrichment requires operator reconciliation.",
             ) from exc
         except Exception as exc:
+            emit_event("semantic_enrichment_failed", import_uuid=receipt.import_uuid,
+                       error_type=type(exc).__name__)
             raise HTTPException(status_code=503, detail="Semantic enrichment failed.") from exc
     return EvidenceImportResponse(
         paper=paper,

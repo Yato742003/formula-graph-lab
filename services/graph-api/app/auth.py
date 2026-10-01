@@ -19,7 +19,7 @@ from app.security import (
     PayloadTooLargeError,
     check_payload_size,
     log_audit_event,
-    workspace_rate_limiter,
+    request_context,
 )
 
 HUMAN_ROLES = {"researcher", "reviewer", "admin"}
@@ -192,19 +192,8 @@ async def require_service_claims(
         raise HTTPException(status_code=403, detail="Service operation denied.")
     if claims.service_role != required_role:
         raise HTTPException(status_code=403, detail="Service scope denied.")
-    allowed, retry_after = workspace_rate_limiter.check(claims.workspace_id)
-    if not allowed:
-        log_audit_event(
-            "quota_exceeded",
-            actor_id=claims.actor_id,
-            workspace_id=claims.workspace_id,
-            details={"retry_after": retry_after, "path": request.url.path},
-        )
-        raise HTTPException(
-            status_code=429,
-            detail="Workspace quota exceeded. Please slow down.",
-            headers={"Retry-After": str(int(retry_after))},
-        )
+    request_context.set({**request_context.get(), "actor_id": claims.actor_id,
+                         "workspace_id": claims.workspace_id, "service_nonce": claims.jti})
     # A signed request cannot select another workspace through its payload/query.
     try:
         body = json.loads(raw_body) if raw_body else {}
@@ -223,6 +212,21 @@ async def require_service_claims(
         )
         raise HTTPException(status_code=403, detail="Service workspace denied.")
     await consume_service_nonce(request, claims.jti, claims.exp)
+    try:
+        allowed, retry_after = await request.app.state.evidence_store.check_workspace_rate(
+            claims.workspace_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Workspace quota unavailable.") from exc
+    if not allowed:
+        log_audit_event(
+            "quota_exceeded", actor_id=claims.actor_id, workspace_id=claims.workspace_id,
+            details={"retry_after": retry_after, "path": request.url.path},
+        )
+        raise HTTPException(
+            status_code=429, detail="Workspace quota exceeded. Please slow down.",
+            headers={"Retry-After": str(retry_after)},
+        )
     return claims
 
 

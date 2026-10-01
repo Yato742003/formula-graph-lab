@@ -1,9 +1,13 @@
+import asyncio
+import json
+import logging
 from decimal import Decimal
 
 import httpx
 import pytest
 
 from app.openai_proposal_provider import (
+    MAX_RESPONSE_BYTES,
     OPENAI_RESPONSES_URL,
     OpenAIProposalConfig,
     ProposalProviderError,
@@ -47,10 +51,12 @@ async def test_responses_call_is_bounded_private_and_returns_untrusted_json_text
             200,
             json={
                 "status": "completed",
-                "output": [{
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": '{"draft":true}'}],
-                }],
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"draft":true}'}],
+                    }
+                ],
             },
         )
 
@@ -104,10 +110,12 @@ async def test_provider_refusal_or_incomplete_result_is_not_a_proposal():
             200,
             json={
                 "status": "completed",
-                "output": [{
-                    "type": "message",
-                    "content": [{"type": "refusal", "refusal": "cannot comply"}],
-                }],
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "refusal", "refusal": "cannot comply"}],
+                    }
+                ],
             },
         )
 
@@ -134,3 +142,75 @@ async def test_prompt_size_and_output_token_ceiling_are_enforced():
         config.require_budget(2)
     with pytest.raises(ProposalProviderError, match="PROMPT_SIZE"):
         _config().require_budget(32 * 1024 + 1)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("usage", [None, {"input_tokens": 10, "output_tokens": 20}])
+async def test_usage_telemetry_distinguishes_unknown_from_provider_report_and_never_logs_content(
+    usage,
+    caplog,
+):
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "usage": usage,
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": '{"PRIVATE_MODEL_OUTPUT":true}'},
+                        ],
+                    }
+                ],
+            },
+        )
+
+    with caplog.at_level(logging.INFO, logger="fgl.telemetry"):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await request_proposal_draft("PRIVATE_PROMPT", config=_config(), client=client)
+    event = json.loads(next(r.message for r in caplog.records if r.name == "fgl.telemetry"))
+    assert event["outcome"] == "completed" and event["duration_ms"] >= 0
+    if usage is None:
+        assert event["usage_state"] == "unknown" and "estimated_cost_usd" not in event
+    else:
+        assert event["usage_state"] == "provider_reported"
+        assert event["input_tokens"] == 10 and event["output_tokens"] == 20
+        assert Decimal(event["estimated_cost_usd"]) == Decimal("0.00005")
+    assert all(
+        s not in caplog.text
+        for s in [
+            "PRIVATE_PROMPT",
+            "PRIVATE_MODEL_OUTPUT",
+            "test-secret-that-is-never-logged",
+        ]
+    )
+
+
+@pytest.mark.anyio
+async def test_streamed_provider_response_cannot_exceed_wire_cap():
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * (MAX_RESPONSE_BYTES + 1))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ProposalProviderError, match="OUTPUT_SIZE_INVALID"):
+            await request_proposal_draft("bounded prompt", config=_config(), client=client)
+
+
+@pytest.mark.anyio
+async def test_drip_response_cannot_reset_total_provider_deadline():
+    class Drip(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0.003)
+                yield b" "
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=Drip())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ProposalProviderError, match="PROVIDER_UNAVAILABLE"):
+            await request_proposal_draft(
+                "bounded prompt", config=_config(timeout_seconds=0.01), client=client
+            )

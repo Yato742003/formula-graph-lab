@@ -10,7 +10,6 @@ from app.security import (
     RequestBodyLimitMiddleware,
     SensitiveDataFilter,
     UnsafePaperUrl,
-    WorkspaceRateLimiter,
     arxiv_identity,
     check_payload_size,
     install_log_sanitizer,
@@ -79,20 +78,6 @@ def test_check_payload_size_enforces_caps() -> None:
     with pytest.raises(PayloadTooLargeError) as exc_info:
         check_payload_size(MAX_REQUEST_BODY_BYTES + 1)
     assert "exceeds limit" in str(exc_info.value)
-
-
-def test_workspace_rate_limiter_sliding_window() -> None:
-    limiter = WorkspaceRateLimiter(default_limit=3, window_seconds=10.0)
-    assert limiter.check("ws_test", now=100.0) == (True, 0.0)
-    assert limiter.check("ws_test", now=101.0) == (True, 0.0)
-    assert limiter.check("ws_test", now=102.0) == (True, 0.0)
-    allowed, retry_after = limiter.check("ws_test", now=103.0)
-    assert not allowed
-    assert retry_after == 7.0
-    assert limiter.check("ws_test", now=110.1) == (True, 0.0)
-    assert limiter.check("ws_other", now=103.0) == (True, 0.0)
-    limiter.reset()
-    assert limiter.check("ws_test", now=103.0) == (True, 0.0)
 
 
 def test_sensitive_data_filter_redacts_tokens_secrets_and_html(

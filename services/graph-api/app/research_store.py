@@ -79,6 +79,7 @@ from app.numerical_verification import (
     build_numerical_suite_input,
     numerical_fixture_input_hash,
 )
+from app.observability import emit_event
 from app.problem_spec import (
     ProblemDefinition,
     ProblemSpecSnapshot,
@@ -2316,7 +2317,7 @@ class Neo4jResearchStore:
         receipt_key = f"{group_id}:candidate-check:{CANDIDATE_CHECKER_VERSION}:{key_hash}"
         intent_hash = self._stable_hash([workspace_id, candidate_id, CANDIDATE_CHECKER_VERSION])
         async with self.driver.session(database=self.database) as session:
-            return await session.execute_write(
+            response = await session.execute_write(
                 self._tx_verify_candidate,
                 group_id,
                 workspace_id,
@@ -2324,6 +2325,11 @@ class Neo4jResearchStore:
                 receipt_key,
                 intent_hash,
             )
+        emit_event("candidate_check_receipt", workspace_id=workspace_id,
+                   candidate_id=candidate_id, check_id=response.check.check_id,
+                   checker_version=response.check.checker_version, scope=response.check.scope,
+                   outcome=response.check.outcome, replayed=response.replayed)
+        return response
 
     async def _tx_verify_candidate(
         self,
@@ -3738,7 +3744,7 @@ class Neo4jResearchStore:
         )
         intent_hash = self._stable_hash(request.model_dump(mode="json"))
         async with self.driver.session(database=self.database) as session:
-            return await session.execute_write(
+            response = await session.execute_write(
                 self._tx_compile_candidate,
                 group_id,
                 request,
@@ -3747,6 +3753,14 @@ class Neo4jResearchStore:
                 idempotency_key,
                 intent_hash,
             )
+        emit_event("candidate_compiled", workspace_id=request.workspace_id,
+                   candidate_id=response.candidate.candidate_id,
+                   spec_id=response.candidate.problem_spec_id,
+                   candidate_hash=response.candidate.content_hash,
+                   parents=[p.model_dump(mode="json") for p in response.candidate.parents],
+                   compiler_version=response.candidate.compiler_version,
+                   activity_id=response.activity.activity_id, replayed=response.replayed)
+        return response
 
     async def _tx_compile_candidate(
         self,

@@ -49,6 +49,53 @@ async def test_durable_nonce_is_atomic_across_connections_and_keeps_expiry_grace
         await second.close()
 
 
+async def test_distributed_rate_quota_is_atomic_survives_restart_and_cleans_only_transient_data():
+    uri, user, password = connection()
+    first = Neo4jEvidenceStore.connect(uri, user, password)
+    second = Neo4jEvidenceStore.connect(uri, user, password)
+    await first.initialize()
+    workspace, other, expired = ["ws_" + uuid4().hex for _ in range(3)]
+    try:
+        # Two remaining admissions in the real 120/minute sliding window.
+        await first.driver.execute_query(
+            "CREATE (w:WorkspaceRate {id:$workspace, "
+            "requests:[i IN range(1,118) | timestamp()], expires_at:timestamp()+60000}) "
+            "CREATE (:WorkspaceRate {id:$expired, requests:[], expires_at:0}) "
+            "CREATE (:Evidence {uuid:$expired, payload:'immutable'}) "
+            "CREATE (:ResearchQueueLock {id:$expired, reserved_ms:123})",
+            workspace=workspace, expired=expired, database_=first.database,
+        )
+        results = await asyncio.gather(*[
+            store.check_workspace_rate(workspace) for store in [first, second] * 8
+        ])
+        assert sum(allowed for allowed, _ in results) == 2
+        assert all(1 <= retry <= 60 for allowed, retry in results if not allowed)
+        await second.close()
+        second = Neo4jEvidenceStore.connect(uri, user, password)
+        assert (await second.check_workspace_rate(workspace))[0] is False
+        assert await second.check_workspace_rate(other) == (True, 0)
+        rows, _, _ = await first.driver.execute_query(
+            "MATCH (w:WorkspaceRate {id:$workspace}) RETURN size(w.requests) AS count",
+            workspace=workspace, database_=first.database,
+        )
+        assert rows[0]["count"] == 120
+        rows, _, _ = await first.driver.execute_query(
+            "MATCH (e:Evidence {uuid:$expired}), (q:ResearchQueueLock {id:$expired}) "
+            "OPTIONAL MATCH (w:WorkspaceRate {id:$expired}) "
+            "RETURN e.payload AS evidence, q.reserved_ms AS reservation, count(w) AS stale",
+            expired=expired, database_=first.database,
+        )
+        assert dict(rows[0]) == {"evidence": "immutable", "reservation": 123, "stale": 0}
+        await first.driver.execute_query(
+            "MATCH (w:WorkspaceRate {id:$workspace}) SET w.requests=[timestamp()-60001]",
+            workspace=workspace, database_=first.database,
+        )
+        assert await second.check_workspace_rate(workspace) == (True, 0)
+    finally:
+        await first.close()
+        await second.close()
+
+
 async def test_signed_http_import_search_spec_and_replica_replay(monkeypatch):
     uri, user, password = connection()
     first = Neo4jEvidenceStore.connect(uri, user, password)
