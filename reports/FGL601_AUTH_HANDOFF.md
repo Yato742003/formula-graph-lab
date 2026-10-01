@@ -13,8 +13,11 @@ Không push, deploy, đổi secret đang dùng hoặc gọi OpenAI API trong cô
 | `49b018c` | UI workspace và các thao tác nghiên cứu |
 | `194018d` | Completion handoff, giới hạn của synthetic pilot |
 
-Các thay đổi FGL-601 nằm riêng trong working tree, chưa commit. Asset local
-`public/favicon.ico` không nằm trong các commit Phase 5 và không bị sửa/xóa.
+FGL-601 đã được chốt tại `88277cd`. Bản review ngày 2026-10-01 tiếp tục kiểm tra
+các commit FGL-602/603/604 và các thay đổi UI local; xem
+`reports/SPRINT6_REVIEW_2026-10-01.md` để biết các lỗi đã sửa và gate còn mở.
+Các số test bên dưới là kết quả tại thời điểm bàn giao FGL-601, không phải số
+test của working tree mới nhất.
 
 ## Những gì thay đổi
 
