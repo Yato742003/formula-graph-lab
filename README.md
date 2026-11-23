@@ -14,6 +14,14 @@
 | :---: | :---: |
 | ![FormulaGraph Lab 2D/3D Graph Viewport](docs/screenshots/evidence-graph-2d.jpg) | ![FormulaGraph Lab Problem Spec Gate](docs/screenshots/research-problem-spec.png) |
 
+> [!TIP]
+> **Product, Design & Engineering Handoff Docs:**
+> - [**`PRODUCT.md`**](./PRODUCT.md) — Product positioning, epistemic guarantees & accessibility standards
+> - [**`DESIGN.md`**](./DESIGN.md) — OKLCH design tokens, typography & 2D/3D viewport contracts
+> - [**`docs/PHASE5_COMPLETION.md`**](./docs/PHASE5_COMPLETION.md) — Phase 5 completion handoff, bounded evolution & replay guide
+> - [**`reports/FGL602_FGL603_HARDENING.md`**](./reports/FGL602_FGL603_HARDENING.md) — Sprint 6 security hardening & release gates
+> - [**`reports/REMAINING_WORK.md`**](./reports/REMAINING_WORK.md) — Up-to-date checklist of unfinished security, integration & UX work
+
 ---
 
 ## Key Capabilities
