@@ -67,6 +67,44 @@ function statusLabel(campaign: EvolutionCampaignView | null) {
   return campaign.status.replaceAll('_', ' ');
 }
 
+function formatStopReason(reason: string) {
+  const labels: Record<string, string> = {
+    none: 'none',
+    candidate_budget_exhausted: 'candidate budget reached',
+    generation_budget_exhausted: 'generation budget reached',
+    compute_budget_exhausted: 'compute budget reached',
+    wall_time_exhausted: 'wall-time budget reached',
+    user_stop: 'stopped by user',
+    confirmation_completed: 'confirmation completed',
+  };
+  return labels[reason] ?? reason.replaceAll('_', ' ');
+}
+
+type SeedCandidateOption = {
+  candidateId: string;
+  operator: string;
+  reviewed: boolean;
+};
+
+function parseSeedCandidateOptions(raw: unknown, specId: string): SeedCandidateOption[] {
+  if (!record(raw) || !Array.isArray(raw.items)) return [];
+  return raw.items.flatMap((item): SeedCandidateOption[] => {
+    if (!record(item)) return [];
+    const candidateId = typeof item.candidate_id === 'string' ? item.candidate_id : '';
+    const itemSpecId = typeof item.spec_id === 'string' ? item.spec_id : '';
+    if (!/^cand_[a-f0-9]{32}$/.test(candidateId) || itemSpecId !== specId) return [];
+    const operator =
+      typeof item.operator === 'string'
+        ? item.operator
+        : record(item.transform) && typeof item.transform.operator === 'string'
+          ? item.transform.operator
+          : 'candidate';
+    const researchCase = record(item.research_case) ? item.research_case : null;
+    const reviewed = Boolean(researchCase && researchCase.protocol_reviewed === true);
+    return [{ candidateId, operator, reviewed }];
+  });
+}
+
 export default function EvolutionPanel({ specId }: { specId: string }) {
   const [campaign, setCampaign] = useState<EvolutionCampaignView | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'unavailable'>('loading');
@@ -76,6 +114,7 @@ export default function EvolutionPanel({ specId }: { specId: string }) {
   const startRetry = useRef<{ specId: string; key: string } | null>(null);
   const stopRetry = useRef<{ evolutionId: string; key: string } | null>(null);
   const [seedId, setSeedId] = useState('');
+  const [seedCandidates, setSeedCandidates] = useState<SeedCandidateOption[]>([]);
   const [finalists, setFinalists] = useState<string[]>([]);
   const stepRetry = useRef<{ intent: string; key: string } | null>(null);
   const stepInFlight = useRef(false);
@@ -116,6 +155,20 @@ export default function EvolutionPanel({ specId }: { specId: string }) {
     })();
     return () => controller.abort();
   }, [revision, specId]);
+
+  useEffect(() => {
+    if (campaign?.status !== 'active' || campaign.generation !== 0) return;
+    const controller = new AbortController();
+    void fetch('/api/research/candidates?limit=50&offset=0', { signal: controller.signal })
+      .then(async (response) => (response.ok ? parseSeedCandidateOptions(await response.json(), specId) : []))
+      .then((options) => {
+        if (!controller.signal.aborted) setSeedCandidates(options);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setSeedCandidates([]);
+      });
+    return () => controller.abort();
+  }, [campaign?.generation, campaign?.status, revision, specId]);
 
   async function start() {
     if (busy) return;
@@ -254,15 +307,15 @@ export default function EvolutionPanel({ specId }: { specId: string }) {
             ].map(([label, value]) => (
               <div key={label} className="rounded-lg border border-border/50 bg-background/60 p-3">
                 <dt className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</dt>
-                <dd className="mt-1 font-mono text-sm font-semibold text-foreground">{value}</dd>
+                <dd className="mt-1 font-mono tabular-nums text-sm font-semibold text-foreground">{value}</dd>
               </div>
             ))}
           </dl>
           <code className="block break-all rounded-lg border border-border/50 bg-muted/20 p-2 text-[11px] text-muted-foreground">
             {campaign.evolutionId}
           </code>
-          <p className="text-xs text-muted-foreground">
-            Search stop: {campaign.searchStopReason} · terminal stop: {campaign.stopReason} · finalists: {campaign.finalistCount}
+          <p className="text-xs text-muted-foreground tabular-nums">
+            Search stop: {formatStopReason(campaign.searchStopReason)} · terminal stop: {formatStopReason(campaign.stopReason)} · finalists: {campaign.finalistCount}
           </p>
         </>
       ) : null}
@@ -277,14 +330,51 @@ export default function EvolutionPanel({ specId }: { specId: string }) {
       <output aria-live="polite" className="block text-xs text-muted-foreground">{notice}</output>
 
       {campaign?.status === 'active' && campaign.generation === 0 ? (
-        <label className="block space-y-1 text-xs">
-          <span>Reviewed search seed</span>
-          <input value={seedId} onChange={event => setSeedId(event.target.value)} disabled={busy}
-            aria-label="Reviewed search seed"
-            placeholder="cand_…" className="w-full rounded-lg border bg-background p-2 font-mono"
-            aria-describedby="evolution-seed-help" />
-          <span id="evolution-seed-help" className="block text-muted-foreground">Run search and review protocol scope in Proposals first.</span>
-        </label>
+        <div className="space-y-2">
+          {seedCandidates.length > 0 ? (
+            <label htmlFor="evolution-seed-picker" className="block space-y-1 text-xs">
+              <span className="font-medium text-foreground">Pick a saved candidate for this spec</span>
+              <select
+                id="evolution-seed-picker"
+                name="seed_candidate_picker"
+                value={seedCandidates.some((item) => item.candidateId === seedId.trim()) ? seedId.trim() : ''}
+                disabled={busy}
+                onChange={(event) => {
+                  if (event.target.value) setSeedId(event.target.value);
+                }}
+                className="w-full rounded-lg border border-border/60 bg-background p-2 font-mono text-xs text-foreground"
+              >
+                <option value="">Choose a saved candidate…</option>
+                {seedCandidates.map((item) => (
+                  <option key={item.candidateId} value={item.candidateId}>
+                    {item.candidateId} · {item.operator.replaceAll('_', ' ')}
+                    {item.reviewed ? ' (scope reviewed)' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          <label htmlFor="evolution-seed-input" className="block space-y-1 text-xs">
+            <span>Reviewed search seed</span>
+            <input
+              id="evolution-seed-input"
+              name="seed_candidate_id"
+              value={seedId}
+              onChange={event => setSeedId(event.target.value)}
+              disabled={busy}
+              aria-label="Reviewed search seed"
+              aria-invalid={seedId.trim().length > 0 && !/^cand_[a-f0-9]{32}$/.test(seedId.trim()) ? true : undefined}
+              placeholder="cand_…"
+              className="w-full rounded-lg border bg-background p-2 font-mono"
+              aria-describedby="evolution-seed-help"
+            />
+            <span id="evolution-seed-help" className="block text-muted-foreground">
+              {seedId.trim().length > 0 && !/^cand_[a-f0-9]{32}$/.test(seedId.trim())
+                ? 'Expected a 37-character candidate ID starting with cand_ followed by 32 hex characters.'
+                : 'Run search and review protocol scope in Proposals first.'}
+            </span>
+          </label>
+        </div>
       ) : null}
       {campaign && ['active', 'search_stopped'].includes(campaign.status) && campaign.paretoIds.length > 0 ? (
         <details className="rounded-lg border border-border/60 p-3 text-xs">

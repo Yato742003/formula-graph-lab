@@ -204,10 +204,14 @@ function researchCase(candidateId: string, specId: string, outcome = 'supported_
   };
 }
 
-function scopedResearchCase(candidateId: string, specId: string) {
+function scopedResearchCase(
+  candidateId: string,
+  specId: string,
+  schemaVersion: 'research-case-result.v2' | 'research-case-result.v3' = 'research-case-result.v2',
+) {
   const receipt = researchCase(candidateId, specId);
   return { ...receipt, result: { ...receipt.result,
-    schema_version: 'research-case-result.v2', evaluation_role: 'search', evolution_id: null,
+    schema_version: schemaVersion, evaluation_role: 'search', evolution_id: null,
     holdout_mean: null, holdout_ci95_low: null, holdout_ci95_high: null,
     trials: [42, 43, 44].map((seed, index) => ({ seed,
       split: index === 2 ? 'validation' : 'search', outcome: 'passed_suite' })),
@@ -1149,6 +1153,47 @@ it('explains why unknown, stale, or unreviewed mappings cannot be compiled', asy
   expect(fetcher).toHaveBeenCalledOnce();
 });
 
+it('excludes unreviewed compatible and reviewed unknown mappings from compilation eligibility', async () => {
+  const unreviewedCompatible: CompatibilityView = {
+    ...mapping,
+    mappingId: 'map-unreviewed-compatible',
+    status: 'compatible',
+    freshness: 'current',
+    isReviewed: false,
+  };
+  const reviewedUnknown: CompatibilityView = {
+    ...mapping,
+    mappingId: 'map-reviewed-unknown',
+    status: 'unknown',
+    freshness: 'current',
+    isReviewed: true,
+  };
+  const fetcher = vi.fn(async () => Response.json(problemList));
+  mockApi(fetcher);
+  const user = userEvent.setup();
+  render(
+    <ResearchMovePanel
+      mappings={[unreviewedCompatible, reviewedUnknown]}
+      mappingsState="loaded"
+      mappingsPartial={false}
+    />,
+  );
+  await user.click(screen.getByText('Create research candidate'));
+  expect(
+    await screen.findByText(/Create and review a current compatible mapping/i),
+  ).toBeTruthy();
+  const mappingSelect = screen.getByLabelText('Reviewed compatible mapping');
+  expect(mappingSelect).toHaveProperty('disabled', true);
+  expect(mappingSelect).toHaveProperty('value', '');
+  expect(screen.getByRole('option', { name: 'No current reviewed mapping' })).toBeTruthy();
+  expect(
+    screen
+      .getByRole('button', { name: 'Compile hypothesis' })
+      .hasAttribute('disabled'),
+  ).toBe(true);
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
 it('does not confuse an unavailable research API with an empty workspace', async () => {
   const fetcher = vi.fn(async () => new Response('{}', { status: 503 }));
   mockApi(fetcher);
@@ -1586,4 +1631,30 @@ it('rejects a replay report for another activity and offers a safe retry state',
   expect(screen.queryByText(
     'Replay report · not run',
   )).toBeNull();
+});
+
+it('accepts research-case-result.v3 receipts from ExecutionProfile-pinned workers', async () => {
+  const candidateId = 'cand_' + '0'.repeat(31) + '1';
+  const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+    const path = requestPath(input);
+    if (path.startsWith('/api/research/problems?')) return Response.json(problemList);
+    if (path.endsWith('/verify')) return Response.json(candidateCheck(candidateId));
+    if (path.endsWith('/admission')) return Response.json(admission());
+    if (path.endsWith('/research-case')) {
+      return Response.json(scopedResearchCase(candidateId, 'spec_0123456789abcdef', 'research-case-result.v3'));
+    }
+    return Response.json(
+      candidate('1', '1', 'lower_mixture_to_concatenation', 'preserving', ['cand_parent'], []),
+      { status: 201 },
+    );
+  });
+  mockApi(fetcher);
+  const user = userEvent.setup();
+  render(<ResearchMovePanel mappings={[mapping]} mappingsState="loaded" mappingsPartial={false} />);
+  await user.click(screen.getByText('Create research candidate'));
+  await user.click(await screen.findByRole('button', { name: 'Compile hypothesis' }));
+  await user.click(screen.getByRole('button', { name: 'Run frozen CPU search' }));
+  expect(await screen.findByText('Outcome')).toBeTruthy();
+  expect(screen.getByText('supported on protocol')).toBeTruthy();
+  expect(screen.getByText('Locked until finalist freeze')).toBeTruthy();
 });

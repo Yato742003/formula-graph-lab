@@ -1,5 +1,6 @@
 'use client';
 
+import { ChevronDown, Plus } from 'lucide-react';
 import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import { parseCompatibilityView, parseLineageView } from '@/lib/research-view';
 
@@ -31,8 +32,18 @@ const metadataLabels = {
   version_published_at: 'Version publication date', venue_published_at: 'Venue publication date',
 };
 
-export default function ResearchCreatePanel({ onCreated }: { onCreated: () => void }) {
-  const [mode, setMode] = useState('lineage');
+export default function ResearchCreatePanel({
+  onCreated,
+  defaultMode = 'lineage',
+  defaultOpen = false,
+  id,
+}: {
+  onCreated: () => void;
+  defaultMode?: 'lineage' | 'compatibility' | 'contract' | 'metadata';
+  defaultOpen?: boolean;
+  id?: string;
+}) {
+  const [mode, setMode] = useState<string>(defaultMode);
   const [sources, setSources] = useState<Source[]>([]);
   const [papers, setPapers] = useState<Source[]>([]);
   const [sections, setSections] = useState<Source[]>([]);
@@ -188,10 +199,30 @@ export default function ResearchCreatePanel({ onCreated }: { onCreated: () => vo
   }
 
   return (
-    <details className="border border-border/70 rounded-xl bg-card/60 backdrop-blur-xs p-3 text-xs shadow-2xs">
-      <summary className="cursor-pointer font-medium text-foreground hover:text-primary transition-colors select-none">
+    <details
+      id={id}
+      open={defaultOpen || undefined}
+      className="group border border-border/80 rounded-xl bg-card/90 backdrop-blur-xs px-3 py-2 text-xs shadow-2xs transition-colors hover:border-primary/40 open:border-primary/40 open:pb-3"
+    >
+      <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden font-medium text-foreground hover:text-primary transition-colors select-none flex flex-wrap items-center justify-between gap-2">
         <span className="sr-only">Create source-backed research records</span>
-        <span aria-hidden="true">Add evidence</span>
+        <span aria-hidden="true" className="inline-flex items-center gap-2">
+          <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-primary/10 text-primary">
+            <Plus size={12} strokeWidth={2.5} />
+          </span>
+          <span className="font-semibold">Add evidence</span>
+          <span className="hidden sm:inline text-[11px] font-normal text-muted-foreground">
+            — Link papers, review symbol contracts, or map ports
+          </span>
+        </span>
+        <span
+          aria-hidden="true"
+          className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-background px-2 py-0.5 text-[11px] font-medium text-muted-foreground group-hover:text-foreground"
+        >
+          <span className="group-open:hidden">Open form</span>
+          <span className="hidden group-open:inline">Hide form</span>
+          <ChevronDown size={12} className="transition-transform group-open:rotate-180" />
+        </span>
       </summary>
       <output className="block text-[11px] text-muted-foreground mt-1" aria-live="polite">
         {sourceNotice}
@@ -312,9 +343,33 @@ export default function ResearchCreatePanel({ onCreated }: { onCreated: () => vo
                 ))}
               {mode === 'contract' ? (
                 <>
-                  <p className="text-[11px] text-muted-foreground">
-                    Review the exact equation and symbol. Acceptance confirms only the values entered here.
-                  </p>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[11px] text-muted-foreground">
+                      Review the exact equation and symbol. Acceptance confirms only the values entered here.
+                    </p>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        setContract({
+                          decision: 'accepted',
+                          category: 'function',
+                          domain: 'real',
+                          shape: '[64]',
+                          normalization: 'none',
+                          mask: 'none',
+                          causal: 'no',
+                          resourceClass: 'not_applicable',
+                          featureRank: '16',
+                          outputDomain: 'strictly_positive_real',
+                        });
+                        setNotice('Filled feature-map draft values (φ: real [64] → positive rank 16). Choose the equation/symbol and enter your own rationale before saving.');
+                      }}
+                      className="text-[11px] px-2 py-1 rounded border border-primary/40 bg-primary/5 text-primary hover:bg-primary/10 font-medium transition-colors"
+                    >
+                      Fill CPU pilot feature-map template
+                    </button>
+                  </div>
                   <label htmlFor="contract-reviewed-symbol" className="block text-xs font-medium text-foreground">
                     Reviewed symbol
                     <select
@@ -411,11 +466,16 @@ export default function ResearchCreatePanel({ onCreated }: { onCreated: () => vo
                         Optional feature map only; rank is not inferred. For functions, shape and domain describe the input.
                       </p>
                       {contract.category === 'function' ? (
-                        <label className="block text-xs font-medium text-foreground">
+                        <label htmlFor="contract-output-domain" className="block text-xs font-medium text-foreground">
                           Feature-map output domain
-                          <select value={contract.outputDomain} required={!!contract.featureRank}
+                          <select
+                            id="contract-output-domain"
+                            name="output_domain"
+                            value={contract.outputDomain}
+                            required={!!contract.featureRank}
                             onChange={event => setContract(current => ({ ...current, outputDomain: event.target.value }))}
-                            className="block w-full border border-border/60 rounded-md p-1.5 mt-1 bg-background text-foreground text-xs">
+                            className="block w-full border border-border/60 rounded-md p-1.5 mt-1 bg-background text-foreground text-xs"
+                          >
                             <option value="">Unknown · not reviewed</option>
                             <option value="strictly_positive_real">Strictly positive real</option>
                           </select>

@@ -170,4 +170,20 @@ describe('source-backed record creation', () => {
     expect(new Headers(requests[0].headers).get('x-idempotency-key')).toBe(new Headers(requests[1].headers).get('x-idempotency-key'));
     expect(JSON.parse(requests[1].body as string)).not.toHaveProperty('has_html');
   });
+
+  it('defaults to compatibility mode when requested and fills CPU pilot feature-map contract values', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ items: sources, has_more: false })));
+    render(<ResearchCreatePanel defaultMode="compatibility" onCreated={vi.fn()} />);
+    fireEvent.click(screen.getByText('Create source-backed research records'));
+    await screen.findByText('Source equations loaded.');
+    expect(screen.getByLabelText('Record type')).toHaveProperty('value', 'compatibility');
+
+    fireEvent.change(screen.getByLabelText('Record type'), { target: { value: 'contract' } });
+    fireEvent.click(screen.getByRole('button', { name: /Fill CPU pilot feature-map template/i }));
+    expect(screen.getByLabelText('Category')).toHaveProperty('value', 'function');
+    expect(screen.getByLabelText('Domain')).toHaveProperty('value', 'real');
+    expect(screen.getByLabelText('Shape JSON')).toHaveProperty('value', '[64]');
+    expect(screen.getByLabelText('Feature-map output rank')).toHaveProperty('value', '16');
+    expect(screen.getByLabelText('Feature-map output domain')).toHaveProperty('value', 'strictly_positive_real');
+  });
 });

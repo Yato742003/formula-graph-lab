@@ -276,17 +276,17 @@ function SectionGroupCard({
   return (
     <div className="section-swimlane-card" aria-hidden="true">
       <div className="section-swimlane-header">
-        <div className="section-swimlane-title-group">
+        <div className="section-swimlane-meta-row">
           <span className="section-swimlane-pill">SECTION</span>
-          <strong className="section-swimlane-title" title={data.title}>
-            {data.title}
-          </strong>
+          {data.count > 0 ? (
+            <span className="section-swimlane-badge">
+              {data.count} {data.count === 1 ? 'formula' : 'formulas'}
+            </span>
+          ) : null}
         </div>
-        {data.count > 0 ? (
-          <span className="section-swimlane-badge">
-            {data.count} {data.count === 1 ? 'formula' : 'formulas'}
-          </span>
-        ) : null}
+        <strong className="section-swimlane-title" title={data.title}>
+          {data.title}
+        </strong>
       </div>
     </div>
   );
@@ -480,21 +480,22 @@ function layoutNodes(
   });
 
   const flowNodes: AnyFlowNode[] = [];
+  const swimlaneGroupNodes: AnyFlowNode[] = [];
   const assignedNodeIds = new Set<string>();
 
   const cardWidth = isCompact ? 220 : 320;
   const cardHeight = isCompact ? 58 : 155;
   const cardGap = isCompact ? 14 : 20;
   const swimlanePadX = 20;
-  const swimlanePadTop = 64;
+  const swimlanePadTop = 82;
   const swimlanePadBottom = 24;
   const swimlaneGap = isCompact ? 36 : 48;
 
   const rootNodes = nodes.filter((n) => n.kind === 'Paper' || n.kind === 'PaperVersion');
   const hasPaperRoot = rootNodes.length > 0;
-  const paperColWidth = isCompact ? 220 : 280;
   const laneInnerWidth = cardWidth;
   const laneTotalWidth = laneInnerWidth + swimlanePadX * 2;
+  const paperColWidth = laneTotalWidth;
 
   // Maximum columns per row to maintain a balanced 16:9 ratio and prevent canvas stretching
   const MAX_LANES_PER_ROW = 4;
@@ -538,14 +539,32 @@ function layoutNodes(
     cumY += (rowMaxHeights.get(r) ?? 380) + swimlaneGap;
   }
 
-  // 4. Preceding Column: Paper / PaperVersion node (anchor at left of Row 0)
+  // 4. Preceding Column: Source Paper swimlane (anchor at left of Row 0)
   if (hasPaperRoot) {
+    const paperStartY = rowStartY.get(0) ?? 40;
+    const paperHeight = swimlanePadTop + rootNodes.length * (cardHeight + cardGap) + swimlanePadBottom;
+    swimlaneGroupNodes.push({
+      id: 'swimlane-paper-root',
+      type: 'sectionGroup',
+      position: { x: 36, y: paperStartY },
+      style: { width: paperColWidth, height: paperHeight },
+      data: {
+        title: 'Source Paper',
+        count: rootNodes.length,
+        sectionId: 'paper-root',
+      },
+      draggable: false,
+      selectable: false,
+      focusable: false,
+      zIndex: -1,
+    } as AnyFlowNode);
+
     rootNodes.forEach((node, idx) => {
       assignedNodeIds.add(node.id);
       flowNodes.push({
         id: node.id,
         type: 'evidence',
-        position: { x: 36, y: (rowStartY.get(0) ?? 40) + idx * (cardHeight + cardGap) },
+        position: { x: 36 + swimlanePadX, y: paperStartY + swimlanePadTop + idx * (cardHeight + cardGap) },
         data: { ...node, isCompact: true },
         draggable: false,
         selectable: true,
@@ -594,6 +613,7 @@ function layoutNodes(
           ...eq,
           isCompact,
           symbols: inCardSymbols,
+          sectionId: secId,
         },
         draggable: false,
         selectable: true,
@@ -605,7 +625,7 @@ function layoutNodes(
 
     const laneTotalHeight = swimlanePadTop + eqs.length * (cardHeight + cardGap) + swimlanePadBottom;
 
-    flowNodes.unshift({
+    swimlaneGroupNodes.push({
       id: `swimlane-${secId}`,
       type: 'sectionGroup',
       position: { x: startX, y: startY },
@@ -657,7 +677,7 @@ function layoutNodes(
     });
   }
 
-  return flowNodes;
+  return [...swimlaneGroupNodes, ...flowNodes];
 }
 
 function FitViewWatcher({
@@ -892,8 +912,8 @@ export default function EvidenceGraphViewport({
 
       // In Section Swimlanes view, structural containment edges (paper->section, section->eq)
       // are represented by the physical swimlane containers.
-      // Omit unhighlighted containment edges to eliminate 76+ crossing wires!
-      if (isSwimlaneLayout && isContainment && !isHighlighted) {
+      // Always omit containment edges in swimlane view to eliminate self-loops and crossing clutter.
+      if (isSwimlaneLayout && isContainment) {
         continue;
       }
 
@@ -954,9 +974,9 @@ export default function EvidenceGraphViewport({
         zIndex: isHighlighted ? 20 : isDimmed ? 1 : 10,
         style: {
           stroke,
-          strokeWidth: isHighlighted ? 2.5 : isDimmed ? 0.9 : 1.8,
+          strokeWidth: isHighlighted ? 2.5 : isDimmed ? 1.1 : 1.8,
           strokeDasharray: isContainment ? '4 4' : undefined,
-          opacity: isDimmed ? 0.08 : isContainment ? 0.5 : 1.0,
+          opacity: isDimmed ? 0.34 : isContainment ? 0.55 : 1.0,
           transition: 'opacity 0.2s ease, stroke-width 0.2s ease',
         },
         labelStyle: {
@@ -988,17 +1008,9 @@ export default function EvidenceGraphViewport({
       }
       for (const fn of baseLayoutNodes) {
         if (fn.type === 'evidence' && (fn.data as EvidenceNodeData).kind === 'Equation') {
-          for (const sg of baseLayoutNodes) {
-            if (sg.type === 'sectionGroup') {
-              const secId = (sg.data as SectionGroupData).sectionId;
-              const sgW = (sg.style?.width as number) || 300;
-              if (secId && fn.position.x >= sg.position.x && fn.position.x < sg.position.x + sgW) {
-                const list = secEqMap.get(secId) ?? [];
-                list.push(fn.id);
-                secEqMap.set(secId, list);
-                break;
-              }
-            }
+          const secId = (fn.data as EvidenceNodeData & { sectionId?: string }).sectionId;
+          if (secId && secEqMap.has(secId)) {
+            secEqMap.get(secId)!.push(fn.id);
           }
         }
       }
@@ -1359,7 +1371,7 @@ export default function EvidenceGraphViewport({
             aria-label={isZenMode ? 'Exit Zen Mode' : 'Zen Focus Mode'}
           >
             <Eye size={13} className="mr-1 text-sky-500" />
-            <span>{isZenMode ? 'Exit Zen' : 'Zen (Z)'}</span>
+            <span>{isZenMode ? 'Exit Zen' : 'Zen'}</span>
           </Button>
         ) : null}
         <Button
@@ -1376,7 +1388,7 @@ export default function EvidenceGraphViewport({
           ) : (
             <Maximize2 size={13} className="mr-1" />
           )}
-          <span>{isFullscreen ? 'Exit' : 'Full screen'}</span>
+          <span>{isFullscreen ? 'Exit' : 'Expand'}</span>
         </Button>
       </div>
 

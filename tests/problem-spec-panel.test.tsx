@@ -48,8 +48,14 @@ describe('ProblemSpec persistence workflow', () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ items: [], total: 0 })));
     render(<ProblemSpecPanel />);
     expect(screen.queryByText(/verified benchmark templates/i)).toBeNull();
+    expect(screen.getByText('Draft example')).toBeTruthy();
+    expect(screen.getByText('Draft · Transformer')).toBeTruthy();
+    expect(screen.getByText('Draft · Theory')).toBeTruthy();
     expect(screen.getByText('13/13 JSON readable')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Use 3DGS question' }));
+    expect(screen.getByText(/Draft 3DGS scaffold loaded/i)).toBeTruthy();
+    expect(screen.getByText(/placeholder SHA-256 hashes/i)).toBeTruthy();
+    expect(screen.queryByText(/Ready for G1 freeze/i)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Continue to manifest' }));
     fireEvent.change(screen.getByLabelText('Metrics and directions (JSON)'), { target: { value: '{' } });
     expect(screen.getByText('12/13 JSON readable')).toBeTruthy();
@@ -133,5 +139,29 @@ describe('ProblemSpec persistence workflow', () => {
     expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Review and freeze' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Create revision' })).toBeTruthy();
+    expect(window.location.search).toContain('spec_id=spec_one');
+    expect(screen.getByRole('link', { name: /Proceed to Step 3: Check Compatibility/i }).getAttribute('href'))
+      .toBe('/compatibility?spec_id=spec_one');
+    expect(screen.getByRole('link', { name: /Open Evolution in Reports/i }).getAttribute('href'))
+      .toBe('/reports?spec_id=spec_one');
+  });
+
+  it('loads the registered CPU pilot draft and surfaces inline JSON syntax errors on Format', () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ items: [], total: 0 })));
+    render(<ProblemSpecPanel />);
+    fireEvent.click(screen.getByRole('button', { name: /Linear Attention CPU Pilot/i }));
+    expect(screen.getByLabelText('Method family')).toHaveProperty('value', 'linear-attention');
+    expect(screen.getByLabelText('Dtype')).toHaveProperty('value', 'float64');
+    expect(screen.getByText(/attention-mashup-cpu-synthetic\.v1/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to manifest' }));
+    const metricsField = screen.getByLabelText('Metrics and directions (JSON)');
+    fireEvent.change(metricsField, { target: { value: '{broken' } });
+    expect(metricsField.getAttribute('aria-invalid')).toBe('true');
+    expect(screen.getByText('Syntax error')).toBeTruthy();
+
+    const formatButtons = screen.getAllByRole('button', { name: 'Format' });
+    fireEvent.click(formatButtons[0]);
+    expect(screen.getByText(/Metrics and directions: Invalid JSON/i)).toBeTruthy();
   });
 });

@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import ProblemSpecPanel from './problem-spec-panel';
 import ResearchCreatePanel from './research-create-panel';
 import ResearchMovePanel from './research-move-panel';
@@ -35,9 +36,11 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Pencil,
   Plus,
   Search,
   ShieldCheck,
+  Trash2,
   X,
 } from 'lucide-react';
 import {
@@ -507,6 +510,11 @@ function graphErrorMessage(code?: string): string {
   switch (code) {
     case 'AUTH_REQUIRED':
       return 'Your sign-in expired · reload to continue';
+    case 'INVALID_PAPER_ID':
+    case 'INVALID_PAPER_VERSION':
+      return 'Invalid arXiv paper identifier or version';
+    case 'PAPER_NOT_FOUND':
+      return 'This paper has not been imported into your workspace yet';
     case 'DATABASE_UNAVAILABLE':
       return 'Saved graph metadata is temporarily unavailable';
     case 'GRAPH_API_NOT_CONFIGURED':
@@ -810,6 +818,9 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
     [],
   );
   const [lineageFilter, setLineageFilter] = useState('');
+  const [hiddenPaperIds, setHiddenPaperIds] = useState<Set<string>>(new Set());
+  const [paperTitleOverrides, setPaperTitleOverrides] = useState<Map<string, string>>(new Map());
+  const [editingPaperId, setEditingPaperId] = useState<string | null>(null);
   const [selectedLineageId, setSelectedLineageId] = useState<string | null>(
     null,
   );
@@ -1135,11 +1146,17 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
   }, [evidenceNodes, hasPersistedGraph, selectedEvidence]);
   const filteredCoverage = useMemo(() => {
     const query = lineageFilter.trim().toLowerCase();
-    if (!query) return multiPaperCoverage;
-    return multiPaperCoverage.filter((paper) =>
+    const visible = multiPaperCoverage
+      .filter((paper) => !hiddenPaperIds.has(paper.id))
+      .map((paper) => {
+        const override = paperTitleOverrides.get(paper.id);
+        return override ? { ...paper, title: override } : paper;
+      });
+    if (!query) return visible;
+    return visible.filter((paper) =>
       `${paper.id} ${paper.title} ${paper.authors}`.toLowerCase().includes(query),
     );
-  }, [lineageFilter, multiPaperCoverage]);
+  }, [lineageFilter, multiPaperCoverage, hiddenPaperIds, paperTitleOverrides]);
   const persistedAuthors = Array.isArray(persistedVersionNode?.payload.authors)
     ? persistedVersionNode.payload.authors.filter(
         (author): author is string => typeof author === 'string',
@@ -1164,12 +1181,21 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
   const loadPersistedGraph = useCallback(
     async (
       signal?: AbortSignal,
+      targetPaper?: { id: string; version?: number },
     ): Promise<EvidenceGraphSnapshotResponse | undefined> => {
       await Promise.resolve();
       setIsGraphLoading(true);
       setGraphNotice('Loading saved evidence…');
       try {
-        const response = await fetch('/api/graph', {
+        const searchParams = new URLSearchParams();
+        if (targetPaper) {
+          searchParams.set('paper_id', targetPaper.id);
+          if (targetPaper.version !== undefined) {
+            searchParams.set('version', String(targetPaper.version));
+          }
+        }
+        const query = targetPaper ? `?${searchParams.toString()}` : '';
+        const response = await fetch(`/api/graph${query}`, {
           method: 'GET',
           headers: { accept: 'application/json' },
           signal,
@@ -1219,6 +1245,34 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
       }
     },
     [],
+  );
+
+  const switchActivePaper = useCallback(
+    async (paperItem: CoverageView) => {
+      if (!paperItem.hasHtml) {
+        setNotice(
+          `arXiv:${paperItem.id} has metadata only — import its arXiv HTML source to inspect its graph.`,
+        );
+        return;
+      }
+      const match = paperItem.id.match(/^(.+?)v(\d+)$/);
+      const rawId = match ? match[1] : paperItem.id;
+      const rawVer = match ? parseInt(match[2], 10) : undefined;
+      setNotice(`Switching to paper ${rawId}…`);
+      const completed = await loadPersistedGraph(undefined, {
+        id: rawId,
+        version: rawVer,
+      });
+      if (completed?.paper) {
+        setPaperUrl(completed.paper.source_url);
+        setNotice(`Active paper: ${completed.paper.title} (arXiv:${completed.paper.paper_id})`);
+      } else {
+        setNotice(
+          `Could not switch to arXiv:${rawId}: no imported graph snapshot is available in this workspace.`,
+        );
+      }
+    },
+    [loadPersistedGraph],
   );
 
   useEffect(() => {
@@ -1416,7 +1470,10 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
             <Network size={19} strokeWidth={2.2} />
           </div>
           <div>
-            <p className="brand-name">FormulaGraph</p>
+            <div className="flex items-center gap-1.5">
+              <p className="brand-name">FormulaGraph</p>
+              <span className="pro-tier-badge">PRO BETA</span>
+            </div>
             <p className="brand-suffix">LAB / 01</p>
           </div>
         </div>
@@ -1711,13 +1768,19 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
             </div>
           </article>
 
-          <details className="source-section-disclosure mb-4">
+          <details
+            key={multiPaperCoverage.length > 0 ? 'lineage-populated' : 'lineage-empty'}
+            className="source-section-disclosure mb-4"
+            open={multiPaperCoverage.length > 0 || undefined}
+          >
             <summary className="list-label">
               Multi-paper lineage ({multiPaperCoverage.length} indexed)
               <span className="source-disclosure-hint">Filter</span>
             </summary>
             <div className="source-section-body">
               <Input
+                id="source-lineage-filter"
+                name="lineage_filter"
                 aria-label="Filter multi-paper lineage"
                 value={lineageFilter}
                 onChange={(event) => setLineageFilter(event.target.value)}
@@ -1725,41 +1788,132 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                 className="source-lineage-filter"
               />
             <div className="space-y-1.5">
-              {filteredCoverage.map((p, idx) => (
-                <div
-                  key={p.id}
-                  className="p-2 rounded border border-border/40 bg-card/50 text-xs space-y-1"
-                >
-                  <div className="flex items-center justify-between gap-1">
-                    <span className="font-semibold text-[11px] truncate">
-                      P–0{idx + 1} · arXiv:{p.id}
-                    </span>
-                    {p.hasHtml ? (
-                      <Badge
-                        variant="outline"
-                        className="text-[9px] py-0 h-4 border-emerald-500/40 text-emerald-600 dark:text-emerald-400 shrink-0"
-                      >
-                        HTML ({p.eqCount} eq)
-                      </Badge>
+              {filteredCoverage.map((p, idx) => {
+                const isCurrentActive = graphSnapshot?.paper
+                  ? `${graphSnapshot.paper.paper_id}v${graphSnapshot.paper.version}` === p.id
+                  : paperId === p.id.replace(/v\d+$/, '');
+                const displayTitle = paperTitleOverrides.get(p.id) ?? p.title;
+
+                return (
+                  <div
+                    key={p.id}
+                    className={`p-2.5 rounded-lg border text-xs space-y-1.5 transition-all ${
+                      isCurrentActive
+                        ? 'border-primary/80 bg-primary/5 shadow-xs ring-1 ring-primary/20'
+                        : 'border-border/60 bg-card/60 hover:bg-muted/30'
+                    }`}
+                  >
+                    {/* Row 1: Paper Number / ID & Eq Count Badge */}
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="font-semibold text-[11px] font-mono text-foreground truncate">
+                        P–0{idx + 1} · arXiv:{p.id}
+                      </span>
+                      {p.hasHtml ? (
+                        <Badge
+                          variant="outline"
+                          className="text-[9px] py-0 h-4 border-emerald-500/40 text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 shrink-0 font-medium"
+                        >
+                          HTML ({p.eqCount} eq)
+                        </Badge>
+                      ) : (
+                        <Badge
+                          variant="outline"
+                          className="text-[9px] py-0 h-4 border-amber-500/40 text-amber-600 dark:text-amber-400 bg-amber-500/10 shrink-0 font-medium"
+                        >
+                          Metadata Only
+                        </Badge>
+                      )}
+                    </div>
+
+                    {/* Row 2: Title or Inline Rename Input */}
+                    {editingPaperId === p.id ? (
+                      <div className="space-y-1">
+                        <input
+                          id={`rename-paper-${p.id}`}
+                          name="paper_display_title"
+                          aria-label={`Rename ${p.id}`}
+                          className="w-full text-xs px-2 py-1 rounded border border-primary bg-background text-foreground outline-none shadow-xs"
+                          defaultValue={displayTitle}
+                          onClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              const val = (e.target as HTMLInputElement).value.trim();
+                              if (val && val !== p.title) {
+                                setPaperTitleOverrides((prev) => new Map(prev).set(p.id, val));
+                              }
+                              setEditingPaperId(null);
+                            } else if (e.key === 'Escape') {
+                              setEditingPaperId(null);
+                            }
+                          }}
+                          onBlur={(e) => {
+                            const val = e.target.value.trim();
+                            if (val && val !== p.title) {
+                              setPaperTitleOverrides((prev) => new Map(prev).set(p.id, val));
+                            }
+                            setEditingPaperId(null);
+                          }}
+                        />
+                        <p className="text-[10px] text-muted-foreground">Press Enter to save, Esc to cancel</p>
+                      </div>
                     ) : (
-                      <Badge
-                        variant="outline"
-                        className="text-[9px] py-0 h-4 border-amber-500/40 text-amber-600 dark:text-amber-400 bg-amber-500/10 shrink-0 font-medium"
-                      >
-                        Metadata Only
-                      </Badge>
+                      <p className="text-[11px] text-muted-foreground line-clamp-2 leading-snug" title={displayTitle}>
+                        {displayTitle}
+                      </p>
                     )}
+
+                    {!p.hasHtml ? (
+                      <p className="text-[10px] text-muted-foreground/70 italic">
+                        arXiv metadata only — equations not extracted. Import HTML to open its graph.
+                      </p>
+                    ) : null}
+
+                    {/* Row 3: Action Toolbar (Select / Active, Rename, Hide) */}
+                    <div className="flex items-center justify-between gap-1 pt-1 border-t border-border/40 text-[11px]">
+                      {isCurrentActive ? (
+                        <span className="inline-flex items-center gap-1 font-semibold text-[10px] text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">
+                          <Check size={11} /> Active
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={!p.hasHtml}
+                          className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-primary/10"
+                          onClick={() => void switchActivePaper(p)}
+                          title={
+                            p.hasHtml
+                              ? `Load ${p.id} into the graph workspace`
+                              : `${p.id} has metadata only — import HTML to open its graph`
+                          }
+                        >
+                          Open graph
+                        </button>
+                      )}
+
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors border border-border/40"
+                          title="Rename display label for this session"
+                          onClick={() => setEditingPaperId(editingPaperId === p.id ? null : p.id)}
+                        >
+                          <Pencil size={10} />
+                          <span>Rename</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors border border-border/40"
+                          title="Hide paper from this list"
+                          onClick={() => setHiddenPaperIds((prev) => new Set(prev).add(p.id))}
+                        >
+                          <Trash2 size={10} />
+                          <span>Hide</span>
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                  <p className="text-[11px] text-muted-foreground line-clamp-1">
-                    {p.title}
-                  </p>
-                  {!p.hasHtml ? (
-                    <p className="text-[10px] text-muted-foreground/70 italic">
-                      arXiv metadata only — equations not extracted
-                    </p>
-                  ) : null}
-                </div>
-              ))}
+                );
+              })}
               {!filteredCoverage.length ? (
                 <p className="source-disclosure-empty">No paper matches this filter.</p>
               ) : null}
@@ -1825,10 +1979,10 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
               <div>
                 <p className="eyebrow">
                   {activeViewTab === 'spec'
-                    ? 'Research setup'
+                    ? 'Step 02 of 05 · Research setup'
                     : activeViewTab === 'compat'
-                      ? 'Candidate validation'
-                      : 'Temporal formula graph'}
+                      ? 'Step 03 of 05 · Symbol compatibility'
+                      : 'Step 01 of 05 · Temporal formula graph'}
                 </p>
                 <h1>
                   {activeViewTab === 'spec'
@@ -1917,6 +2071,23 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                   </span>
                 </div>
               ) : null}
+              {stage === 'graph' ? (
+                <Link
+                  href={withContext('/spec', workspaceParams)}
+                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary/90 transition-colors shadow-xs whitespace-nowrap"
+                >
+                  <span>Next: Step 2 · Spec</span>
+                  <ArrowRight size={13} aria-hidden="true" />
+                </Link>
+              ) : stage === 'compatibility' ? (
+                <Link
+                  href={withContext('/proposals', workspaceParams)}
+                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary/90 transition-colors shadow-xs whitespace-nowrap"
+                >
+                  <span>Next: Step 4 · Proposals</span>
+                  <ArrowRight size={13} aria-hidden="true" />
+                </Link>
+              ) : null}
               {isRightCollapsed &&
               activeViewTab !== 'spec' &&
               activeViewTab !== 'compat' ? (
@@ -1977,6 +2148,9 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
           </div>
           <div hidden={activeViewTab === 'spec'} className="shrink-0 mb-2">
             <ResearchCreatePanel
+              key={activeViewTab === 'compat' ? 'compat' : 'lineage'}
+              id={activeViewTab === 'compat' ? 'compatibility-add-evidence' : 'graph-add-evidence'}
+              defaultMode={activeViewTab === 'compat' ? 'compatibility' : 'lineage'}
               onCreated={() => setResearchRevision((value) => value + 1)}
             />
           </div>
@@ -2024,22 +2198,50 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
               </div> : null}
             </>
           ) : activeViewTab === 'spec' ? null : (
-            <div className="flex-1 p-6 overflow-y-auto bg-card/20 space-y-4">
-              <div className="flex items-center justify-between p-4 rounded-xl border border-border/50 bg-card shadow-xs">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <h2 className="text-lg font-semibold tracking-tight">
-                      Port Compatibility (G3)
-                    </h2>
-                    <Badge variant="outline" className="text-xs">
-                      Versioned policy
-                    </Badge>
+            <div className="flex-1 p-5 overflow-y-auto bg-card/20 space-y-4">
+              <div className="p-4 rounded-xl border border-border/60 bg-card shadow-xs space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-base font-semibold tracking-tight">
+                        Port Compatibility (G3)
+                      </h2>
+                      <Badge variant="outline" className="text-[11px]">
+                        Versioned policy
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Scoped checks for shape, domain, normalization, masks,
+                      causality and reviewed symbol bindings.
+                    </p>
                   </div>
-                  <p className="text-xs text-muted-foreground">
-                    Scoped checks for shape, domain, normalization, masks,
-                    causality and reviewed symbol bindings.
-                  </p>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-primary/40 bg-primary/8 text-primary hover:bg-primary/15 text-xs font-semibold transition-colors cursor-pointer"
+                    onClick={() => {
+                      const panel = document.getElementById('compatibility-add-evidence') as HTMLDetailsElement | null;
+                      if (panel) {
+                        panel.open = true;
+                        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                        document.getElementById('create-record-type')?.focus();
+                      }
+                    }}
+                  >
+                    <Plus size={13} aria-hidden="true" />
+                    <span>Map two formula symbols</span>
+                  </button>
                 </div>
+                <ol className="grid gap-2 sm:grid-cols-3 pt-2 border-t border-border/40 text-[11px] text-muted-foreground">
+                  <li className="rounded-lg bg-muted/30 px-2.5 py-1.5">
+                    <strong className="text-foreground">1. Pick two symbols</strong> — Open Add evidence above and choose a producer &amp; consumer formula.
+                  </li>
+                  <li className="rounded-lg bg-muted/30 px-2.5 py-1.5">
+                    <strong className="text-foreground">2. Automatic 6-gate check</strong> — Server checks shape, domain, normalization, masks, causality, and binding.
+                  </li>
+                  <li className="rounded-lg bg-muted/30 px-2.5 py-1.5">
+                    <strong className="text-foreground">3. Confirm binding</strong> — Record a review rationale to unlock Step 4 (Proposals).
+                  </li>
+                </ol>
               </div>
 
               <div className="space-y-3">
@@ -2083,17 +2285,28 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
 
                           <div className="flex items-center justify-between gap-3 pt-2 border-t border-border/40">
                             <span className="text-xs text-muted-foreground">Select a formula pair to add a mapping.</span>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="h-8 text-xs gap-1.5"
-                              onClick={() => selectPrimaryView('papers')}
-                            >
-                              <Network size={13} />
-                              <span>Open Graph</span>
-                              <ArrowRight size={13} />
-                            </Button>
+                            {stage ? (
+                              <Link
+                                href={withContext('/graph', workspaceParams)}
+                                className="inline-flex items-center h-8 px-3 rounded-md border border-border/60 bg-background hover:bg-muted text-xs font-medium gap-1.5 transition-colors"
+                              >
+                                <Network size={13} />
+                                <span>Open Graph</span>
+                                <ArrowRight size={13} />
+                              </Link>
+                            ) : (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 text-xs gap-1.5"
+                                onClick={() => selectPrimaryView('papers')}
+                              >
+                                <Network size={13} />
+                                <span>Open Graph</span>
+                                <ArrowRight size={13} />
+                              </Button>
+                            )}
                           </div>
                         </div>
                       </>
@@ -2174,10 +2387,13 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                     {m.freshness === 'current' &&
                     m.status === 'unknown' &&
                     !m.isReviewed ? (
-                      <label className="block text-xs mt-2">
+                      <label htmlFor={`binding-review-note-${m.mappingId}`} className="block text-xs mt-2">
                         Binding review rationale and evidence scope
                         <textarea
+                          id={`binding-review-note-${m.mappingId}`}
+                          name="binding_review_rationale"
                           maxLength={1000}
+                          placeholder="Explain why these two reviewed ports match in shape, domain, and causality…"
                           value={reviewNotes[m.mappingId] ?? ''}
                           onChange={(e) =>
                             setReviewNotes((previous) => ({
@@ -2253,6 +2469,21 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                         </>
                       ) : null}
                     </div>
+
+                    {m.status === 'compatible' ? (
+                      <div className="flex items-center justify-between pt-2 border-t border-border/40">
+                        <span className="text-xs text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1.5">
+                          <Check size={14} /> Approved for candidate compilation
+                        </span>
+                        <Link
+                          href={withContext('/proposals', workspaceParams)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary/90 transition-colors shadow-xs"
+                        >
+                          <span>Proceed to Step 4: Proposals</span>
+                          <ArrowRight size={13} />
+                        </Link>
+                      </div>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -2342,33 +2573,56 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                     <code>{inspector.expression}</code>
                   );
                 })()}
-                <div className="flex items-center gap-2 pt-2 border-t border-border/40 mt-2.5">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-7 px-2.5 text-xs gap-1.5 flex-1 font-medium hover:border-primary/50 transition-colors"
-                    onClick={() => {
-                      selectCompatibilityView();
-                    }}
-                    title="Open compatibility; select and review a mapping there"
-                  >
-                    <ShieldCheck size={13} className="text-primary" />
-                    <span>Open Compatibility</span>
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-7 px-2.5 text-xs gap-1.5 flex-1 font-medium hover:border-primary/50 transition-colors"
-                    onClick={() => {
-                      selectPrimaryView('research');
-                    }}
-                    title="Open the research question and experiment manifest"
-                  >
-                    <FileCode2 size={13} className="text-primary" />
-                    <span>Open Spec</span>
-                  </Button>
+                <div className="flex items-center gap-1.5 pt-2 border-t border-border/40 mt-2.5">
+                  {stage ? (
+                    <>
+                      <Link
+                        href={withContext('/compatibility', workspaceParams)}
+                        className="inline-flex items-center justify-center h-7 px-2 rounded-md border border-border/60 bg-background hover:bg-muted text-xs gap-1.5 flex-1 font-medium hover:border-primary/50 transition-colors whitespace-nowrap min-w-0"
+                        title="Open compatibility; select and review a mapping there"
+                      >
+                        <ShieldCheck size={13} className="text-primary shrink-0" />
+                        <span className="truncate">Port Check</span>
+                      </Link>
+                      <Link
+                        href={withContext('/spec', workspaceParams)}
+                        className="inline-flex items-center justify-center h-7 px-2 rounded-md border border-border/60 bg-background hover:bg-muted text-xs gap-1.5 flex-1 font-medium hover:border-primary/50 transition-colors whitespace-nowrap min-w-0"
+                        title="Open the research question and experiment manifest"
+                      >
+                        <FileCode2 size={13} className="text-primary shrink-0" />
+                        <span className="truncate">Spec</span>
+                      </Link>
+                    </>
+                  ) : (
+                    <>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs gap-1.5 flex-1 font-medium hover:border-primary/50 transition-colors whitespace-nowrap min-w-0"
+                        onClick={() => {
+                          selectCompatibilityView();
+                        }}
+                        title="Open compatibility; select and review a mapping there"
+                      >
+                        <ShieldCheck size={13} className="text-primary shrink-0" />
+                        <span className="truncate">Port Check</span>
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs gap-1.5 flex-1 font-medium hover:border-primary/50 transition-colors whitespace-nowrap min-w-0"
+                        onClick={() => {
+                          selectPrimaryView('research');
+                        }}
+                        title="Open the research question and experiment manifest"
+                      >
+                        <FileCode2 size={13} className="text-primary shrink-0" />
+                        <span className="truncate">Spec</span>
+                      </Button>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -2672,9 +2926,11 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                         <LineageSourceRefs refs={edge.evidence.refs} />
                         {edge.status !== 'reviewed' ? (
                           <div className="space-y-2 pt-1">
-                            <label className="block">
+                            <label htmlFor={`lineage-review-note-${edge.id}`} className="block">
                               Source review rationale and scope
                               <textarea
+                                id={`lineage-review-note-${edge.id}`}
+                                name="lineage_review_rationale"
                                 maxLength={1000}
                                 value={reviewNotes[edge.id] ?? ''}
                                 onChange={(e) =>

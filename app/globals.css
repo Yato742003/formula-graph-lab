@@ -96,6 +96,43 @@
   outline-color: color-mix(in oklab, var(--ring) 50%, transparent);
 }
 
+/* Global sleek custom scrollbar without Windows native arrow buttons */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.6);
+}
+
+*::-webkit-scrollbar-button,
+*::-webkit-scrollbar-button:single-button,
+*::-webkit-scrollbar-button:horizontal:decrement,
+*::-webkit-scrollbar-button:horizontal:increment,
+*::-webkit-scrollbar-button:vertical:decrement,
+*::-webkit-scrollbar-button:vertical:increment {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+}
+
 html {
   background: #f5f7fb;
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
@@ -173,6 +210,22 @@ button {
   letter-spacing: -0.015em;
 }
 
+.pro-tier-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--primary);
+  background: color-mix(in oklab, var(--primary) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--primary) 28%, transparent);
+  border-radius: 4px;
+  line-height: 1.2;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
 .brand-suffix {
   margin: 0;
   color: var(--muted-foreground);
@@ -232,6 +285,18 @@ button {
 
 .stage-nav-link.is-active svg {
   color: var(--primary);
+}
+
+.stage-nav-step {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  font-weight: 600;
+  opacity: 0.72;
+}
+
+.stage-nav-link.is-active .stage-nav-step {
+  opacity: 0.92;
 }
 
 .standalone-stage-page {
@@ -300,21 +365,24 @@ button {
 .standalone-stage-content {
   width: min(1080px, calc(100% - 32px));
   margin: 0 auto;
-  padding: 32px 0 56px;
+  padding: 20px 0 48px;
 }
 
 .standalone-stage-heading {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   justify-content: space-between;
-  gap: 20px;
-  margin-bottom: 18px;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 75%, transparent);
 }
 
 .standalone-stage-heading h1 {
-  margin: 3px 0 6px;
-  font-size: clamp(22px, 3vw, 34px);
-  letter-spacing: -0.04em;
+  margin: 2px 0 4px;
+  font-size: clamp(20px, 2.2vw, 26px);
+  font-weight: 700;
+  letter-spacing: -0.03em;
 }
 
 .standalone-stage-heading p:not(.eyebrow) {
@@ -322,7 +390,7 @@ button {
   margin: 0;
   color: var(--muted-foreground);
   font-size: 13px;
-  line-height: 1.55;
+  line-height: 1.5;
 }
 
 .onboarding-checklist {
@@ -1207,15 +1275,25 @@ button {
 
 .reports-evolution-empty a {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 13px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in oklab, var(--primary) 35%, var(--border));
+  background: color-mix(in oklab, var(--primary) 8%, var(--card));
   color: var(--primary);
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 650;
   text-decoration: none;
   white-space: nowrap;
+  transition: background-color 140ms ease, border-color 140ms ease;
 }
 
 .reports-evolution-empty a:hover {
-  text-decoration: underline;
+  background: color-mix(in oklab, var(--primary) 15%, var(--card));
+  border-color: var(--primary);
+  text-decoration: none;
 }
 
 .compatibility-gate-chips {
@@ -1627,6 +1705,13 @@ button {
 
 .research-grid.is-spec-view {
   grid-template-columns: minmax(0, 1fr);
+}
+
+.research-grid.is-spec-view .graph-header {
+  width: 100%;
+  max-width: 1152px;
+  margin: 0 auto 4px;
+  padding: 2px 24px 0;
 }
 
 .research-grid.is-spec-view > .source-panel,
@@ -2175,11 +2260,11 @@ button {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  min-height: 2.5rem;
-  gap: 0.45rem;
-  padding: 0.35rem 0.65rem;
+  min-height: 2.35rem;
+  gap: 0.3rem;
+  padding: 0.25rem 0.5rem;
   border-bottom: 1px solid var(--border);
-  background: color-mix(in oklab, var(--card) 90%, transparent);
+  background: color-mix(in oklab, var(--card) 92%, transparent);
   backdrop-filter: blur(12px) saturate(140%);
   color: var(--muted-foreground);
   flex-shrink: 0;
@@ -2210,12 +2295,12 @@ button {
 
 .view-mode-btn {
   display: inline-flex;
-  height: 1.75rem;
-  gap: 0.35rem;
-  padding: 0 0.55rem;
+  height: 1.7rem;
+  gap: 0.3rem;
+  padding: 0 0.48rem;
   border-radius: 0.4rem;
   color: var(--muted-foreground);
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 550;
   transition: all 140ms ease;
 }
@@ -2297,15 +2382,15 @@ button {
 
 .graph-filter-menu > summary {
   display: inline-flex;
-  height: 2.15rem;
+  height: 1.75rem;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0 0.7rem;
+  gap: 0.35rem;
+  padding: 0 0.5rem;
   border: 1px solid transparent;
-  border-radius: 0.65rem;
+  border-radius: 0.45rem;
   color: #475569;
-  font-size: 0.8125rem;
-  font-weight: 650;
+  font-size: 0.75rem;
+  font-weight: 600;
   cursor: pointer;
   list-style: none;
 }
@@ -2449,18 +2534,19 @@ button {
 
 .fullscreen-toggle-btn {
   display: inline-flex;
-  height: 1.75rem;
+  height: 1.7rem;
   align-items: center;
-  gap: 0.35rem;
-  padding: 0 0.55rem;
+  gap: 0.25rem;
+  padding: 0 0.45rem;
   border-radius: 0.4rem;
   color: var(--muted-foreground);
   border: 1px solid var(--border);
   background: var(--card);
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 550;
   transition: all 140ms ease;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .fullscreen-toggle-btn:hover {
@@ -2624,11 +2710,11 @@ button {
 }
 
 .flow-evidence-node.is-dimmed {
-  opacity: 0.32;
+  opacity: 0.72;
 }
 
 .flow-evidence-node.is-dimmed:hover {
-  opacity: 0.88;
+  opacity: 0.96;
 }
 
 .react-flow__node:hover .flow-evidence-node {
@@ -2693,10 +2779,10 @@ button {
   width: 100%;
   height: 100%;
   box-sizing: border-box;
-  padding: 16px 18px;
+  padding: 12px 16px;
   background: rgba(248, 250, 252, 0.72);
   border: 1.5px dashed rgba(148, 163, 184, 0.55);
-  border-radius: 20px;
+  border-radius: 18px;
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   box-shadow: 0 4px 24px -2px rgba(37, 54, 101, 0.05);
@@ -2712,12 +2798,11 @@ button {
 
 .section-swimlane-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.25);
-  margin-bottom: 16px;
+  flex-direction: column;
+  gap: 3px;
+  padding: 0 0 6px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+  margin-bottom: 0;
   pointer-events: auto;
   cursor: pointer;
   transition: opacity 150ms ease;
@@ -2741,6 +2826,13 @@ button {
 .flow-evidence-node.is-selected .react-flow__handle {
   opacity: 0.85 !important;
   transform: scale(1.25) !important;
+}
+
+.section-swimlane-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
 }
 
 .section-swimlane-title-group {
@@ -2771,14 +2863,16 @@ button {
 }
 
 .section-swimlane-title {
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 650;
   color: var(--foreground);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   letter-spacing: -0.01em;
-  max-width: 220px;
+  width: 100%;
+  max-width: 290px;
+  display: block;
 }
 
 .section-swimlane-badge {
@@ -2892,7 +2986,8 @@ button {
   padding: 3px 1px;
   font-size: 0.82rem;
   color: #1d2a4d;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
   white-space: nowrap;
 }
 
@@ -2922,20 +3017,30 @@ button {
 
 .flow-evidence-node .node-latex-math::-webkit-scrollbar,
 .formula-display .inspector-latex-math::-webkit-scrollbar {
-  height: 3px;
+  height: 4px !important;
+}
+
+.flow-evidence-node .node-latex-math::-webkit-scrollbar-track,
+.formula-display .inspector-latex-math::-webkit-scrollbar-track {
+  background: transparent !important;
 }
 
 .flow-evidence-node .node-latex-math::-webkit-scrollbar-button,
 .formula-display .inspector-latex-math::-webkit-scrollbar-button {
-  display: none;
-  width: 0;
-  height: 0;
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 .flow-evidence-node .node-latex-math::-webkit-scrollbar-thumb,
 .formula-display .inspector-latex-math::-webkit-scrollbar-thumb {
-  background: #c2cbd9;
-  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.4) !important;
+  border-radius: 9999px !important;
+}
+
+.flow-evidence-node .node-latex-math::-webkit-scrollbar-thumb:hover,
+.formula-display .inspector-latex-math::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.7) !important;
 }
 
 .flow-evidence-node small {
@@ -3500,21 +3605,22 @@ button {
 
 .graph-status {
   position: absolute;
-  left: 14px;
-  bottom: 13px;
+  left: 12px;
+  bottom: 10px;
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 6px 10px;
+  padding: 4px 9px;
   border: 1px solid #dce2ed;
   border-radius: 8px;
   color: #657087;
-  background: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.86);
   font-size: 10px;
-  box-shadow: 0 4px 12px rgba(27, 43, 83, 0.06);
+  box-shadow: 0 2px 8px rgba(27, 43, 83, 0.05);
   backdrop-filter: blur(8px);
   z-index: 6;
-  max-width: min(32rem, calc(100% - 1.75rem));
+  max-width: min(30rem, calc(100% - 10rem));
+  pointer-events: none;
 }
 
 .graph-status span:last-child {
@@ -3763,8 +3869,7 @@ button {
 }
 
 .research-move-blocked a,
-.research-history-empty a,
-.research-proposal-result a {
+.research-history-empty a {
   display: inline-flex;
   align-items: center;
   min-height: 44px;
@@ -3777,15 +3882,43 @@ button {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 16px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  font-size: 12px;
+  justify-content: space-between;
+  gap: 12px 16px;
+  padding: 16px;
+  border: 1px solid color-mix(in oklab, var(--primary) 35%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--primary) 5%, var(--card));
+  font-size: 13px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
 }
 
 .research-proposal-result code {
   overflow-wrap: anywhere;
+  font-family: var(--font-geist-mono);
+  background: var(--muted);
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.research-proposal-result a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-weight: 600;
+  text-decoration: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  transition: all 150ms ease;
+}
+
+.research-proposal-result a:hover {
+  opacity: 0.92;
+  transform: translateY(-0.5px);
 }
 
 .inspector-disclosure > summary {
@@ -4023,15 +4156,24 @@ button {
 }
 
 .research-proposal-generator button {
-  min-height: 38px;
+  justify-self: start;
+  min-height: 36px;
+  padding: 0 14px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--foreground);
-  color: var(--background);
+  background: var(--card);
+  color: var(--foreground);
   font: inherit;
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.research-proposal-generator button:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--primary) 50%, var(--border));
+  background: color-mix(in oklab, var(--primary) 6%, var(--card));
+  color: var(--primary);
 }
 
 .research-proposal-generator button:disabled {
@@ -4250,6 +4392,118 @@ button {
 
 .research-candidate-comparison > p {
   margin: 0;
+}
+
+.research-benchmark-scorecard {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in oklab, var(--primary) 30%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--primary) 4%, var(--card));
+}
+
+.research-scorecard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.research-scorecard-header strong {
+  display: block;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--foreground);
+}
+
+.research-scorecard-header small {
+  display: block;
+  font-size: 10px;
+  color: var(--muted-foreground);
+}
+
+.research-scorecard-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  font-size: 9.5px;
+  font-weight: 600;
+  border-radius: 6px;
+  color: var(--primary);
+  background: color-mix(in oklab, var(--primary) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--primary) 20%, transparent);
+}
+
+.research-scorecard-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.scorecard-metric-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.scorecard-metric-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted-foreground);
+}
+
+.scorecard-metric-comparison {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--foreground);
+}
+
+.scorecard-metric-comparison .metric-sep {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted-foreground);
+}
+
+.scorecard-metric-status {
+  font-size: 9px;
+  color: var(--muted-foreground);
+}
+
+.research-proof-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.research-copy-proof-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  font-weight: 550;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--foreground);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.research-copy-proof-btn:hover {
+  background: var(--muted);
+  border-color: color-mix(in oklab, var(--foreground) 25%, transparent);
 }
 
 .research-candidate-comparison-grid {
@@ -4495,44 +4749,45 @@ button {
   grid-column: 1 / -1;
   gap: 8px;
   min-width: 0;
-  padding: 12px;
-  border: 1px solid #e6d6c3;
-  border-radius: 9px;
-  background: #fffaf4;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--card) 90%, var(--muted) 10%);
 }
 
 .research-move-preview p {
   margin: 0;
-  color: #667085;
+  color: var(--muted-foreground);
   font-size: 11px;
   line-height: 1.45;
 }
 
 .research-move-preview > div > p {
   margin-bottom: 6px;
-  color: #805322;
+  color: var(--primary);
   font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 0.04em;
+  font-weight: 700;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
 .research-move-preview > div > code {
   display: block;
   overflow-wrap: anywhere;
-  color: #344054;
-  font-size: 12px;
+  color: var(--foreground);
+  font-size: 13px;
+  font-family: var(--font-geist-mono);
 }
 
 .research-move-preview > p code {
-  color: #344054;
+  color: var(--foreground);
 }
 
 .research-move-blocked,
 .research-move-notice {
   grid-column: 1 / -1;
   margin: 0;
-  color: #8a4b14;
+  color: var(--destructive);
   font-size: 11px;
   line-height: 1.45;
 }
@@ -4540,22 +4795,34 @@ button {
 .research-move-form > button,
 .research-candidate-receipt button {
   grid-column: 1 / -1;
-  min-height: 38px;
-  padding: 8px 12px;
-  border: 1px solid #9a5b27;
-  border-radius: 7px;
-  background: #9a5b27;
-  color: white;
-  font-size: 12px;
-  font-weight: 650;
+  min-height: 40px;
+  padding: 9px 16px;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 150ms ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.research-move-form > button:hover:not(:disabled),
+.research-candidate-receipt button:hover:not(:disabled) {
+  opacity: 0.92;
+  transform: translateY(-0.5px);
 }
 
 .research-move-form > button:disabled,
 .research-candidate-receipt button:disabled {
-  border-color: #d0d5dd;
-  background: #f2f4f7;
-  color: #667085;
+  border-color: var(--border);
+  background: var(--muted);
+  color: var(--muted-foreground);
   cursor: not-allowed;
+  opacity: 0.6;
+  transform: none;
+  box-shadow: none;
 }
 
 .research-move-notice {
@@ -4635,16 +4902,28 @@ button {
 }
 
 .research-candidate-receipt li b {
-  color: #8a4b14;
+  color: var(--foreground);
   font-weight: 600;
 }
 
 .research-candidate-receipt .research-move-secondary {
   width: 100%;
   margin-top: 12px;
-  border-color: #c78b4f;
-  background: #fff;
-  color: #805322;
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.research-candidate-receipt .research-move-secondary:hover:not(:disabled) {
+  border-color: var(--primary);
+  background: color-mix(in oklab, var(--primary) 6%, var(--card));
+  color: var(--primary);
 }
 
 .research-replay-report {
@@ -5021,9 +5300,9 @@ button {
 }
 
 .mashup-button {
-  border-color: #e7bb89;
-  color: #9b541f;
-  background: #fffaf4;
+  border-color: color-mix(in oklab, var(--primary) 35%, var(--border));
+  color: var(--primary);
+  background: color-mix(in oklab, var(--primary) 6%, var(--card));
 }
 
 .react-flow__controls {
@@ -5112,7 +5391,8 @@ button {
   border-radius: 8px;
   font-size: 1.02rem;
   color: var(--foreground);
-  scrollbar-width: thin;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
   white-space: nowrap;
 }
 

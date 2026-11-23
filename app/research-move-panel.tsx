@@ -20,6 +20,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
+import { ArrowRight, CheckCircle2, CircleDashed, Copy } from 'lucide-react';
 
 type ProblemOption = {
   specId: string;
@@ -351,15 +352,20 @@ function ProposalGenerationForm({
         <output aria-live="polite">Provider readiness is unavailable. Equation sources were not loaded or sent.</output>
       ) : null}
       {spec && capabilityState === 'loaded' && capability?.state !== 'configured' ? (
-        <output aria-live="polite">
-          AI proposal generation is {capability?.state === 'disabled'
-            ? 'disabled'
-            : capability?.state === 'provider_not_configured'
-              ? 'missing provider configuration'
-              : capability?.state === 'budget_not_configured'
-                ? 'missing its cost limits'
-                : 'not fully configured'}. No equation sources were loaded or sent.
-        </output>
+        <div className="space-y-1">
+          <output aria-live="polite">
+            AI proposal generation is {capability?.state === 'disabled'
+              ? 'disabled'
+              : capability?.state === 'provider_not_configured'
+                ? 'missing provider configuration'
+                : capability?.state === 'budget_not_configured'
+                  ? 'missing its cost limits'
+                  : 'not fully configured'}. No equation sources were loaded or sent.
+          </output>
+          <p className="text-xs text-muted-foreground">
+            Continue using the deterministic Candidate builder above without an AI model. Operators can enable AI drafting by setting <code>FGL_ENABLE_PROPOSALS</code>, <code>FGL_ENABLE_PROPOSAL_GENERATION</code>, model, and cost limits.
+          </p>
+        </div>
       ) : null}
       {capability?.state === 'configured' ? (
         <>
@@ -399,9 +405,11 @@ function ProposalGenerationForm({
           })}
         </ul>
       </fieldset>
-      <label>
+      <label htmlFor="proposal-gen-question">
         Research question
         <textarea
+          id="proposal-gen-question"
+          name="research_question"
           value={question}
           maxLength={1000}
           onChange={(event) => setQuestion(event.target.value)}
@@ -886,7 +894,7 @@ function parseProblemList(value: unknown): {
         (entry) =>
           record(entry) &&
           entry.name === 'mix_positive_feature_maps' &&
-          entry.version === '1',
+          (entry.version === '1' || entry.version === 'v1'),
       );
     const seeds =
       Array.isArray(rawSeeds) &&
@@ -1210,7 +1218,9 @@ function parseResearchCase(
     : role === 'holdout' ? ['holdout', 'holdout'] : ['search', 'search', 'validation', 'holdout', 'holdout'];
   if (
     typeof role !== 'string' || !['legacy_full', 'search', 'holdout'].includes(role) ||
-    (role !== 'legacy_full' && result.schema_version !== 'research-case-result.v2') ||
+    (role !== 'legacy_full' &&
+      result.schema_version !== 'research-case-result.v2' &&
+      result.schema_version !== 'research-case-result.v3') ||
     typeof result.result_id !== 'string' || !/^exp_[a-f0-9]{32}$/.test(result.result_id) ||
     typeof result.result_hash !== 'string' || !/^[a-f0-9]{64}$/.test(result.result_hash) ||
     result.candidate_id !== candidateId ||
@@ -1492,13 +1502,15 @@ export default function ResearchMovePanel({
         if (!controller.signal.aborted) {
           setProblemState('unavailable');
           setNotice(
-            'Research records could not be loaded. Refresh the page before compiling; no candidate has been created.',
+            surface === 'reports'
+              ? 'Saved workspace records could not be loaded. Refresh once the graph service is reachable; existing evidence is unchanged.'
+              : 'Research records could not be loaded. Refresh the page before compiling; no candidate has been created.',
           );
         }
       }
     })();
     return () => controller.abort();
-  }, []);
+  }, [surface]);
 
   useEffect(() => {
     if (!dialogOpen) return;
@@ -2125,6 +2137,78 @@ export default function ResearchMovePanel({
             </Description>
           </Header>
           <div className="research-move-content">
+            {surface === 'proposals' ? (
+              <div
+                aria-label="Proposal prerequisites"
+                className="grid gap-2.5 sm:grid-cols-2 mb-4"
+              >
+                <div className={`flex items-center justify-between gap-2 rounded-lg border px-3 py-2.5 text-xs ${
+                  eligibleProblems.length > 0
+                    ? 'border-emerald-500/35 bg-emerald-500/5'
+                    : 'border-border/70 bg-muted/25'
+                }`}>
+                  <div className="flex items-center gap-2 min-w-0">
+                    {eligibleProblems.length > 0 ? (
+                      <CheckCircle2 size={15} className="text-emerald-600 dark:text-emerald-400 shrink-0" aria-hidden="true" />
+                    ) : (
+                      <CircleDashed size={15} className="text-amber-600 dark:text-amber-400 shrink-0" aria-hidden="true" />
+                    )}
+                    <div className="min-w-0">
+                      <p className="font-semibold text-foreground m-0">1. Frozen ProblemSpec</p>
+                      <p className="text-[11px] text-muted-foreground m-0 truncate">
+                        {eligibleProblems.length > 0
+                          ? `${eligibleProblems.length} eligible spec${eligibleProblems.length === 1 ? '' : 's'} ready`
+                          : problemState === 'loading'
+                            ? 'Checking saved specs…'
+                            : 'Freeze a spec in Step 2 first'}
+                      </p>
+                    </div>
+                  </div>
+                  {eligibleProblems.length === 0 ? (
+                    <Link
+                      href="/spec"
+                      className="inline-flex items-center gap-1 rounded-md border border-primary/35 bg-primary/8 px-2.5 py-1 text-[11px] font-semibold text-primary hover:bg-primary/15 whitespace-nowrap shrink-0"
+                    >
+                      <span>Go to Spec</span>
+                      <ArrowRight size={11} aria-hidden="true" />
+                    </Link>
+                  ) : null}
+                </div>
+                <div className={`flex items-center justify-between gap-2 rounded-lg border px-3 py-2.5 text-xs ${
+                  eligibleMappings.length > 0
+                    ? 'border-emerald-500/35 bg-emerald-500/5'
+                    : 'border-border/70 bg-muted/25'
+                }`}>
+                  <div className="flex items-center gap-2 min-w-0">
+                    {eligibleMappings.length > 0 ? (
+                      <CheckCircle2 size={15} className="text-emerald-600 dark:text-emerald-400 shrink-0" aria-hidden="true" />
+                    ) : (
+                      <CircleDashed size={15} className="text-amber-600 dark:text-amber-400 shrink-0" aria-hidden="true" />
+                    )}
+                    <div className="min-w-0">
+                      <p className="font-semibold text-foreground m-0">2. Reviewed Compatibility</p>
+                      <p className="text-[11px] text-muted-foreground m-0 truncate">
+                        {eligibleMappings.length > 0
+                          ? `${eligibleMappings.length} current mapping${eligibleMappings.length === 1 ? '' : 's'} ready`
+                          : mappingsState === 'loading'
+                            ? 'Checking mappings…'
+                            : 'Review a symbol mapping in Step 3'}
+                      </p>
+                    </div>
+                  </div>
+                  {eligibleMappings.length === 0 ? (
+                    <Link
+                      href="/compatibility"
+                      className="inline-flex items-center gap-1 rounded-md border border-primary/35 bg-primary/8 px-2.5 py-1 text-[11px] font-semibold text-primary hover:bg-primary/15 whitespace-nowrap shrink-0"
+                    >
+                      <span>Go to Compatibility</span>
+                      <ArrowRight size={11} aria-hidden="true" />
+                    </Link>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+            {surface !== 'reports' ? (
             <form
               onSubmit={(event) => {
                 event.preventDefault();
@@ -2132,9 +2216,11 @@ export default function ResearchMovePanel({
               }}
               className="research-move-form"
             >
-              <label>
+              <label htmlFor="research-move-spec-select">
                 Frozen research question
                 <select
+                  id="research-move-spec-select"
+                  name="spec_id"
                   aria-label="Frozen research question"
                   value={selectedSpec?.specId ?? ''}
                   onChange={(event) => setSpecId(event.target.value)}
@@ -2150,9 +2236,11 @@ export default function ResearchMovePanel({
                   ))}
                 </select>
               </label>
-              <label>
+              <label htmlFor="research-move-mapping-select">
                 Reviewed compatible mapping
                 <select
+                  id="research-move-mapping-select"
+                  name="mapping_id"
                   aria-label="Reviewed compatible mapping"
                   value={selectedMapping?.mappingId ?? ''}
                   onChange={(event) => setMappingId(event.target.value)}
@@ -2170,11 +2258,18 @@ export default function ResearchMovePanel({
                   ))}
                 </select>
               </label>
-              <label className="research-move-weight">
+              <label htmlFor="research-move-weight" className="research-move-weight">
                 Mixture weight λ
                 <input
                   id="research-move-weight"
+                  name="weight"
                   aria-label="Mixture weight lambda"
+                  aria-invalid={
+                    !Number.isFinite(parsedWeight) || parsedWeight < 0 || parsedWeight > 1
+                      ? true
+                      : undefined
+                  }
+                  aria-describedby="research-move-weight-help"
                   type="number"
                   min="0"
                   max="1"
@@ -2184,9 +2279,10 @@ export default function ResearchMovePanel({
                   onChange={(event) => setWeight(event.target.value)}
                   disabled={busy}
                 />
-                <small>
-                  Must remain in [0, 1]. Output rank is the sum of the reviewed
-                  feature ranks.
+                <small id="research-move-weight-help">
+                  {!Number.isFinite(parsedWeight) || parsedWeight < 0 || parsedWeight > 1
+                    ? 'Enter a number between 0 and 1 (for example, 0.50) to enable compilation.'
+                    : 'Must remain in [0, 1]. Output rank is the sum of the reviewed feature ranks.'}
                 </small>
               </label>
               {selectedMapping &&
@@ -2230,6 +2326,7 @@ export default function ResearchMovePanel({
                 {busy ? 'Compiling…' : 'Compile hypothesis'}
               </button>
             </form>
+            ) : null}
             <section
               className="research-candidate-history"
               aria-label="Saved AI proposals"
@@ -2324,11 +2421,14 @@ export default function ResearchMovePanel({
                           </p>
                         ) : (
                           <div className="research-proposal-review">
-                            <label>
+                            <label htmlFor={`proposal-review-notes-${proposal.proposalId}`}>
                               Human review rationale
                               <textarea
+                                id={`proposal-review-notes-${proposal.proposalId}`}
+                                name="proposal_review_notes"
                                 value={proposalReviewNotes[proposal.proposalId] ?? ''}
                                 maxLength={2000}
+                                placeholder="State why this draft is acceptable for bounded compilation or why it is rejected…"
                                 onChange={(event) => setProposalReviewNotes((current) => ({
                                   ...current,
                                   [proposal.proposalId]: event.target.value,
@@ -2336,6 +2436,11 @@ export default function ResearchMovePanel({
                                 disabled={proposalReviewBusy === proposal.proposalId}
                               />
                             </label>
+                            {!proposalReviewNotes[proposal.proposalId]?.trim() ? (
+                              <small className="text-muted-foreground">
+                                Enter a brief rationale above to enable Accept or Reject.
+                              </small>
+                            ) : null}
                             <div>
                               <button
                                 type="button"
@@ -2539,6 +2644,52 @@ export default function ResearchMovePanel({
                       recorded evidence.
                     </p>
                   ) : null}
+                  {comparison.length === 2 ? (
+                    <div className="research-benchmark-scorecard" aria-label="Candidate comparison scorecard">
+                      <div className="research-scorecard-header">
+                        <div>
+                          <strong>Verification & Protocol Scorecard</strong>
+                          <small>Side-by-side delta between selected candidates</small>
+                        </div>
+                        <span className="research-scorecard-badge">2 Candidates Active</span>
+                      </div>
+                      <div className="research-scorecard-grid">
+                        <div className="scorecard-metric-card">
+                          <span className="scorecard-metric-label">Checker Outcome</span>
+                          <div className="scorecard-metric-comparison">
+                            <span className="metric-val">{comparison[0].check?.outcome ?? 'None'}</span>
+                            <span className="metric-sep">vs</span>
+                            <span className="metric-val">{comparison[1].check?.outcome ?? 'None'}</span>
+                          </div>
+                          <span className="scorecard-metric-status">
+                            {comparison[0].check?.outcome === comparison[1].check?.outcome
+                              ? 'Identical check outcome'
+                              : 'Different verification outcomes'}
+                          </span>
+                        </div>
+                        <div className="scorecard-metric-card">
+                          <span className="scorecard-metric-label">Unresolved Obligations</span>
+                          <div className="scorecard-metric-comparison">
+                            <span className="metric-val">{comparison[0].obligations.filter((o) => o.status === 'unresolved').length}</span>
+                            <span className="metric-sep">vs</span>
+                            <span className="metric-val">{comparison[1].obligations.filter((o) => o.status === 'unresolved').length}</span>
+                          </div>
+                          <span className="scorecard-metric-status">
+                            Delta: {comparison[1].obligations.filter((o) => o.status === 'unresolved').length - comparison[0].obligations.filter((o) => o.status === 'unresolved').length} unresolved
+                          </span>
+                        </div>
+                        <div className="scorecard-metric-card">
+                          <span className="scorecard-metric-label">Holdout Eval</span>
+                          <div className="scorecard-metric-comparison">
+                            <span className="metric-val font-mono">{comparison[0].researchCase?.holdoutMean ?? 'Locked'}</span>
+                            <span className="metric-sep">vs</span>
+                            <span className="metric-val font-mono">{comparison[1].researchCase?.holdoutMean ?? 'Locked'}</span>
+                          </div>
+                          <span className="scorecard-metric-status">Protocol search holdout</span>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
                   <div className="research-candidate-comparison-grid">
                     {comparison.map((item, index) => (
                       <article
@@ -2641,9 +2792,11 @@ export default function ResearchMovePanel({
                 </section>
               ) : null}
             </section>
-            <output className="research-move-notice" aria-live="polite">
-              {notice}
-            </output>
+            {!(surface === 'reports' && candidateHistoryState === 'unavailable' && problemState === 'unavailable') ? (
+              <output className="research-move-notice" aria-live="polite">
+                {notice}
+              </output>
+            ) : null}
             {surface === 'proposals' && receipt ? (
               <section className="research-proposal-result" aria-label="Candidate result">
                 <strong>{receipt.check ? `Check: ${receipt.check.outcome}` : 'Not verified'}</strong>
@@ -2729,6 +2882,21 @@ export default function ResearchMovePanel({
                       symbolic {receipt.check.outcome}
                     </p>
                     <p>{receipt.check.claim}</p>
+                    <div className="research-proof-actions">
+                      <button
+                        type="button"
+                        className="research-move-secondary research-copy-proof-btn"
+                        onClick={() => {
+                          if (receipt.check?.claim && typeof navigator !== 'undefined') {
+                            void navigator.clipboard?.writeText(receipt.check.claim);
+                            setNotice('Copied LaTeX proof claim to clipboard.');
+                          }
+                        }}
+                      >
+                        <Copy size={13} aria-hidden="true" />
+                        <span>Copy LaTeX Proof Claim</span>
+                      </button>
+                    </div>
                     <p className="research-check-scope-note">
                       {receipt.check.scope === 'feature_kernel_identity'
                         ? 'This supports only the displayed kernel identity under the listed assumptions. It does not clear the candidate’s remaining obligations or establish benchmark quality or empirical performance.'
@@ -2808,12 +2976,23 @@ export default function ResearchMovePanel({
                       {receipt.researchCase?.evaluationRole === 'search' ? (
                         <details>
                           <summary>Human scope review{receipt.researchCase.protocolReviewed ? ' · authorized' : ''}</summary>
-                          <label className="block space-y-1">
+                          <label htmlFor={`protocol-review-notes-${receipt.candidateId}`} className="block space-y-1">
                             <span>Review notes</span>
-                            <textarea value={protocolNotes} onChange={event => setProtocolNotes(event.target.value)}
-                              maxLength={2000} disabled={researchCaseBusy || busy} className="w-full rounded border bg-background p-2" />
+                            <textarea
+                              id={`protocol-review-notes-${receipt.candidateId}`}
+                              name="protocol_review_notes"
+                              value={protocolNotes}
+                              placeholder="Document why this frozen synthetic family is authorized or rejected for bounded search…"
+                              onChange={event => setProtocolNotes(event.target.value)}
+                              maxLength={2000}
+                              disabled={researchCaseBusy || busy}
+                              className="w-full rounded border bg-background p-2"
+                            />
                           </label>
-                          <p className="text-xs">Authorizes bounded parameter search for this frozen family only, not mathematical correctness.</p>
+                          <p className="text-xs">
+                            Authorizes bounded parameter search for this frozen family only, not mathematical correctness.
+                            {!protocolNotes.trim() && !receipt.researchCase.protocolReviewed ? ' Enter review notes above to enable authorization.' : ''}
+                          </p>
                           <button type="button" className="research-move-secondary"
                             disabled={busy || researchCaseBusy || !protocolNotes.trim() || receipt.researchCase.protocolReviewed}
                             onClick={() => void reviewProtocol('accept_protocol_scope')}>Authorize frozen-family search</button>

@@ -108,3 +108,32 @@ it('runs one generation, freezes explicit finalists, then confirms without clien
   ]);
   expect(screen.getByRole('link', { name: 'Export campaign bundle' })).toBeTruthy();
 });
+
+it('offers a saved candidate picker to populate the generation-0 seed without manual hash copy-paste', async () => {
+  const candidateId = `cand_${'c'.repeat(32)}`;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes('/api/research/candidates')) {
+        return Response.json({
+          items: [
+            {
+              candidate_id: candidateId,
+              spec_id: 'spec-one',
+              operator: 'lower_mixture_to_concatenation',
+              research_case: { protocol_reviewed: true },
+            },
+          ],
+          total: 1,
+        });
+      }
+      return Response.json({ items: [campaign], total: 1 });
+    }),
+  );
+
+  render(<EvolutionPanel specId="spec-one" />);
+  const picker = await screen.findByLabelText('Pick a saved candidate for this spec');
+  fireEvent.change(picker, { target: { value: candidateId } });
+  expect((screen.getByLabelText('Reviewed search seed') as HTMLInputElement).value).toBe(candidateId);
+});
