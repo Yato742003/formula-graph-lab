@@ -12,6 +12,11 @@ from contextlib import suppress
 from typing import Literal
 from uuid import uuid4
 
+from app.execution_profile import (
+    ExecutionProfile,
+    capture_execution_profile,
+    validate_live_profile,
+)
 from app.experiment_worker import PROTOCOL_VERSION, SEQUENCE_LENGTHS
 from app.numerical_worker import SUITE_VERSION, TOLERANCES
 from app.paper_artifact_manifest import PERFORMER_COMMIT, PERFORMER_SOURCE_SHA256
@@ -21,7 +26,6 @@ from app.paper_attention_worker import SEQUENCE_LENGTHS as PERFORMER_SEQUENCE_LE
 from app.research_case_worker import PROTOCOL_VERSION as RESEARCH_CASE_PROTOCOL_VERSION
 from app.research_case_worker import SEEDS as RESEARCH_CASE_SEEDS
 from app.research_case_worker import SEQUENCE_LENGTHS as RESEARCH_CASE_SEQUENCE_LENGTHS
-from app.security import worker_execution_limits
 
 MAX_INPUT_BYTES = 192 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024
@@ -50,6 +54,7 @@ def container_command(
     worker_kind: Literal[
         "symbolic", "numerical", "experiment", "performer", "research_case"
     ] = "symbolic",
+    execution_profile: ExecutionProfile | None = None,
 ) -> list[str]:
     if not IMAGE_ID.fullmatch(image) or not re.fullmatch(r"fgl-check-[0-9a-f]{32}", name):
         raise ValueError("Invalid sandbox identity.")
@@ -65,22 +70,17 @@ def container_command(
     if worker_kind not in worker_modules:
         raise ValueError("Unknown sandbox worker kind.")
     worker_module = worker_modules[worker_kind]
-    performer_cpu = (
-        f"--cpuset-cpus={min(os.sched_getaffinity(0))}"
-        if worker_kind == "performer" and hasattr(os, "sched_getaffinity")
-        else "--cpuset-cpus=0"
-        if worker_kind == "performer"
-        else None
-    )
-    limits = worker_execution_limits()
-    ram_mb = limits.ram_bytes // (1024 * 1024)
-    cpu_cores = limits.cpu_cores
-    effective_timeout_ms = min(timeout_ms, limits.timeout_ms)
+    profile = execution_profile or capture_execution_profile(image, worker_kind, timeout_ms)
+    validate_live_profile(profile, image, worker_kind)
+    performer_cpu = f"--cpuset-cpus={profile.cpu_affinity}" if worker_kind == "performer" else None
+    ram_mb = profile.ram_bytes // (1024 * 1024)
+    effective_timeout_ms = min(timeout_ms, profile.invocation_limit_ms)
     return [
         "docker", "run", "--name", name, "--pull=never", "-i",
         "--network=none", "--read-only", "--cap-drop=ALL",
         "--security-opt=no-new-privileges:true", "--user=65534:65534",
-        f"--memory={ram_mb}m", f"--memory-swap={ram_mb}m", f"--cpus={cpu_cores}", "--pids-limit=16",
+        f"--memory={ram_mb}m", f"--memory-swap={ram_mb}m", f"--cpus={profile.cpu_cores}",
+        f"--pids-limit={profile.pids_limit}",
         *([performer_cpu] if performer_cpu else []),
         "--ulimit=nofile=64:64", "--ulimit=core=0:0", "--ulimit=cpu=30:30",
         "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777",
@@ -145,14 +145,20 @@ def bounded_process(command: list[str], payload: bytes, timeout: float) -> tuple
         process.wait(timeout=5)
 
 
-def run_sandbox(payload: dict[str, object], *, timeout_ms: int, image: str) -> dict[str, object]:
-    return _run_sandbox(payload, timeout_ms=timeout_ms, image=image, worker_kind="symbolic")
+def run_sandbox(
+    payload: dict[str, object], *, timeout_ms: int, image: str,
+    execution_profile: ExecutionProfile | None = None,
+) -> dict[str, object]:
+    return _run_sandbox(payload, timeout_ms=timeout_ms, image=image, worker_kind="symbolic",
+                        execution_profile=execution_profile)
 
 
 def run_numerical_sandbox(
     payload: dict[str, object], *, timeout_ms: int, image: str,
+    execution_profile: ExecutionProfile | None = None,
 ) -> dict[str, object]:
-    return _run_sandbox(payload, timeout_ms=timeout_ms, image=image, worker_kind="numerical")
+    return _run_sandbox(payload, timeout_ms=timeout_ms, image=image, worker_kind="numerical",
+                        execution_profile=execution_profile)
 
 
 def run_experiment_sandbox(
@@ -169,9 +175,11 @@ def run_performer_sandbox(
 
 def run_research_case_sandbox(
     payload: dict[str, object], *, timeout_ms: int, image: str,
+    execution_profile: ExecutionProfile | None = None,
 ) -> dict[str, object]:
     return _run_sandbox(
-        payload, timeout_ms=timeout_ms, image=image, worker_kind="research_case"
+        payload, timeout_ms=timeout_ms, image=image, worker_kind="research_case",
+        execution_profile=execution_profile,
     )
 
 
@@ -183,14 +191,19 @@ def _run_sandbox(
     worker_kind: Literal[
         "symbolic", "numerical", "experiment", "performer", "research_case"
     ],
+    execution_profile: ExecutionProfile | None = None,
 ) -> dict[str, object]:
     raw = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
     if len(raw) > MAX_INPUT_BYTES:
         return {"outcome": "error", "error_code": "WORKER_INPUT_LIMIT"}
     name = "fgl-check-" + uuid4().hex
-    command = container_command(image, name, timeout_ms, worker_kind=worker_kind)
+    profile = execution_profile or capture_execution_profile(image, worker_kind, timeout_ms)
+    command = container_command(image, name, timeout_ms, worker_kind=worker_kind,
+                                execution_profile=profile)
     try:
-        code, output, overflow = bounded_process(command, raw, timeout_ms / 1000 + 10)
+        code, output, overflow = bounded_process(
+            command, raw, min(timeout_ms, profile.invocation_limit_ms) / 1000 + 10,
+        )
         if overflow:
             return {"outcome": "error", "error_code": "WORKER_OUTPUT_LIMIT"}
         if code in (124, 137):

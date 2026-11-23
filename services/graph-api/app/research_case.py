@@ -20,6 +20,11 @@ from app.candidate_verification import (
     CandidateCheckResult,
     discharged_obligations,
 )
+from app.execution_profile import (
+    ExecutionProfile,
+    capture_execution_profile,
+    validate_live_profile,
+)
 from app.numerical_verification import build_numerical_suite_input
 from app.problem_spec import (
     ArtifactRef,
@@ -168,7 +173,9 @@ def validate_registered_spec(spec: ProblemSpecSnapshot) -> float:
 
 
 class ImplementationBindingReceipt(FrozenInput):
-    schema_version: Literal["implementation-binding.v1"] = "implementation-binding.v1"
+    schema_version: Literal["implementation-binding.v1", "implementation-binding.v2"] = (
+        "implementation-binding.v1"
+    )
     binding_id: str = Field(pattern=r"^bind_[0-9a-f]{32}$")
     binding_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     workspace_id: str = Field(min_length=1, max_length=200)
@@ -182,6 +189,7 @@ class ImplementationBindingReceipt(FrozenInput):
     protocol_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     worker_source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     execution_image: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    execution_profile: ExecutionProfile | None = None
     mixture_weight: float = Field(gt=0, lt=1)
     branch_rank: int = Field(ge=1, le=64, strict=True)
     feature_budget: int = Field(ge=2, le=128, strict=True)
@@ -193,6 +201,12 @@ class ImplementationBindingReceipt(FrozenInput):
 
     @model_validator(mode="after")
     def validate_identity(self) -> ImplementationBindingReceipt:
+        if (self.schema_version == "implementation-binding.v2") != (
+            self.execution_profile is not None
+        ):
+            raise ValueError("Version 2 bindings require a captured execution profile.")
+        if self.execution_profile is not None:
+            validate_protocol_profile(self.execution_profile, self.execution_image)
         if self.feature_budget != self.branch_rank * 2:
             raise ValueError("Binding feature budget does not match both branches.")
         payload = self.model_dump(mode="json", exclude={"binding_id", "binding_hash"})
@@ -200,6 +214,13 @@ class ImplementationBindingReceipt(FrozenInput):
         if self.binding_hash != digest or self.binding_id != f"bind_{digest[:32]}":
             raise ValueError("Implementation binding identity does not match its content.")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_binding(self, handler):
+        payload = handler(self)
+        if self.schema_version == "implementation-binding.v1":
+            payload.pop("execution_profile", None)
+        return payload
 
 
 class ResearchCaseMeasurement(FrozenInput):
@@ -259,9 +280,12 @@ class ResearchCaseTrial(FrozenInput):
 
 
 class ResearchCaseReceipt(FrozenInput):
-    schema_version: Literal["research-case-result.v1", "research-case-result.v2"] = (
+    schema_version: Literal[
+        "research-case-result.v1", "research-case-result.v2", "research-case-result.v3"
+    ] = (
         "research-case-result.v1"
     )
+    execution_profile: ExecutionProfile | None = None
     evaluation_role: Literal["legacy_full", "search", "holdout"] = "legacy_full"
     evolution_id: str | None = Field(default=None, pattern=r"^evo_[0-9a-f]{32}$")
     result_id: str = Field(pattern=r"^exp_[0-9a-f]{32}$")
@@ -295,6 +319,12 @@ class ResearchCaseReceipt(FrozenInput):
 
     @model_validator(mode="after")
     def validate_identity(self) -> ResearchCaseReceipt:
+        if (self.schema_version == "research-case-result.v3") != (
+            self.execution_profile is not None
+        ):
+            raise ValueError("Version 3 research receipts require a captured execution profile.")
+        if self.execution_profile is not None:
+            validate_protocol_profile(self.execution_profile, self.execution_profile.image_id)
         if (set(self.search_cost) != {"candidate_count", "trial_count", "completed_trial_count",
                                      "wall_time_ms", "cost_usd"}
                 or self.search_cost["candidate_count"] != 1
@@ -306,8 +336,11 @@ class ResearchCaseReceipt(FrozenInput):
                 or any(isinstance(value, bool) or not math.isfinite(value) or value < 0
                        for value in self.search_cost.values())):
             raise ValueError("Protocol cost must describe the retained zero-cost trials.")
-        if (self.schema_version == "research-case-result.v1") != (
-            self.evaluation_role == "legacy_full"
+        if (
+            self.schema_version == "research-case-result.v1"
+            and self.evaluation_role != "legacy_full"
+            or self.schema_version == "research-case-result.v2"
+            and self.evaluation_role == "legacy_full"
         ):
             raise ValueError("Legacy receipts and scoped receipts require distinct versions.")
         if self.evaluation_role == "holdout" and self.evolution_id is None:
@@ -352,6 +385,8 @@ class ResearchCaseReceipt(FrozenInput):
     @model_serializer(mode="wrap")
     def serialize_receipt(self, handler):
         payload = handler(self)
+        if self.schema_version != "research-case-result.v3":
+            payload.pop("execution_profile", None)
         if self.evaluation_role == "legacy_full":
             payload.pop("evaluation_role", None)
             payload.pop("evolution_id", None)
@@ -445,6 +480,7 @@ def protocol_admission_context(
     mapping_freshness: Literal["current", "stale", "unknown"],
     mapping_usable: bool,
     quota_available: bool,
+    historical_replay: bool = False,
 ) -> AdmissionContext:
     """Server-only bridge. Testing a finite protocol never discharges global domain holes."""
     binding = ImplementationBindingReceipt.model_validate(binding.model_dump())
@@ -452,9 +488,13 @@ def protocol_admission_context(
     expected = make_implementation_binding(
         candidate, spec, parent_candidate=parent,
         execution_image=binding.execution_image, now=binding.created_at,
+        execution_profile=binding.execution_profile,
+        legacy=binding.schema_version == "implementation-binding.v1",
     )
     if (
         binding != expected or result.evaluation_role == "legacy_full"
+        or binding.execution_profile != result.execution_profile
+        or not historical_replay and binding.execution_profile is None
         or check.checker_version != CANDIDATE_CHECKER_VERSION
         or check.candidate_id != candidate.candidate_id
         or check.workspace_id != candidate.workspace_id
@@ -500,6 +540,8 @@ def make_implementation_binding(
     parent_candidate: CompiledCandidate,
     execution_image: str,
     now: datetime | None = None,
+    execution_profile: ExecutionProfile | None = None,
+    legacy: bool = False,
 ) -> ImplementationBindingReceipt:
     _verify_candidate_identity(candidate)
     _verify_candidate_identity(parent_candidate)
@@ -516,6 +558,13 @@ def make_implementation_binding(
         or len(execution_image) != 71
     ):
         raise ValueError("Candidate is not supported by the registered implementation.")
+    if legacy and execution_profile is not None:
+        raise ValueError("Historical bindings cannot acquire a new execution profile.")
+    profile = None if legacy else execution_profile or capture_execution_profile(
+        execution_image, "research_case", PER_TRIAL_TIMEOUT_MS,
+    )
+    if profile is not None:
+        validate_protocol_profile(profile, execution_image)
     manifest = {
         **protocol_config(),
         "candidate_hash": candidate.content_hash,
@@ -526,8 +575,10 @@ def make_implementation_binding(
         "worker_source_sha256": worker_source_hash(),
         "execution_image": execution_image,
     }
+    if profile is not None:
+        manifest["execution_profile"] = profile.model_dump(mode="json")
     payload = {
-        "schema_version": "implementation-binding.v1",
+        "schema_version": "implementation-binding.v1" if legacy else "implementation-binding.v2",
         "workspace_id": candidate.workspace_id,
         "candidate_id": candidate.candidate_id,
         "candidate_hash": candidate.content_hash,
@@ -550,6 +601,8 @@ def make_implementation_binding(
             "+00:00", "Z"
         ),
     }
+    if profile is not None:
+        payload["execution_profile"] = profile.model_dump(mode="json")
     digest = _hash(payload)
     return ImplementationBindingReceipt.model_validate(
         payload | {"binding_hash": digest, "binding_id": f"bind_{digest[:32]}"}
@@ -617,14 +670,23 @@ def run_registered_research_case(
     now: datetime | None = None,
     evaluation_role: Literal["legacy_full", "search", "holdout"] = "legacy_full",
     evolution_id: str | None = None,
+    historical_replay: bool = False,
 ) -> ResearchCaseReceipt:
     threshold = validate_registered_spec(spec)
+    if historical_replay and worker_runner is run_research_case_sandbox:
+        raise ValueError("Historical replay cannot start a new sandbox job.")
+    if not historical_replay:
+        if binding.execution_profile is None:
+            raise ValueError("Historical execution profiles are unknown; replay only.")
+        validate_live_profile(binding.execution_profile, binding.execution_image, "research_case")
     recreated = make_implementation_binding(
         candidate,
         spec,
         parent_candidate=parent_candidate,
         execution_image=binding.execution_image,
         now=binding.created_at,
+        execution_profile=binding.execution_profile,
+        legacy=binding.schema_version == "implementation-binding.v1",
     )
     if recreated != binding:
         raise ValueError("Implementation binding is stale or does not match this candidate.")
@@ -649,11 +711,15 @@ def run_registered_research_case(
             "branch_rank": binding.branch_rank,
         }
         try:
-            raw = worker_runner(
-                payload,
-                timeout_ms=min(PER_TRIAL_TIMEOUT_MS, remaining_ms),
-                image=binding.execution_image,
-            )
+            if not historical_replay:
+                validate_live_profile(
+                    binding.execution_profile, binding.execution_image, "research_case",
+                )
+            runner_kwargs = {"timeout_ms": min(PER_TRIAL_TIMEOUT_MS, remaining_ms),
+                             "image": binding.execution_image}
+            if binding.execution_profile is not None:
+                runner_kwargs["execution_profile"] = binding.execution_profile
+            raw = worker_runner(payload, **runner_kwargs)
         except Exception:
             raw = {"outcome": "error", "error_code": "RESEARCH_CASE_WORKER_FAILED"}
         trials.append(_trial(seed, raw, candidate.content_hash))
@@ -676,7 +742,8 @@ def run_registered_research_case(
     )
     payload = {
         "schema_version": (
-            "research-case-result.v1" if evaluation_role == "legacy_full"
+            "research-case-result.v3" if binding.execution_profile is not None
+            else "research-case-result.v1" if evaluation_role == "legacy_full"
             else "research-case-result.v2"
         ),
         "run_id": run_id,
@@ -716,6 +783,8 @@ def run_registered_research_case(
             "+00:00", "Z"
         ),
     }
+    if binding.execution_profile is not None:
+        payload["execution_profile"] = binding.execution_profile.model_dump(mode="json")
     if evaluation_role != "legacy_full":
         payload["evaluation_role"] = evaluation_role
         payload["evolution_id"] = evolution_id
@@ -723,3 +792,12 @@ def run_registered_research_case(
     return ResearchCaseReceipt.model_validate(
         payload | {"result_hash": digest, "result_id": f"exp_{digest[:32]}"}
     )
+
+
+def validate_protocol_profile(profile: ExecutionProfile, image: str) -> None:
+    # ponytail: one registered resource envelope, ceiling: CPU synthetic pilot,
+    # upgrade: version the protocol before permitting different trial resources.
+    if (profile.image_id != image or profile.worker_kind != "research_case"
+            or profile.ram_bytes != 256 * 1024**2 or profile.cpu_cores != 1
+            or profile.invocation_limit_ms != PER_TRIAL_TIMEOUT_MS):
+        raise ValueError("Execution profile differs from the frozen research protocol.")

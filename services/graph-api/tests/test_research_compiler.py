@@ -28,6 +28,7 @@ from app.compatibility import (
     assess_mapping,
     compute_dependency_fingerprint,
 )
+from app.execution_profile import capture_execution_profile
 from app.numerical_verification import (
     NumericalFixtureReceipt,
     build_numerical_suite_input,
@@ -535,6 +536,11 @@ def test_source_authorized_compiler_bundle_replays_and_binds_provenance(tmp_path
         "suite_version": SUITE_VERSION,
         "input_hash": numerical_fixture_input_hash(fixture_input),
         "execution_image": "sha256:" + "a" * 64,
+        "execution_profile": capture_execution_profile(
+            "sha256:" + "a" * 64,
+            "numerical",
+            context.spec.definition.budget.wall_time_ms,
+        ).model_dump(mode="json"),
         "seed": 1,
         "dtype": context.spec.definition.dtype,
         "tolerance": TOLERANCES[context.spec.definition.dtype],

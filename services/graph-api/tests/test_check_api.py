@@ -58,8 +58,14 @@ def _client(monkeypatch, store: CheckStore) -> TestClient:
         def __init__(self, *_args):
             pass
 
-        async def admit(self, *_args, **_kwargs):
-            return SimpleNamespace(envelope=SimpleNamespace(job_id="test-job"), result=None)
+        async def admit(self, *_args, **kwargs):
+            return SimpleNamespace(
+                envelope=SimpleNamespace(
+                    job_id="test-job",
+                    execution_profile=kwargs.get("execution_profile"),
+                ),
+                result=None,
+            )
 
         async def claim(self, *_args):
             pass
@@ -138,7 +144,8 @@ def test_symbolic_check_uses_only_server_resolved_accepted_contracts(monkeypatch
 
     assert response.status_code == 200
     assert response.json()["outcome"] == "supported"
-    assert response.json()["schema_version"] == "check-result.v2"
+    assert response.json()["schema_version"] == "check-result.v3"
+    assert response.json()["execution_profile"]["worker_kind"] == "symbolic"
     assert response.json()["contract_review_ids"] == [review.review_id]
     assert response.json()["contract_review_hash"]
     assert store.call is not None
@@ -300,5 +307,30 @@ def test_retry_with_runtime_variance_replays_original_receipt(monkeypatch):
         assert second.json()["created_at"] == first.json()["created_at"]
         assert second.json()["duration_ms"] == first.json()["duration_ms"]
         assert second.json()["replayed"] is True
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_execution_profile_change_cannot_replay_prior_check_result(monkeypatch):
+    store = CheckStore()
+    client = _client(monkeypatch, store)
+    seen_profiles = []
+
+    def capture_sandbox(*_args, **kwargs):
+        seen_profiles.append(kwargs.get("execution_profile"))
+        return {"outcome": "supported", "witness": {"method": "sympy_simplify", "difference": "0"}}
+
+    monkeypatch.setattr("app.main.run_sandbox", capture_sandbox)
+    body = _body()
+    try:
+        first = client.post("/v1/checks/symbolic", headers=_headers(), json=body)
+        assert first.status_code == 200
+        assert first.json()["schema_version"] == "check-result.v3"
+        assert seen_profiles and seen_profiles[0].ram_bytes == 256 * 1024**2
+
+        monkeypatch.setenv("FGL_WORKER_RAM_LIMIT_MB", "512")
+        conflict = client.post("/v1/checks/symbolic", headers=_headers(), json=body)
+        assert conflict.status_code == 422
+        assert "idempotency key conflicts" in conflict.json()["detail"]
     finally:
         app.dependency_overrides.clear()

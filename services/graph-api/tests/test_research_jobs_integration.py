@@ -135,3 +135,38 @@ async def test_fabricated_target_and_result_tampering_rejected(queue):
     )
     with pytest.raises(JobRejected, match="RESULT_SIGNATURE"):
         await admit(q, actor, target, "real")
+
+
+async def test_execution_profile_drift_and_profile_scoped_idempotency(queue, monkeypatch):
+    q, actor, target = queue
+    workspace_id = next(iter(actor.workspaces))
+    ticket = await admit(q, actor, target, "profile-drift-key")
+    assert ticket.envelope.schema_version == "research-job.v2"
+    assert ticket.envelope.execution_profile is not None
+    assert ticket.envelope.execution_profile.ram_bytes == 256 * 1024**2
+
+    monkeypatch.setenv("FGL_WORKER_RAM_LIMIT_MB", "512")
+    with pytest.raises(JobRejected, match="EXECUTION_PROFILE_DRIFT") as exc_info:
+        await q.claim(ticket, actor, payload(), IMAGE)
+    assert exc_info.value.status == 409
+
+    with pytest.raises(JobRejected, match="JOB_IDEMPOTENCY_CONFLICT"):
+        await admit(q, actor, target, "profile-drift-key")
+
+    monkeypatch.delenv("FGL_WORKER_RAM_LIMIT_MB", raising=False)
+    reviewed_payload = {
+        **payload(),
+        "contract_review_ids": ("rev-1",),
+        "contract_review_hash": "a" * 64,
+    }
+    reviewed_ticket = await q.admit(
+        actor,
+        workspace_id=workspace_id,
+        target_uuid=target,
+        idempotency_key="reviewed-6-key",
+        request_hash=digest(reviewed_payload),
+        payload=reviewed_payload,
+        image=IMAGE,
+    )
+    await q.claim(reviewed_ticket, actor, reviewed_payload, IMAGE)
+    await q.finish(reviewed_ticket, '{"ok":true}')

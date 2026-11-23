@@ -92,16 +92,27 @@ def test_enabled_fixture_endpoint_uses_atomic_queue_result_finish(monkeypatch):
         def __init__(self, _store, _key):
             self.ticket = SimpleNamespace(
                 result=None,
-                envelope=SimpleNamespace(job_id="00000000-0000-4000-8000-000000000029"),
+                envelope=SimpleNamespace(
+                    job_id="00000000-0000-4000-8000-000000000029",
+                    execution_profile=None,
+                ),
             )
 
         async def admit_numerical_fixture(self, _worker, **kwargs):
             assert kwargs["reserved_ms"] == 600
+            assert kwargs["execution_profile"].worker_kind == "numerical"
             assert kwargs["payload"] == {
                 "candidate_id": candidate.candidate_id,
                 "seed": 29,
                 "suite_version": "feature-kernel-fixture.v1",
             }
+            self.ticket = SimpleNamespace(
+                result=None,
+                envelope=SimpleNamespace(
+                    job_id="00000000-0000-4000-8000-000000000029",
+                    execution_profile=kwargs["execution_profile"],
+                ),
+            )
             return self.ticket
 
         async def claim(self, ticket, _worker, _payload, _image):
@@ -168,6 +179,75 @@ def test_enabled_fixture_endpoint_uses_atomic_queue_result_finish(monkeypatch):
     assert response.json()["performance_claim"] is False
     assert store.atomic_finish
     assert not store.separate_append
+
+
+def test_fixture_endpoint_forwards_profile_and_rejects_drift(monkeypatch):
+    from app.execution_profile import capture_execution_profile
+    from app.research_jobs import JobRejected
+
+    monkeypatch.setenv("SERVICE_TOKEN", "gateway-secret-for-numerical-api")
+    monkeypatch.setenv("FGL_ENABLE_NUMERICAL_FIXTURE", "true")
+    image = "sha256:" + "a" * 64
+    monkeypatch.setenv("FGL_SANDBOX_IMAGE", image)
+    monkeypatch.setenv("FGL_RESEARCH_QUEUE_SECRET", "q" * 40)
+    monkeypatch.setenv(
+        "FGL_WORKER_IDENTITIES",
+        json.dumps([{
+            "identity": "verifier-1",
+            "token": "worker-token-distinct-from-gateway-123456",
+            "role": "verifier",
+            "workspaces": ["workspace-1"],
+        }]),
+    )
+    candidate = SimpleNamespace(candidate_id="cand_" + "a" * 32)
+    spec = SimpleNamespace(definition=SimpleNamespace(budget=SimpleNamespace(wall_time_ms=600)))
+
+    class FakeStore:
+        async def prepare_candidate_numerical_fixture(self, **_kwargs):
+            return candidate, spec, None
+
+    class DriftedQueue:
+        def __init__(self, _store, _key):
+            pass
+
+        async def admit_numerical_fixture(self, _worker, **kwargs):
+            return SimpleNamespace(
+                result=None,
+                envelope=SimpleNamespace(
+                    job_id="00000000-0000-4000-8000-000000000029",
+                    execution_profile=kwargs["execution_profile"],
+                ),
+            )
+
+        async def claim(self, *_args):
+            raise JobRejected("EXECUTION_PROFILE_DRIFT", 409)
+
+    monkeypatch.setattr(app.state, "research_store", FakeStore(), raising=False)
+    monkeypatch.setattr(main, "configured_image", lambda: image)
+    monkeypatch.setattr(main, "configured_queue_key", lambda: b"q" * 40)
+    monkeypatch.setattr(main, "ResearchQueue", DriftedQueue)
+    monkeypatch.setattr(
+        main,
+        "build_numerical_suite_input",
+        lambda _c, _s, *, seed, parent_candidate: {
+            "candidate_id": candidate.candidate_id,
+            "seed": seed,
+            "suite_version": "feature-kernel-fixture.v1",
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "capture_execution_profile",
+        lambda img, kind, ms: capture_execution_profile(img, kind, ms),
+    )
+
+    response = TestClient(app).post(
+        "/v1/research/candidates/" + candidate.candidate_id + "/numerical-fixture",
+        json={"seed": 29},
+        headers=_headers(),
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "EXECUTION_PROFILE_DRIFT"
 
 # Pre-FGL-601 API semantics only; strict authentication is covered in test_service_auth.py.
 pytestmark = pytest.mark.usefixtures("legacy_phase5_service_auth")

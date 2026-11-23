@@ -2999,6 +2999,8 @@ class Neo4jResearchStore:
                 parent_candidate=parent,
                 execution_image=binding.execution_image,
                 now=binding.created_at,
+                execution_profile=binding.execution_profile,
+                legacy=binding.schema_version == "implementation-binding.v1",
             )
         except ValueError as exc:
             raise ResearchValidationError(str(exc)) from exc
@@ -3017,6 +3019,7 @@ class Neo4jResearchStore:
             or result.binding_id != binding.binding_id
             or result.binding_hash != binding.binding_hash
             or result.protocol_hash != binding.protocol_hash
+            or result.execution_profile != binding.execution_profile
         ):
             raise ResearchValidationError("Research-case result does not match its binding.")
         freshness, usable = await self._candidate_mapping_admission_status(

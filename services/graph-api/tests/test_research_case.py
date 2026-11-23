@@ -18,7 +18,11 @@ from app.research_case import (
 )
 from app.research_case_worker import PROTOCOL_VERSION, SEEDS, evaluate
 from app.research_compiler import compile_transform
-from app.sandbox import container_command, validate_research_case_worker_result
+from app.sandbox import (
+    container_command,
+    run_research_case_sandbox,
+    validate_research_case_worker_result,
+)
 from tests.test_research_compiler import MIX, _context
 
 IMAGE = "sha256:" + "a" * 64
@@ -250,3 +254,93 @@ def test_worker_and_controller_reject_unregistered_shapes_and_false_success():
     assert container_command(
         IMAGE, "fgl-check-" + "a" * 32, 2_000, worker_kind="research_case"
     )[-1] == "app.research_case_worker"
+
+
+def test_execution_profile_binds_to_receipt_and_rejects_live_drift(monkeypatch):
+    spec, mixture, candidate = _candidates()
+    binding = make_implementation_binding(
+        candidate, spec, parent_candidate=mixture, execution_image=IMAGE, now=NOW
+    )
+    receipt = run_registered_research_case(
+        binding,
+        candidate,
+        spec,
+        parent_candidate=mixture,
+        actor_id="experiment-worker",
+        run_id=RUN_ID,
+        worker_runner=lambda payload, **_kwargs: evaluate(payload),
+        now=NOW,
+    )
+    assert binding.schema_version == "implementation-binding.v2"
+    assert binding.execution_profile is not None
+    assert receipt.schema_version == "research-case-result.v3"
+    assert receipt.execution_profile == binding.execution_profile
+
+    monkeypatch.setenv("FGL_WORKER_RAM_LIMIT_MB", "512")
+    with pytest.raises(ValueError, match="EXECUTION_PROFILE_DRIFT"):
+        run_registered_research_case(
+            binding,
+            candidate,
+            spec,
+            parent_candidate=mixture,
+            actor_id="experiment-worker",
+            run_id=RUN_ID,
+            worker_runner=lambda payload, **_kwargs: evaluate(payload),
+            now=NOW,
+        )
+    monkeypatch.delenv("FGL_WORKER_RAM_LIMIT_MB", raising=False)
+    monkeypatch.setenv("FGL_WORKER_CPU_CORES", "2")
+    with pytest.raises(ValueError, match="EXECUTION_PROFILE_DRIFT"):
+        run_registered_research_case(
+            binding,
+            candidate,
+            spec,
+            parent_candidate=mixture,
+            actor_id="experiment-worker",
+            run_id=RUN_ID,
+            worker_runner=lambda payload, **_kwargs: evaluate(payload),
+            now=NOW,
+        )
+    monkeypatch.delenv("FGL_WORKER_CPU_CORES", raising=False)
+
+    legacy_binding = make_implementation_binding(
+        candidate, spec, parent_candidate=mixture, execution_image=IMAGE, now=NOW, legacy=True
+    )
+    assert legacy_binding.schema_version == "implementation-binding.v1"
+    assert legacy_binding.execution_profile is None
+    with pytest.raises(ValueError, match="Historical execution profiles are unknown"):
+        run_registered_research_case(
+            legacy_binding,
+            candidate,
+            spec,
+            parent_candidate=mixture,
+            actor_id="experiment-worker",
+            run_id=RUN_ID,
+            worker_runner=lambda payload, **_kwargs: evaluate(payload),
+            now=NOW,
+        )
+    with pytest.raises(ValueError, match="Historical replay cannot start a new sandbox job"):
+        run_registered_research_case(
+            legacy_binding,
+            candidate,
+            spec,
+            parent_candidate=mixture,
+            actor_id="experiment-worker",
+            run_id=RUN_ID,
+            worker_runner=run_research_case_sandbox,
+            now=NOW,
+            historical_replay=True,
+        )
+    replayed = run_registered_research_case(
+        legacy_binding,
+        candidate,
+        spec,
+        parent_candidate=mixture,
+        actor_id="experiment-worker",
+        run_id=RUN_ID,
+        worker_runner=lambda payload, **_kwargs: evaluate(payload),
+        now=NOW,
+        historical_replay=True,
+    )
+    assert replayed.schema_version == "research-case-result.v1"
+    assert replayed.execution_profile is None

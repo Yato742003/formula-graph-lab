@@ -37,6 +37,7 @@ from app.evolution import (
     build_evolution_report,
 )
 from app.evolution_runner import confirm_finalists, run_generation
+from app.execution_profile import capture_execution_profile
 from app.extractor import PaperExtractionError, extract_paper
 from app.fetcher import MAX_HTML_BYTES, PaperFetchError, fetch_paper_html
 from app.formula_ast import FormulaParseError, parse_formula
@@ -618,6 +619,7 @@ async def create_symbolic_check(
     try:
         image = configured_image()
         queue = ResearchQueue(store, configured_queue_key())
+        profile = capture_execution_profile(image, "symbolic", body.timeout_ms)
     except ValueError as exc:
         raise HTTPException(status_code=503, detail="Research sandbox is not configured.") from exc
     try:
@@ -650,6 +652,7 @@ async def create_symbolic_check(
             timeout_ms=body.timeout_ms,
             execution_image=image,
             contract_review_hash=review_hash if contract_reviews else None,
+            execution_profile=profile,
         )
         existing = await store.lookup_check_result(
             workspace_id=body.workspace_id,
@@ -675,13 +678,16 @@ async def create_symbolic_check(
             request_hash=request_hash,
             payload=payload,
             image=image,
+            execution_profile=profile,
         )
         if ticket.result is not None:
             result = CheckResult.model_validate_json(ticket.result)
             if (
-                result.request_hash != request_hash
+                result.schema_version != "check-result.v3"
+                or result.request_hash != request_hash
                 or result.job_id != ticket.envelope.job_id
                 or result.execution_image != image
+                or result.execution_profile != ticket.envelope.execution_profile
                 or result.contract_review_ids != review_ids
                 or result.contract_review_hash != review_hash
             ):
@@ -694,18 +700,23 @@ async def create_symbolic_check(
                 body.formula_b,
                 source_format=body.format,
                 timeout_ms=body.timeout_ms,
-                worker_runner=partial(run_sandbox, image=image),
+                worker_runner=partial(
+                    run_sandbox,
+                    image=image,
+                    execution_profile=ticket.envelope.execution_profile,
+                ),
                 contract_reviews=accepted_reviews,
                 contract_review_scope=body.target_uuid,
             )
             result = result.model_copy(
                 update={
-                    "schema_version": "check-result.v2",
+                    "schema_version": "check-result.v3",
                     "contract_review_ids": review_ids,
                     "contract_review_hash": review_hash,
                     "request_hash": request_hash,
                     "job_id": ticket.envelope.job_id,
                     "execution_image": image,
+                    "execution_profile": ticket.envelope.execution_profile,
                 }
             )
             await queue.finish(ticket, result.model_dump_json())
@@ -1649,6 +1660,7 @@ async def run_research_numerical_fixture(
             parent_candidate=parent_candidate,
         ) | {"candidate_id": candidate.candidate_id}
         reserved_ms = min(30_000, max(10, spec.definition.budget.wall_time_ms))
+        profile = capture_execution_profile(image, "numerical", reserved_ms)
         ticket = await queue.admit_numerical_fixture(
             worker,
             workspace_id=workspace_id,
@@ -1657,9 +1669,16 @@ async def run_research_numerical_fixture(
             payload=payload,
             image=image,
             reserved_ms=reserved_ms,
+            execution_profile=profile,
         )
         if ticket.result is not None:
             receipt = NumericalFixtureReceipt.model_validate_json(ticket.result)
+            if (
+                receipt.schema_version != "numerical-fixture-result.v2"
+                or receipt.execution_image != image
+                or receipt.execution_profile != ticket.envelope.execution_profile
+            ):
+                raise JobRejected("JOB_RESULT_MISMATCH", 422)
             persisted = await r_store.append_candidate_numerical_fixture(
                 workspace_id=workspace_id,
                 candidate_id=candidate_id,
@@ -1675,6 +1694,7 @@ async def run_research_numerical_fixture(
                 spec,
                 seed=body.seed,
                 parent_candidate=parent_candidate,
+                execution_profile=ticket.envelope.execution_profile,
             )
             receipt = make_numerical_fixture_receipt(
                 raw_result,
@@ -1776,7 +1796,14 @@ async def execute_research_case(
     )
     if ticket.result is not None:
         saved = ResearchCaseReceiptResponse.model_validate_json(ticket.result)
+        if (
+            saved.binding.execution_profile != ticket.envelope.execution_profile
+            or saved.result.execution_profile != ticket.envelope.execution_profile
+        ):
+            raise JobRejected("JOB_RESULT_MISMATCH", 422)
         return saved.model_copy(update={"replayed": True})
+    if ticket.envelope.execution_profile != binding.execution_profile:
+        raise JobRejected("EXECUTION_PROFILE_DRIFT", 409)
     await queue.claim(ticket, worker, payload, image)
     result = await run_in_threadpool(
         run_registered_research_case, binding, candidate, spec, parent_candidate=parent,

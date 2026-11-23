@@ -88,7 +88,10 @@ def test_research_case_endpoint_finishes_atomically(monkeypatch):
         def __init__(self, _store, _key):
             self.ticket = SimpleNamespace(
                 result=None,
-                envelope=SimpleNamespace(job_id=RUN_ID),
+                envelope=SimpleNamespace(
+                    job_id=RUN_ID,
+                    execution_profile=binding.execution_profile,
+                ),
             )
 
         async def research_case_retry(self, *_args):
@@ -173,7 +176,10 @@ def test_research_case_endpoint_marks_idempotent_replay(monkeypatch):
         def __init__(self, _store, _key):
             self.ticket = SimpleNamespace(
                 result=saved.model_dump_json(),
-                envelope=SimpleNamespace(job_id=RUN_ID),
+                envelope=SimpleNamespace(
+                    job_id=RUN_ID,
+                    execution_profile=binding.execution_profile,
+                ),
             )
 
         async def research_case_retry(self, *_args):
@@ -198,6 +204,58 @@ def test_research_case_endpoint_marks_idempotent_replay(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["replayed"] is True
+
+
+def test_research_case_endpoint_rejects_profile_drift_with_409(monkeypatch):
+    from app.execution_profile import ExecutionProfile
+
+    _configure(monkeypatch)
+    spec, parent, candidate = _candidates()
+    binding = make_implementation_binding(
+        candidate, spec, parent_candidate=parent, execution_image=IMAGE, now=NOW
+    )
+    drifted = ExecutionProfile(
+        image_id=IMAGE,
+        worker_kind="research_case",
+        ram_bytes=512 * 1024**2,
+        cpu_cores=1,
+        timeout_cap_ms=10_000,
+        invocation_limit_ms=5_000,
+    )
+
+    class FakeStore:
+        async def prepare_registered_research_case(self, **_kwargs):
+            return candidate, spec, parent
+
+    class DriftQueue:
+        def __init__(self, _store, _key):
+            self.ticket = SimpleNamespace(
+                result=None,
+                envelope=SimpleNamespace(job_id=RUN_ID, execution_profile=drifted),
+            )
+
+        async def research_case_retry(self, *_args):
+            return None, None
+
+        async def admit_research_case(self, *_args, **_kwargs):
+            return self.ticket
+
+    monkeypatch.setattr(app.state, "research_store", FakeStore(), raising=False)
+    monkeypatch.setattr(main, "configured_image", lambda: IMAGE)
+    monkeypatch.setattr(main, "configured_queue_key", lambda: b"q" * 40)
+    monkeypatch.setattr(main, "configured_worker_principal", lambda *_args: WorkerPrincipal(
+        "experiment-worker", "experiment", frozenset({"ws-test"})
+    ))
+    monkeypatch.setattr(main, "ResearchQueue", DriftQueue)
+    monkeypatch.setattr(main, "make_implementation_binding", lambda *args, **kwargs: binding)
+
+    response = TestClient(app).post(
+        "/v1/research/candidates/" + candidate.candidate_id + "/research-case",
+        json={},
+        headers=_headers(),
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "EXECUTION_PROFILE_DRIFT"
 
 # Pre-FGL-601 API semantics only; strict authentication is covered in test_service_auth.py.
 pytestmark = pytest.mark.usefixtures("legacy_phase5_service_auth")

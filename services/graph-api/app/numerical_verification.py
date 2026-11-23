@@ -9,10 +9,15 @@ import re
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from app.analysis_versions import canonical_json
 from app.candidate_verification import verify_compiled_candidate
+from app.execution_profile import (
+    ExecutionProfile,
+    capture_execution_profile,
+    validate_live_profile,
+)
 from app.numerical_worker import MAX_FEATURE_RANK, SUITE_VERSION, TOLERANCES
 from app.problem_spec import FrozenInput, ProblemSpecSnapshot, definition_hash
 from app.research_compiler import CompiledCandidate, ParentRef, _verify_candidate_identity
@@ -49,6 +54,7 @@ class NumericalFixtureReceipt(FrozenInput):
     execution_image: str | None = Field(
         default=None, pattern=r"^sha256:[0-9a-f]{64}$",
     )
+    execution_profile: ExecutionProfile | None = None
     seed: int = Field(ge=0, le=2**31 - 1, strict=True)
     dtype: Literal["float32", "float64", "bfloat16"]
     tolerance: float = Field(gt=0)
@@ -65,7 +71,9 @@ class NumericalFixtureReceipt(FrozenInput):
     )
     performance_claim: Literal[False] = False
     created_at: datetime
-    schema_version: Literal["numerical-fixture-result.v1"] = "numerical-fixture-result.v1"
+    schema_version: Literal["numerical-fixture-result.v1", "numerical-fixture-result.v2"] = (
+        "numerical-fixture-result.v1"
+    )
 
     @field_validator("checks", mode="before")
     @classmethod
@@ -95,6 +103,15 @@ class NumericalFixtureReceipt(FrozenInput):
 
     @model_validator(mode="after")
     def validate_result_identity(self) -> NumericalFixtureReceipt:
+        if (self.schema_version == "numerical-fixture-result.v2") != (
+            self.execution_profile is not None
+        ):
+            raise ValueError("Version 2 numerical receipts require a captured execution profile.")
+        if self.execution_profile is not None and (
+            self.execution_profile.worker_kind != "numerical"
+            or self.execution_profile.image_id != self.execution_image
+        ):
+            raise ValueError("Numerical profile does not match its worker/image.")
         if (
             self.fixture_scope != "synthetic_feature_kernel_fixture"
             or self.performance_claim is not False
@@ -127,6 +144,13 @@ class NumericalFixtureReceipt(FrozenInput):
             raise ValueError("Numerical fixture receipt identity does not match its content.")
         return self
 
+    @model_serializer(mode="wrap")
+    def serialize_receipt(self, handler):
+        payload = handler(self)
+        if self.schema_version == "numerical-fixture-result.v1":
+            payload.pop("execution_profile", None)
+        return payload
+
 
 class NumericalFixtureReceiptResponse(FrozenInput):
     result: NumericalFixtureReceipt
@@ -145,6 +169,8 @@ def make_numerical_fixture_receipt(
         r"sha256:[0-9a-f]{64}", execution_image,
     ):
         raise ValueError("A verified immutable sandbox image is required for a new receipt.")
+    if result.get("execution_profile") is None:
+        raise ValueError("A captured execution profile is required for a new receipt.")
     created_at = datetime.now(UTC)
     payload = {
         **result,
@@ -157,7 +183,7 @@ def make_numerical_fixture_receipt(
         "workspace_id": workspace_id,
         "actor_id": actor_id,
         "created_at": created_at.isoformat().replace("+00:00", "Z"),
-        "schema_version": "numerical-fixture-result.v1",
+        "schema_version": "numerical-fixture-result.v2",
     }
     if execution_image is None:
         payload.pop("execution_image", None)
@@ -238,6 +264,7 @@ def run_candidate_numerical_fixture(
     *,
     seed: int,
     parent_candidate: CompiledCandidate | None = None,
+    execution_profile: ExecutionProfile | None = None,
 ) -> dict[str, Any]:
     """Run the fixed synthetic suite and bind its result to candidate/spec provenance."""
     payload = build_numerical_suite_input(
@@ -246,8 +273,10 @@ def run_candidate_numerical_fixture(
     input_hash = numerical_fixture_input_hash(payload)
     timeout_ms = min(30_000, max(10, spec.definition.budget.wall_time_ms))
     image = configured_image()
+    profile = execution_profile or capture_execution_profile(image, "numerical", timeout_ms)
+    validate_live_profile(profile, image, "numerical")
     result = run_numerical_sandbox(
-        payload, timeout_ms=timeout_ms, image=image,
+        payload, timeout_ms=timeout_ms, image=image, execution_profile=profile,
     )
     receipt_scope = {
         "candidate_id": candidate.candidate_id,
@@ -258,6 +287,7 @@ def run_candidate_numerical_fixture(
         "suite_version": SUITE_VERSION,
         "input_hash": input_hash,
         "execution_image": image,
+        "execution_profile": profile.model_dump(mode="json"),
         "seed": seed,
         "dtype": spec.definition.dtype,
         "tolerance": TOLERANCES[spec.definition.dtype],

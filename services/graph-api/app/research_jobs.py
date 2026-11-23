@@ -13,9 +13,15 @@ from datetime import UTC, datetime
 from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer, model_validator
 
 from app.episodes import workspace_group_id
+from app.execution_profile import (
+    ExecutionProfile,
+    WorkerKind,
+    capture_execution_profile,
+    validate_live_profile,
+)
 from app.numerical_verification import (
     NumericalFixtureReceipt,
     NumericalFixtureReceiptResponse,
@@ -23,11 +29,13 @@ from app.numerical_verification import (
 )
 from app.problem_spec import ProblemSpecSnapshot, definition_hash
 from app.research_case import (
+    PER_TRIAL_TIMEOUT_MS,
     ImplementationBindingReceipt,
     ResearchCaseReceipt,
     ResearchCaseReceiptResponse,
     make_implementation_binding,
     phase_budget_ms,
+    validate_protocol_profile,
 )
 from app.research_compiler import CompiledCandidate, _verify_candidate_identity
 from app.sandbox import IMAGE_ID
@@ -41,8 +49,15 @@ class JobRejected(ValueError):
         self.status = status
 
 
+OPERATION_WORKER_KIND: dict[str, WorkerKind] = {
+    "checks:run": "symbolic",
+    "numerical_fixture:run": "numerical",
+    "research_case:run": "research_case",
+}
+
+
 class JobEnvelope(BaseModel):
-    schema_version: Literal["research-job.v1"] = "research-job.v1"
+    schema_version: Literal["research-job.v1", "research-job.v2"] = "research-job.v1"
     job_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
     workspace_id: str = Field(min_length=1, max_length=200)
     target_uuid: str = Field(min_length=1, max_length=200)
@@ -54,10 +69,29 @@ class JobEnvelope(BaseModel):
     source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     image_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    execution_profile: ExecutionProfile | None = None
     issued_at: int = Field(ge=0)
     expires_at: int = Field(ge=0)
     reserved_ms: int = Field(ge=10, le=30_000)
     model_config = {"extra": "forbid", "frozen": True, "strict": True}
+
+    @model_validator(mode="after")
+    def validate_execution_profile(self) -> JobEnvelope:
+        if (self.schema_version == "research-job.v2") != (self.execution_profile is not None):
+            raise ValueError("Version 2 job envelopes require a captured execution profile.")
+        if self.execution_profile is not None and (
+            self.execution_profile.image_id != self.image_id
+            or self.execution_profile.worker_kind != OPERATION_WORKER_KIND[self.operation]
+        ):
+            raise ValueError("Job execution profile does not match its operation or image.")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_envelope(self, handler):
+        payload = handler(self)
+        if self.schema_version == "research-job.v1":
+            payload.pop("execution_profile", None)
+        return payload
 
 
 def digest(payload: object) -> str:
@@ -76,6 +110,34 @@ def configured_queue_key() -> bytes:
 
 def signature(envelope: JobEnvelope, key: bytes) -> str:
     return hmac.new(key, envelope.model_dump_json().encode(), hashlib.sha256).hexdigest()
+
+
+def validate_symbolic_check_payload(payload: dict[str, object]) -> None:
+    base_keys = {"formula_a", "formula_b", "format", "timeout_ms"}
+    review_keys = {"contract_review_ids", "contract_review_hash"}
+    if review_keys & payload.keys():
+        review_ids = payload.get("contract_review_ids")
+        review_hash = payload.get("contract_review_hash")
+        if (
+            not review_keys <= payload.keys()
+            or not isinstance(review_ids, (list, tuple))
+            or len(review_ids) > 500
+            or any(not isinstance(item, str) or not 1 <= len(item) <= 200 for item in review_ids)
+            or not isinstance(review_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", review_hash)
+        ):
+            raise JobRejected("INVALID_JOB_INPUT", 422)
+    if (
+        set(payload) - review_keys != base_keys
+        or payload.get("format") != "latex"
+        or any(
+            not isinstance(payload.get(k), str) or not 1 <= len(payload[k]) <= 20_000
+            for k in ("formula_a", "formula_b")
+        )
+        or type(payload.get("timeout_ms")) is not int
+        or not 10 <= payload["timeout_ms"] <= 30_000
+    ):
+        raise JobRejected("INVALID_JOB_INPUT", 422)
 
 
 def validate_numerical_fixture_payload(payload: dict[str, object]) -> None:
@@ -172,6 +234,8 @@ def verify_envelope(
         raise JobRejected("INVALID_JOB_ENVELOPE", 422) from exc
     if not hmac.compare_digest(signature(envelope, key), mac):
         raise JobRejected("INVALID_JOB_SIGNATURE", 403)
+    if envelope.schema_version != "research-job.v2" or envelope.execution_profile is None:
+        raise JobRejected("LEGACY_JOB_PROFILE_REQUIRED", 422)
     permission = (
         "checks:run"
         if envelope.operation == "numerical_fixture:run"
@@ -193,7 +257,24 @@ def verify_envelope(
     if (envelope.payload_hash != digest(payload) or envelope.image_id != image
             or not reservation_matches):
         raise JobRejected("JOB_INPUT_MISMATCH", 422)
-    if envelope.operation == "numerical_fixture:run":
+    try:
+        validate_live_profile(
+            envelope.execution_profile, image, OPERATION_WORKER_KIND[envelope.operation],
+        )
+    except ValueError as exc:
+        if str(exc) == "EXECUTION_PROFILE_DRIFT":
+            raise JobRejected("EXECUTION_PROFILE_DRIFT", 409) from exc
+        raise JobRejected("INVALID_JOB_ENVELOPE", 422) from exc
+    expected_invocation_ms = (
+        PER_TRIAL_TIMEOUT_MS
+        if envelope.operation == "research_case:run"
+        else min(envelope.reserved_ms, envelope.execution_profile.timeout_cap_ms)
+    )
+    if envelope.execution_profile.invocation_limit_ms != expected_invocation_ms:
+        raise JobRejected("JOB_INPUT_MISMATCH", 422)
+    if envelope.operation == "checks:run":
+        validate_symbolic_check_payload(payload)
+    elif envelope.operation == "numerical_fixture:run":
         validate_numerical_fixture_payload(payload)
         if (
             envelope.target_uuid != payload["candidate_id"]
@@ -201,6 +282,10 @@ def verify_envelope(
         ):
             raise JobRejected("JOB_SOURCE_MISMATCH", 422)
     elif envelope.operation == "research_case:run":
+        try:
+            validate_protocol_profile(envelope.execution_profile, image)
+        except ValueError as exc:
+            raise JobRejected("JOB_INPUT_MISMATCH", 422) from exc
         validate_research_case_payload(payload)
         if (
             envelope.target_uuid != payload["candidate_id"]
@@ -236,17 +321,22 @@ class ResearchQueue:
 
     async def admit(self, actor: WorkerPrincipal, *, workspace_id: str, target_uuid: str,
                     idempotency_key: str, request_hash: str, payload: dict[str, object],
-                    image: str) -> JobTicket:
+                    image: str, execution_profile: ExecutionProfile | None = None) -> JobTicket:
         actor.require("checks:run", workspace_id)
-        if (set(payload) != {"formula_a", "formula_b", "format", "timeout_ms"}
-                or payload.get("format") != "latex"
-                or any(not isinstance(payload.get(k), str) or not 1 <= len(payload[k]) <= 20_000
-                       for k in ("formula_a", "formula_b"))
-                or type(payload.get("timeout_ms")) is not int
-                or not 10 <= payload["timeout_ms"] <= 30_000):
-            raise JobRejected("INVALID_JOB_INPUT", 422)
+        validate_symbolic_check_payload(payload)
         if not IMAGE_ID.fullmatch(image):
             raise JobRejected("UNPINNED_SANDBOX_IMAGE", 503)
+        try:
+            profile = execution_profile or capture_execution_profile(
+                image, "symbolic", payload["timeout_ms"],
+            )
+            validate_live_profile(profile, image, "symbolic")
+        except ValueError as exc:
+            if str(exc) == "EXECUTION_PROFILE_DRIFT":
+                raise JobRejected("EXECUTION_PROFILE_DRIFT", 409) from exc
+            raise JobRejected("INVALID_JOB_INPUT", 422) from exc
+        if profile.invocation_limit_ms != min(payload["timeout_ms"], profile.timeout_cap_ms):
+            raise JobRejected("INVALID_JOB_INPUT", 422)
         source = await self.store.equation_source(
             workspace_id=workspace_id, equation_uuid=target_uuid,
         )
@@ -255,10 +345,12 @@ class ResearchQueue:
         now = int(time.time())
         job_id = str(uuid5(NAMESPACE_URL, json.dumps([workspace_id, target_uuid, idempotency_key])))
         envelope = JobEnvelope(
+            schema_version="research-job.v2",
             job_id=job_id,
             workspace_id=workspace_id, target_uuid=target_uuid, actor_id=actor.identity,
             request_hash=request_hash, source_hash=digest(payload["formula_a"]),
-            payload_hash=digest(payload), image_id=image, issued_at=now, expires_at=now + 120,
+            payload_hash=digest(payload), image_id=image, execution_profile=profile,
+            issued_at=now, expires_at=now + 120,
             reserved_ms=payload["timeout_ms"],
         )
         async with self.store.driver.session(database=self.store.database) as session:
@@ -282,6 +374,7 @@ class ResearchQueue:
         payload: dict[str, object],
         image: str,
         reserved_ms: int,
+        execution_profile: ExecutionProfile | None = None,
     ) -> JobTicket:
         """Reserve bounded quota for the fixed synthetic worker, never candidate code."""
         actor.require("checks:run", workspace_id)
@@ -295,6 +388,17 @@ class ResearchQueue:
             raise JobRejected("INVALID_NUMERICAL_FIXTURE_INPUT", 422)
         if not idempotency_key or len(idempotency_key) > 200 or not idempotency_key.isascii():
             raise JobRejected("INVALID_IDEMPOTENCY_KEY", 422)
+        try:
+            profile = execution_profile or capture_execution_profile(
+                image, "numerical", reserved_ms,
+            )
+            validate_live_profile(profile, image, "numerical")
+        except ValueError as exc:
+            if str(exc) == "EXECUTION_PROFILE_DRIFT":
+                raise JobRejected("EXECUTION_PROFILE_DRIFT", 409) from exc
+            raise JobRejected("INVALID_NUMERICAL_FIXTURE_INPUT", 422) from exc
+        if profile.invocation_limit_ms != min(reserved_ms, profile.timeout_cap_ms):
+            raise JobRejected("INVALID_NUMERICAL_FIXTURE_INPUT", 422)
 
         group_id = workspace_group_id(workspace_id)
         rows, _, _ = await self.store.driver.execute_query(
@@ -325,15 +429,17 @@ class ResearchQueue:
             [workspace_id, "numerical_fixture:run", candidate_id, idempotency_key],
         )))
         envelope = JobEnvelope(
+            schema_version="research-job.v2",
             job_id=job_id,
             workspace_id=workspace_id,
             target_uuid=candidate_id,
             actor_id=actor.identity,
             operation="numerical_fixture:run",
-            request_hash=digest([payload, image, reserved_ms]),
+            request_hash=digest([payload, image, reserved_ms, profile.model_dump(mode="json")]),
             source_hash=digest([candidate_id, candidate.content_hash]),
             payload_hash=digest(payload),
             image_id=image,
+            execution_profile=profile,
             issued_at=now,
             expires_at=now + 120,
             reserved_ms=reserved_ms,
@@ -377,6 +483,19 @@ class ResearchQueue:
             or not idempotency_key.isascii()
         ):
             raise JobRejected("INVALID_RESEARCH_CASE_INPUT", 422)
+        if (
+            binding.schema_version != "implementation-binding.v2"
+            or binding.execution_profile is None
+        ):
+            raise JobRejected("LEGACY_BINDING_PROFILE_REQUIRED", 422)
+        try:
+            validate_live_profile(
+                binding.execution_profile, binding.execution_image, "research_case",
+            )
+        except ValueError as exc:
+            if str(exc) == "EXECUTION_PROFILE_DRIFT":
+                raise JobRejected("EXECUTION_PROFILE_DRIFT", 409) from exc
+            raise JobRejected("INVALID_RESEARCH_CASE_INPUT", 422) from exc
         await self._validate_research_case_source(
             workspace_id=workspace_id,
             candidate_id=candidate_id,
@@ -389,15 +508,22 @@ class ResearchQueue:
             [workspace_id, "research_case:run", candidate_id, idempotency_key]
         )))
         envelope = JobEnvelope(
+            schema_version="research-job.v2",
             job_id=job_id,
             workspace_id=workspace_id,
             target_uuid=candidate_id,
             actor_id=actor.identity,
             operation="research_case:run",
-            request_hash=digest([payload, binding.execution_image, reserved_ms]),
+            request_hash=digest([
+                payload,
+                binding.execution_image,
+                reserved_ms,
+                binding.execution_profile.model_dump(mode="json"),
+            ]),
             source_hash=digest([candidate_id, binding.candidate_hash, binding.binding_hash]),
             payload_hash=digest(payload),
             image_id=binding.execution_image,
+            execution_profile=binding.execution_profile,
             issued_at=now,
             expires_at=now + 120,
             reserved_ms=reserved_ms,
@@ -452,6 +578,16 @@ class ResearchQueue:
                 or payload.get("evolution_id") != evolution_id):
             raise JobRejected("JOB_IDEMPOTENCY_CONFLICT")
         if row["result"] is None:
+            if envelope.schema_version != "research-job.v2" or envelope.execution_profile is None:
+                raise JobRejected("LEGACY_JOB_REQUIRES_RECONCILIATION")
+            try:
+                validate_live_profile(
+                    envelope.execution_profile, envelope.image_id, "research_case",
+                )
+            except ValueError as exc:
+                if str(exc) == "EXECUTION_PROFILE_DRIFT":
+                    raise JobRejected("EXECUTION_PROFILE_DRIFT", 409) from exc
+                raise JobRejected("INVALID_JOB_ENVELOPE", 422) from exc
             return payload, None
         if not hmac.compare_digest(
             self._result_mac(job_id, row["result"]), row["result_mac"] or "",
@@ -461,6 +597,8 @@ class ResearchQueue:
         if (saved.result.run_id != job_id or saved.result.actor_id != actor.identity
                 or saved.result.candidate_id != candidate_id
                 or saved.result.evaluation_role != role or saved.result.evolution_id != evolution_id
+                or saved.binding.execution_profile != envelope.execution_profile
+                or saved.result.execution_profile != envelope.execution_profile
                 or research_case_job_payload(saved.binding, role, evolution_id) != payload):
             raise JobRejected("JOB_RESULT_MISMATCH", 422)
         return payload, saved.model_copy(update={"replayed": True})
@@ -517,7 +655,7 @@ class ResearchQueue:
             await self._resolve_numerical_fixture_source(envelope, payload)
         else:
             binding = await self._research_case_binding(
-                envelope.workspace_id, payload, image
+                envelope.workspace_id, payload, image, envelope.execution_profile,
             )
             await self._validate_research_case_source(
                 workspace_id=envelope.workspace_id,
@@ -621,7 +759,10 @@ class ResearchQueue:
         workspace_id: str,
         payload: dict[str, object],
         image: str,
+        execution_profile: ExecutionProfile | None,
     ) -> ImplementationBindingReceipt:
+        if execution_profile is None:
+            raise JobRejected("LEGACY_JOB_PROFILE_REQUIRED", 422)
         rows, _, _ = await self.store.driver.execute_query(
             "MATCH (c:ResearchCandidate {candidate_id:$candidate_id, group_id:$group}) "
             "RETURN c.payload AS payload LIMIT 1",
@@ -635,13 +776,19 @@ class ResearchQueue:
         candidate, spec, parent = await self.store.prepare_registered_research_case(
             workspace_id=workspace_id, candidate_id=candidate.candidate_id
         )
-        binding = make_implementation_binding(
-            candidate,
-            spec,
-            parent_candidate=parent,
-            execution_image=image,
-            now=datetime.fromisoformat(str(payload["binding_created_at"]).replace("Z", "+00:00")),
-        )
+        try:
+            binding = make_implementation_binding(
+                candidate,
+                spec,
+                parent_candidate=parent,
+                execution_image=image,
+                now=datetime.fromisoformat(
+                    str(payload["binding_created_at"]).replace("Z", "+00:00")
+                ),
+                execution_profile=execution_profile,
+            )
+        except ValueError as exc:
+            raise JobRejected("JOB_SOURCE_MISMATCH", 422) from exc
         if (
             binding.binding_id != payload["binding_id"]
             or binding.binding_hash != payload["binding_hash"]
@@ -677,6 +824,7 @@ class ResearchQueue:
             parent_candidate=parent,
             execution_image=binding.execution_image,
             now=binding.created_at,
+            execution_profile=binding.execution_profile,
         )
         if expected != binding or reserved_ms != phase_budget_ms(evaluation_role):
             raise JobRejected("JOB_INPUT_MISMATCH", 422)
@@ -708,6 +856,11 @@ class ResearchQueue:
         result = NumericalFixtureReceipt.model_validate(result.model_dump(mode="python"))
         if (
             envelope.operation != "numerical_fixture:run"
+            or envelope.schema_version != "research-job.v2"
+            or envelope.execution_profile is None
+            or result.schema_version != "numerical-fixture-result.v2"
+            or result.execution_image != envelope.image_id
+            or result.execution_profile != envelope.execution_profile
             or result.run_id != envelope.job_id
             or result.workspace_id != envelope.workspace_id
             or result.candidate_id != envelope.target_uuid
@@ -792,6 +945,12 @@ class ResearchQueue:
         payload = research_case_job_payload(binding, result.evaluation_role, result.evolution_id)
         if (
             envelope.operation != "research_case:run"
+            or envelope.schema_version != "research-job.v2"
+            or envelope.execution_profile is None
+            or binding.schema_version != "implementation-binding.v2"
+            or binding.execution_profile != envelope.execution_profile
+            or result.schema_version != "research-case-result.v3"
+            or result.execution_profile != envelope.execution_profile
             or result.run_id != envelope.job_id
             or result.workspace_id != envelope.workspace_id
             or result.candidate_id != envelope.target_uuid

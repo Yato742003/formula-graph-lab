@@ -13,8 +13,9 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_serializer, model_validator
 
+from app.execution_profile import ExecutionProfile
 from app.formula_ast import (
     FormulaFormat,
     FormulaParseError,
@@ -79,14 +80,24 @@ class CheckResult(BaseModel):
     created_at: datetime
     job_id: str | None = None
     execution_image: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    execution_profile: ExecutionProfile | None = None
     contract_review_ids: tuple[str, ...] = ()
     contract_review_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    schema_version: Literal["check-result.v1", "check-result.v2"] = "check-result.v1"
+    schema_version: Literal["check-result.v1", "check-result.v2", "check-result.v3"] = (
+        "check-result.v1"
+    )
 
     model_config = {"frozen": True, "extra": "forbid"}
 
     @model_validator(mode="after")
     def validate_review_snapshot(self) -> CheckResult:
+        if (self.schema_version == "check-result.v3") != (self.execution_profile is not None):
+            raise ValueError("Version 3 check results require a captured execution profile.")
+        if self.execution_profile is not None and (
+            self.execution_profile.worker_kind != "symbolic"
+            or self.execution_profile.image_id != self.execution_image
+        ):
+            raise ValueError("Check execution profile does not match its worker/image.")
         if self.schema_version == "check-result.v1":
             if self.contract_review_ids or self.contract_review_hash is not None:
                 raise ValueError("Version 1 check results cannot carry contract-review state.")
@@ -95,6 +106,13 @@ class CheckResult(BaseModel):
         ):
             raise ValueError("Version 2 check results require a unique, hashed review snapshot.")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_result(self, handler):
+        payload = handler(self)
+        if self.schema_version != "check-result.v3":
+            payload.pop("execution_profile", None)
+        return payload
 
 
 class CheckResultResponse(CheckResult):
@@ -105,6 +123,7 @@ def symbolic_request_hash(
     formula_a: str, formula_b: str, *, source_format: FormulaFormat = "latex",
     timeout_ms: int = 2_000, execution_image: str | None = None,
     contract_review_hash: str | None = None,
+    execution_profile: ExecutionProfile | None = None,
 ) -> str:
     from app.formula_ast import CANONICALIZER_VERSION, SYNTAX_HASH_VERSION
 
@@ -117,6 +136,8 @@ def symbolic_request_hash(
         payload.extend(["sandbox-policy.v1", execution_image])
     if contract_review_hash is not None:
         payload.extend(["contract-review-state.v1", contract_review_hash])
+    if execution_profile is not None:
+        payload.append(execution_profile.model_dump(mode="json"))
     return hashlib.sha256(json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
     ).encode("utf-8")).hexdigest()

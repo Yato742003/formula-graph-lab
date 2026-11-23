@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -399,7 +400,7 @@ async def test_phase5_source_to_confirmation_and_replay(monkeypatch, tmp_path):
             root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
             clean = subprocess.run(
                 [
-                    "pwsh",
+                    shutil.which("pwsh") or "powershell.exe",
                     "-NoProfile",
                     "-File",
                     os.path.join(root, "replay-bundle.ps1"),

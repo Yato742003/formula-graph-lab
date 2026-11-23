@@ -274,6 +274,7 @@ class CompilerReplayBundle(FrozenInput):
                     mapping_freshness=replay_input.mapping_freshness,
                     mapping_usable=replay_input.mapping_usable,
                     quota_available=replay_input.quota_available,
+                    historical_replay=True,
                 )
                 expected = authoritative.model_dump(exclude={"candidate", "spec"})
                 if any(getattr(replay_input, field) != getattr(authoritative, field)
@@ -513,6 +514,7 @@ def replay_candidate_from_bundle(bundle: CompilerReplayBundle) -> CompiledCandid
             now=receipt.created_at,
             evaluation_role=receipt.evaluation_role,
             evolution_id=receipt.evolution_id,
+            historical_replay=True,
         )
         expected = receipt.model_dump(mode="json")
         actual = reproduced.model_dump(mode="json")

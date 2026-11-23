@@ -437,6 +437,8 @@ def test_legacy_v1_fixture_receipt_identity_remains_readable(monkeypatch):
     )
     payload = receipt.model_dump(mode="json")
     payload.pop("execution_image")
+    payload.pop("execution_profile", None)
+    payload["schema_version"] = "numerical-fixture-result.v1"
     identity = {
         key: value for key, value in payload.items()
         if key not in {"result_id", "result_hash"}
@@ -447,6 +449,7 @@ def test_legacy_v1_fixture_receipt_identity_remains_readable(monkeypatch):
     )
 
     assert legacy.execution_image is None
+    assert legacy.execution_profile is None
     assert legacy.result_id == f"num_{digest[:32]}"
 
 
