@@ -12,6 +12,9 @@ import {
 } from '@/lib/server/paper-import';
 import { env } from 'cloudflare:workers';
 
+const ARXIV_ID_PARAM = /^\d{4}\.\d{4,5}$/;
+const PAPER_VERSION_PARAM = /^[1-9]\d{0,5}$/;
+
 function json(body: unknown, status: number) {
   return Response.json(body, {
     status,
@@ -29,17 +32,39 @@ export async function GET(request: Request) {
     return json({ code: 'CROSS_SITE_REQUEST_REJECTED' }, 403);
   }
 
+  const url = new URL(request.url);
+  const targetPaperId = url.searchParams.get('paper_id');
+  const targetVersionStr = url.searchParams.get('version');
+
+  if (targetPaperId !== null && !ARXIV_ID_PARAM.test(targetPaperId)) {
+    return json({ code: 'INVALID_PAPER_ID' }, 400);
+  }
+  if (targetVersionStr !== null && !PAPER_VERSION_PARAM.test(targetVersionStr)) {
+    return json({ code: 'INVALID_PAPER_VERSION' }, 400);
+  }
+  const targetVersion =
+    targetVersionStr !== null ? Number(targetVersionStr) : null;
+
   const workspaceId = await workspaceIdentifierForUser(user.userId);
+
   let paper;
   try {
-    paper = await new D1GraphSnapshotRepository(getD1()).latestOwnedPaper(
+    paper = await new D1GraphSnapshotRepository(getD1()).ownedPaper(
       workspaceId,
       user.userId,
+      targetPaperId,
+      targetVersion,
     );
   } catch {
     return json({ code: 'DATABASE_UNAVAILABLE' }, 503);
   }
-  if (!paper) return json(emptyGraphSnapshot(), 200);
+
+  if (!paper) {
+    if (targetPaperId !== null) {
+      return json({ code: 'PAPER_NOT_FOUND' }, 404);
+    }
+    return json(emptyGraphSnapshot(), 200);
+  }
 
   const graphConfiguration = resolveGraphApiConfiguration(
     {

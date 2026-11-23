@@ -87,6 +87,51 @@ export class D1GraphSnapshotRepository {
     workspaceId: string,
     ownerUserId: string,
   ): Promise<PersistedPaperSummary | null> {
+    return this.ownedPaper(workspaceId, ownerUserId);
+  }
+
+  async ownedPaper(
+    workspaceId: string,
+    ownerUserId: string,
+    paperId?: string | null,
+    version?: number | null,
+  ): Promise<PersistedPaperSummary | null> {
+    if (paperId) {
+      const hasVersion = version !== null && version !== undefined;
+      if (hasVersion && (!Number.isSafeInteger(version) || version < 1)) {
+        return null;
+      }
+      const row = hasVersion
+        ? await this.database
+            .prepare(
+              `SELECT p.arxiv_id AS paper_id, p.version, p.title, p.source_url,
+                      p.source_sha256, p.updated_at
+               FROM papers AS p
+               JOIN workspaces AS w ON w.id = p.workspace_id
+               WHERE p.workspace_id = ? AND w.owner_user_id = ?
+                 AND p.arxiv_id = ? AND p.version = ?
+                 AND p.status = 'ready' AND p.version IS NOT NULL
+               ORDER BY p.updated_at DESC
+               LIMIT 1`,
+            )
+            .bind(workspaceId, ownerUserId, paperId, version)
+            .first<Record<string, unknown>>()
+        : await this.database
+            .prepare(
+              `SELECT p.arxiv_id AS paper_id, p.version, p.title, p.source_url,
+                      p.source_sha256, p.updated_at
+               FROM papers AS p
+               JOIN workspaces AS w ON w.id = p.workspace_id
+               WHERE p.workspace_id = ? AND w.owner_user_id = ?
+                 AND p.arxiv_id = ?
+                 AND p.status = 'ready' AND p.version IS NOT NULL
+               ORDER BY p.version DESC, p.updated_at DESC
+               LIMIT 1`,
+            )
+            .bind(workspaceId, ownerUserId, paperId)
+            .first<Record<string, unknown>>();
+      return row ? parsePersistedPaper(row) : null;
+    }
     const row = await this.database
       .prepare(
         `SELECT p.arxiv_id AS paper_id, p.version, p.title, p.source_url,

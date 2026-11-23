@@ -37,7 +37,8 @@ try {
     )
     if ($IncludeIntegration) {
         # The existing runner creates its own isolated Neo4j Compose project.
-        Invoke-ResearchCheck 'pwsh' @(
+        $psExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+        Invoke-ResearchCheck $psExe @(
             '-NoProfile', '-File', (Join-Path $researchRoot 'test-integration.ps1')
         )
     }

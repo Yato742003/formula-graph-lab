@@ -362,21 +362,23 @@ SEARCH_CURSOR_SECRET=$cursorSecret
         }
     }
 
-    # Dong bo GRAPH_API_URL voi Ngrok domain neu duoc bat
-    $envLines = Get-Content -Path $EnvFile
-    $hasUpdatedUrl = $false
-    $newEnvLines = $envLines | ForEach-Object {
-        if ($_ -match "^GRAPH_API_URL=") {
-            $hasUpdatedUrl = $true
-            "GRAPH_API_URL=$targetGraphUrl"
-        } else {
-            $_
+    # Dong bo GRAPH_API_URL voi Ngrok domain neu duoc bat (chi ghi khi thay doi de tranh Vite re-optimize)
+    if ($envContent -notmatch "(?m)^GRAPH_API_URL=$([regex]::Escape($targetGraphUrl))\r?$" ) {
+        $envLines = Get-Content -Path $EnvFile
+        $hasUpdatedUrl = $false
+        $newEnvLines = $envLines | ForEach-Object {
+            if ($_ -match "^GRAPH_API_URL=") {
+                $hasUpdatedUrl = $true
+                "GRAPH_API_URL=$targetGraphUrl"
+            } else {
+                $_
+            }
         }
+        if (-not $hasUpdatedUrl) {
+            $newEnvLines = @("GRAPH_API_URL=$targetGraphUrl") + $newEnvLines
+        }
+        Set-Content -Path $EnvFile -Value $newEnvLines -Encoding UTF8
     }
-    if (-not $hasUpdatedUrl) {
-        $newEnvLines = @("GRAPH_API_URL=$targetGraphUrl") + $newEnvLines
-    }
-    Set-Content -Path $EnvFile -Value $newEnvLines -Encoding UTF8
     Write-Success "File .env da san sang voi GRAPH_API_URL=$targetGraphUrl."
 }
 
@@ -476,8 +478,9 @@ if (-not $NoDocker) {
         docker compose up -d neo4j 2>&1 | Out-Null
         Pop-Location
 
-        $neo4jReady = Wait-ForPort -Port 7687 -TimeoutSeconds 35 -ServiceName "Neo4j Bolt (7687)"
-        $null = Wait-ForPort -Port 7474 -TimeoutSeconds 10 -ServiceName "Neo4j Browser (7474)"
+        $boltPortOpen = Wait-ForPort -Port 7687 -TimeoutSeconds 35 -ServiceName "Neo4j Bolt Socket (7687)"
+        $neo4jHttpReady = Wait-ForHttp -Urls @("http://localhost:7474", "http://127.0.0.1:7474") -TimeoutSeconds 45 -ServiceName "Neo4j Engine (7474)"
+        $neo4jReady = $boltPortOpen -and $neo4jHttpReady
         if ($neo4jReady) {
             Write-Success "Neo4j Database da san sang phuc vu!"
         } else {
@@ -509,11 +512,11 @@ $beErrLog = Join-Path $LogDir "backend.stderr.log"
 $appDir = Join-Path $ProjectRoot "services\graph-api"
 
 # ponytail: direct Python execution for exact 1:1 PID tracking, ceiling: local dev runner. upgrade: Docker/Compose if multi-node deployment needed.
-$beProc = Start-Process -FilePath $VenvPython -ArgumentList @("-m", "uvicorn", "app.main:app", "--app-dir", $appDir, "--reload", "--host", "127.0.0.1", "--port", "8000") -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden -RedirectStandardOutput $beOutLog -RedirectStandardError $beErrLog
+$beProc = Start-Process -FilePath $VenvPython -ArgumentList @("-m", "uvicorn", "app.main:app", "--app-dir", $appDir, "--reload", "--reload-dir", $appDir, "--host", "127.0.0.1", "--port", "8000") -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden -RedirectStandardOutput $beOutLog -RedirectStandardError $beErrLog
 Write-Success "Backend chay an truc tiep qua Python (PID: $($beProc.Id)); log: .logs\backend.*.log"
 
 $beHealthUrls = @("http://127.0.0.1:8000/health", "http://localhost:8000/health")
-$beReady = Wait-ForHttp -Urls $beHealthUrls -TimeoutSeconds 25 -ServiceName "Backend API" -Process $beProc
+$beReady = Wait-ForHttp -Urls $beHealthUrls -TimeoutSeconds 45 -ServiceName "Backend API" -Process $beProc
 if (-not $beReady) {
     Write-ErrorMsg "Backend API chua phan hoi tren port 8000."
     Show-RecentLog -FilePath $beErrLog -LineCount 15
@@ -590,7 +593,7 @@ if (-not $feReady) {
     Write-Success "Frontend chay an truc tiep qua Node (PID: $fePid); log: .logs\frontend.*.log"
 
     # Cho Frontend san sang (Fail-fast neu process crash, hien thi tien do optimizer neu cold-start)
-    $feReady = Wait-ForPort -Port 3000 -TimeoutSeconds 150 -ServiceName "Frontend UI (Port 3000)" -Process $feProc -OutLogPath $feOutLog
+    $feReady = Wait-ForPort -Port 3000 -TimeoutSeconds 240 -ServiceName "Frontend UI (Port 3000)" -Process $feProc -OutLogPath $feOutLog
     if (-not $feReady -and ($feProc -and $feProc.HasExited)) {
         Write-Step "RETRY" "Khoi dong lai Frontend (retry sau lan scan dependencies dau tien)..."
         $feProc = Start-Process -FilePath "node" -ArgumentList $nodeArgs -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden -RedirectStandardOutput $feOutLog -RedirectStandardError $feErrLog
@@ -616,6 +619,13 @@ $pidData = @{
 Set-Content -Path $PidFile -Value $pidData -Encoding UTF8
 
 # --- 6. DASHBOARD TRUY CAP ---
+if (-not $beReady) {
+    try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+        if ($resp -and $resp.StatusCode -eq 200) { $beReady = $true }
+    } catch { }
+}
+if (-not $feReady -and (Test-PortListening -Port 3000)) { $feReady = $true }
 Write-Header "TONG HOP CAC DICH VU FORMULAGRAPH LAB"
 
 Write-Host "  +-----------------------------------------------------------------------------------------+" -ForegroundColor DarkGreen

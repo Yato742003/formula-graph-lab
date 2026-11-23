@@ -7,7 +7,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Phase 5 sandbox build failed.' }
     $env:TEST_SANDBOX_IMAGE = (& docker image inspect --format '{{.Id}}' $phase5Tag).Trim()
     $env:TEST_PHASE5_CLEAN_REPLAY = '1'
-    & pwsh -NoProfile -File "$PSScriptRoot/test-integration.ps1" -ShowOutput
+    $psExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+    & $psExe -NoProfile -File "$PSScriptRoot/test-integration.ps1" -ShowOutput
     if ($LASTEXITCODE -ne 0) { throw 'Phase 5 acceptance failed.' }
 } finally {
     $env:TEST_SANDBOX_IMAGE = $previousPhase5Image

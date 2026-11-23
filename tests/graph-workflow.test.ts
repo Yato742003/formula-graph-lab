@@ -1,4 +1,37 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const routeMocks = vi.hoisted(() => ({
+  user: vi.fn(),
+  d1First: vi.fn(),
+  d1Bind: vi.fn(),
+  d1Prepare: vi.fn(),
+}));
+
+vi.mock('@/app/chatgpt-auth', () => ({ getChatGPTUser: routeMocks.user }));
+vi.mock('@/db', () => ({
+  getD1: () => ({
+    prepare: (statement: string) => {
+      routeMocks.d1Prepare(statement);
+      return {
+        bind: (...bound: unknown[]) => {
+          routeMocks.d1Bind(...bound);
+          return {
+            first: () => routeMocks.d1First(),
+          };
+        },
+      };
+    },
+  }),
+}));
+vi.mock('cloudflare:workers', () => ({
+  env: {
+    APP_ENV: 'development',
+    GRAPH_API_URL: 'http://localhost:8000',
+    GRAPH_API_SERVICE_TOKEN: 'service-test-secret-with-at-least-32-chars',
+  },
+}));
+
+import { GET } from '../app/api/graph/route';
 import {
   D1GraphSnapshotRepository,
   HttpGraphSnapshotClient,
@@ -81,6 +114,110 @@ describe('D1 graph snapshot selection', () => {
     expect(sql).toContain("p.status = 'ready'");
     expect(sql).toContain('ORDER BY p.updated_at DESC');
     expect(values).toEqual(['ws_owned', 'user-a']);
+  });
+
+  it('filters ownedPaper by optional version when provided', async () => {
+    let sql = '';
+    let values: unknown[] = [];
+    const database = {
+      prepare(statement: string) {
+        sql = statement;
+        return {
+          bind(...bound: unknown[]) {
+            values = bound;
+            return this;
+          },
+          async first() {
+            return { ...paper, version: 5, source_url: 'https://arxiv.org/html/1706.03762v5' };
+          },
+        };
+      },
+    };
+    const repository = new D1GraphSnapshotRepository(
+      database as unknown as D1Database,
+    );
+
+    const matched = await repository.ownedPaper('ws_owned', 'user-a', '1706.03762', 5);
+    expect(matched?.version).toBe(5);
+    expect(sql).toContain('p.arxiv_id = ? AND p.version = ?');
+    expect(values).toEqual(['ws_owned', 'user-a', '1706.03762', 5]);
+
+    await expect(repository.ownedPaper('ws_owned', 'user-a', '1706.03762', 0)).resolves.toBeNull();
+  });
+});
+
+describe('GET /api/graph provenance and query validation', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  it('rejects invalid paper_id and version query parameters with 400 before querying D1', async () => {
+    routeMocks.user.mockResolvedValue({ userId: 'user-a' });
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+
+    const badPaper = await GET(new Request('https://app.test/api/graph?paper_id=not-an-arxiv-id'));
+    expect(badPaper.status).toBe(400);
+    await expect(badPaper.json()).resolves.toEqual({ code: 'INVALID_PAPER_ID' });
+
+    const emptyPaper = await GET(new Request('https://app.test/api/graph?paper_id='));
+    expect(emptyPaper.status).toBe(400);
+    await expect(emptyPaper.json()).resolves.toEqual({ code: 'INVALID_PAPER_ID' });
+
+    const badVersionZero = await GET(new Request('https://app.test/api/graph?paper_id=1706.03762&version=0'));
+    expect(badVersionZero.status).toBe(400);
+    await expect(badVersionZero.json()).resolves.toEqual({ code: 'INVALID_PAPER_VERSION' });
+
+    const badVersionAlpha = await GET(new Request('https://app.test/api/graph?paper_id=1706.03762&version=v2'));
+    expect(badVersionAlpha.status).toBe(400);
+    await expect(badVersionAlpha.json()).resolves.toEqual({ code: 'INVALID_PAPER_VERSION' });
+
+    expect(routeMocks.d1Prepare).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('fails closed with 404 PAPER_NOT_FOUND for unowned or unimported paper_id and never fabricates zeroed hashes', async () => {
+    routeMocks.user.mockResolvedValue({ userId: 'user-a' });
+    routeMocks.d1First.mockResolvedValue(null);
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+
+    const response = await GET(
+      new Request('https://app.test/api/graph?paper_id=2402.08954&version=2&title=Spoofed+Title'),
+    );
+    expect(response.status).toBe(404);
+    const bodyText = await response.text();
+    expect(JSON.parse(bodyText)).toEqual({ code: 'PAPER_NOT_FOUND' });
+    expect(bodyText).not.toContain('0'.repeat(64));
+    expect(bodyText).not.toContain('Spoofed');
+    expect(fetcher).not.toHaveBeenCalled();
+
+    const emptyDefault = await GET(new Request('https://app.test/api/graph'));
+    expect(emptyDefault.status).toBe(200);
+    await expect(emptyDefault.json()).resolves.toEqual({
+      paper: null,
+      nodes: [],
+      edges: [],
+      truncated: false,
+    });
+  });
+
+  it('ignores title query param and queries D1 with the validated paper_id and version', async () => {
+    routeMocks.user.mockResolvedValue({ userId: 'user-a' });
+    routeMocks.d1First.mockResolvedValue(paper);
+    const fetcher = vi.fn(async () => Response.json(graphResponse));
+    vi.stubGlobal('fetch', fetcher);
+
+    const response = await GET(
+      new Request('https://app.test/api/graph?paper_id=1706.03762&version=7&title=Injected+Title'),
+    );
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as { paper: typeof paper };
+    expect(payload.paper.title).toBe('Attention Is All You Need');
+    expect(payload.paper.source_sha256).toBe('a'.repeat(64));
+    expect(routeMocks.d1Bind).toHaveBeenCalledWith(expect.any(String), 'user-a', '1706.03762', 7);
+    expect(fetcher).toHaveBeenCalledOnce();
   });
 });
 
