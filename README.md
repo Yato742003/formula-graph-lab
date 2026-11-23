@@ -10,6 +10,10 @@
 > **Temporal, source-bound mathematical knowledge graph and verification harness.**  
 > FormulaGraph Lab converts scientific research papers into an immutable, provenance-tracked formula graph—strictly separating extracted ground-truth evidence from AI hypotheses, and verifying mathematical transformations through isolated symbolic sandboxes.
 
+| 2D & 3D Formula Evidence Graph & LaTeX Inspector | Reproducible Research Problem Specification (G1 Gate) |
+| :---: | :---: |
+| ![FormulaGraph Lab 2D/3D Graph Viewport](docs/screenshots/evidence-graph-2d.jpg) | ![FormulaGraph Lab Problem Spec Gate](docs/screenshots/research-problem-spec.png) |
+
 ---
 
 ## Key Capabilities
