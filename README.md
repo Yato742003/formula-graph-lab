@@ -44,38 +44,26 @@
 
 ## Architecture
 
-```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      Client Browser (Next.js 15)                        │
-│   ┌───────────────────────────┐       ┌─────────────────────────────┐   │
-│   │   2D Flow View (ReactFlow)│       │   3D Sacred Timeline (WebGL)│   │
-│   └─────────────┬─────────────┘       └──────────────┬──────────────┘   │
-└─────────────────┼────────────────────────────────────┼──────────────────┘
-                  ▼                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│              Next.js Application Proxy & Workspace Layer                │
-│   • Cloudflare D1 Workspace DB       • Auth & Rate Limiting Gate        │
-│   • Keyset Search Pagination         • Signed Graph-API Boundary        │
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │ (mTLS / Signed Service Token)
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                  Python Graph API Service (FastAPI)                     │
-│   ┌───────────────────────────┐       ┌─────────────────────────────┐   │
-│   │  ArXiv HTML/MathML Parser │       │   Hybrid BM25 + Vector Ser. │   │
-│   └─────────────┬─────────────┘       └──────────────┬──────────────┘   │
-│                 │                                    │                  │
-│   ┌─────────────▼─────────────┐       ┌──────────────▼──────────────┐   │
-│   │  AST Verification Engine  │       │  Neo4j Exact Evidence Graph │   │
-│   └─────────────┬─────────────┘       └─────────────────────────────┘   │
-└─────────────────┼───────────────────────────────────────────────────────┘
-                  ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│               Isolated Execution Sandbox (Docker / cgroups)             │
-│   • Zero Network Egress               • Memory Limit: 512 MB            │
-│   • Read-Only Root Filesystem         • Timeout: 10s Wall-Clock         │
-└─────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    UI["Next.js 15 Client (2D ReactFlow + 3D WebGL Timeline)"] --> PROXY["Next.js Proxy & Cloudflare D1 Workspace Layer (Auth · Rate Limit · Keyset Pagination)"]
+    PROXY -->|"Signed Service Token"| API["FastAPI Graph API (Python 3.12)"]
+    API --> EXTRACT["arXiv HTML / MathML / LaTeX Extractor (URL, MIME & Size Gate)"]
+    API --> SEARCH["Hybrid Search (BM25 + Graphiti Vector + 2-Hop Neo4j)"]
+    API --> VERIFY["AST, Dimensional [M^a L^b T^c] & CAS Verifier"]
+    EXTRACT --> NEO4J[("Neo4j 5 Exact Evidence Graph")]
+    SEARCH --> NEO4J
+    VERIFY --> SANDBOX["Ephemeral Docker Sandbox (--cap-drop=ALL · --network=none · 512 MB · 10s · Read-Only RootFS)"]
 ```
+
+---
+
+## Trade-offs & Design Decisions
+
+- **Immutable Evidence vs. AI Hypotheses:** Paper-extracted equations carry cryptographic hashes and source HTML/MathML anchors so LLM proposers can never overwrite ground-truth records; hypotheses live in a separate proposal/verification tier.
+- **Ephemeral Air-Gapped Containers Over In-Process `eval`:** Running symbolic/numerical verification inside non-root Docker containers (`--cap-drop=ALL`, `--network=none`, 512 MB RAM, 10s wall-clock) adds per-job container startup latency in exchange for strict isolation against untrusted mathematical payloads.
+- **Signed Graph-API Boundary (No Direct Browser-to-Neo4j Access):** Routing all queries through Next.js proxy + signed service tokens enforces tenant isolation, distributed quota checks, and keyset pagination before touching Neo4j.
+- **Fail-Closed Supply-Chain Security Gates:** Container CVE scans in `.github/workflows/security-gates.yml` intentionally omit `--ignore-unfixed` and `continue-on-error` (enforced by `test_deployment_security.py`), prioritizing explicit operator risk sign-off over green-by-default badges.
 
 ---
 
