@@ -18,13 +18,14 @@ def configure_telemetry() -> None:
         logger.addHandler(logging.StreamHandler())
 
 
-def emit_event(event: str, **fields: object) -> None:
+def emit_event(event: str, *, level: int = logging.INFO, **fields: object) -> None:
+    extra = {"severity": logging.getLevelName(level).lower()} if level != logging.INFO else {}
     payload = SensitiveDataFilter()._sanitize_value("", {
-        **fields, **request_context.get(), "event": event,
+        **fields, **extra, **request_context.get(), "event": event,
         "timestamp": datetime.now(UTC).isoformat(),
     })
-    # Emit at INFO; deployments must explicitly collect fgl.telemetry at INFO.
-    logger.info("%s", json.dumps(payload, separators=(",", ":"), allow_nan=False))
+    # Emit at INFO+; deployments must explicitly collect fgl.telemetry at INFO.
+    logger.log(level, "%s", json.dumps(payload, separators=(",", ":"), allow_nan=False))
 
 
 class RequestTelemetryMiddleware:

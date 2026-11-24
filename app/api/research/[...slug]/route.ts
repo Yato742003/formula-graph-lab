@@ -1,5 +1,6 @@
 import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { getD1 } from '@/db';
+import { emitBffTelemetry, newBffRequestId, safeUpstreamRequestId } from '@/lib/server/bff-telemetry';
 import { isSameOriginRequest } from '@/lib/server/request-origin';
 import { D1WorkspaceAccess } from '@/lib/server/evidence-search';
 import { signedGraphHeaders } from '@/lib/server/graph-service-auth';
@@ -7,24 +8,30 @@ import { assertDeclaredLengthWithinLimit, PayloadTooLargeError, readTextLimited 
 import { resolveGraphApiConfiguration, workspaceIdentifierForUser } from '@/lib/server/paper-import';
 import { env } from 'cloudflare:workers';
 
-function json(body: unknown, status: number) {
-  return Response.json(body, { status, headers: {
+function json(body: unknown, status: number, requestId: string, upstreamRequestId?: string) {
+  const headers: Record<string, string> = {
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
-  } });
+    'x-request-id': requestId,
+  };
+  if (upstreamRequestId) {
+    headers['x-upstream-request-id'] = upstreamRequestId;
+  }
+  return Response.json(body, { status, headers });
 }
 
 type Context = { params: Promise<{ slug: string[] }> };
 
 async function forward(request: Request, { params }: Context) {
+  const bffRequestId = newBffRequestId();
   const user = await getChatGPTUser();
-  if (!user) return json({ code: 'AUTH_REQUIRED' }, 401);
+  if (!user) return json({ code: 'AUTH_REQUIRED' }, 401, bffRequestId);
   if (!isSameOriginRequest(request)) {
-    return json({ code: 'CROSS_SITE_REQUEST_REJECTED' }, 403);
+    return json({ code: 'CROSS_SITE_REQUEST_REJECTED' }, 403, bffRequestId);
   }
   const { slug } = await params;
   if (!slug.length || slug.some(part => !/^[a-zA-Z0-9_-]{1,200}$/.test(part))) {
-    return json({ code: 'UNKNOWN_RESEARCH_ROUTE' }, 404);
+    return json({ code: 'UNKNOWN_RESEARCH_ROUTE' }, 404, bffRequestId);
   }
   const [collection, identifier, action] = slug;
   const collections = ['problems', 'lineage', 'compatibility', 'candidates', 'proposals', 'evolution', 'ops'];
@@ -74,11 +81,15 @@ async function forward(request: Request, { params }: Context) {
     action === 'confirm' && slug.length === 3;
   const isEvolutionBundle = isRead && collection === 'evolution' && isEvolutionId &&
     action === 'bundle' && slug.length === 3;
+  const isOpsReconcile = !isRead && collection === 'ops' &&
+    identifier === 'jobs' &&
+    Boolean(action && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(action)) &&
+    slug[3] === 'reconcile' && slug.length === 4;
   const isOps = collection === 'ops' && (
     (isRead && identifier === 'dashboard' && slug.length === 2) ||
     (!isRead && identifier === 'jobs' && action === 'recover' && slug.length === 3)
   );
-  const validRoute = isOps || isCompile || isProposalReview || isProposalGenerate || isProposalCapabilities || isAdmission || isVerification || isNumericalFixture || isResearchCase || isProtocolReview || isReplayBundle || isReplayReport || isEvolutionReport || isEvolutionFinalists || isEvolutionStop || isEvolutionGeneration || isEvolutionConfirm || isEvolutionBundle || (
+  const validRoute = isOps || isOpsReconcile || isCompile || isProposalReview || isProposalGenerate || isProposalCapabilities || isAdmission || isVerification || isNumericalFixture || isResearchCase || isProtocolReview || isReplayBundle || isReplayReport || isEvolutionReport || isEvolutionFinalists || isEvolutionStop || isEvolutionGeneration || isEvolutionConfirm || isEvolutionBundle || (
     collection === 'proposals'
       ? (isRead && slug.length === 1) || isProposalReview || isProposalGenerate || isProposalCapabilities
       : collection === 'evolution'
@@ -90,7 +101,7 @@ async function forward(request: Request, { params }: Context) {
       (slug.length === 2 && collection === 'lineage' && identifier === 'coverage') ||
       (slug.length === 3 && collection !== 'problems' && action === 'reviews')))
   ));
-  if (!validRoute) return json({ code: 'UNKNOWN_RESEARCH_ROUTE' }, 404);
+  if (!validRoute) return json({ code: 'UNKNOWN_RESEARCH_ROUTE' }, 404, bffRequestId);
 
   const url = new URL(request.url);
   const queryKeys = identifier === 'traverse' && collection === 'lineage'
@@ -102,12 +113,12 @@ async function forward(request: Request, { params }: Context) {
     : slug.length === 1 ? ['limit', 'offset', ...(collection === 'lineage' ? ['relation_type'] : [])] : [];
   const expectedBundleHash = url.searchParams.get('bundle_hash');
   if (isReplayBundle && expectedBundleHash !== null && !/^[a-f0-9]{64}$/.test(expectedBundleHash)) {
-    return json({ code: 'INVALID_RESEARCH_QUERY' }, 400);
+    return json({ code: 'INVALID_RESEARCH_QUERY' }, 400, bffRequestId);
   }
   if ([...url.searchParams.keys()].some(key =>
     !isRead || !queryKeys.includes(key) || url.searchParams.getAll(key).length !== 1) ||
       url.search.length > 2048) {
-    return json({ code: 'INVALID_RESEARCH_QUERY' }, 400);
+    return json({ code: 'INVALID_RESEARCH_QUERY' }, 400, bffRequestId);
   }
 
   let body: string | undefined;
@@ -115,17 +126,19 @@ async function forward(request: Request, { params }: Context) {
   let key = '';
   if (!isRead) {
     if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
-      return json({ code: 'JSON_REQUIRED' }, 415);
+      return json({ code: 'JSON_REQUIRED' }, 415, bffRequestId);
     }
     key = request.headers.get('x-idempotency-key')?.trim() ?? '';
     if (!/^[\x20-\x7e]{1,200}$/.test(key)) {
-      return json({ code: 'IDEMPOTENCY_KEY_REQUIRED' }, 400);
+      return json({ code: 'IDEMPOTENCY_KEY_REQUIRED' }, 400, bffRequestId);
     }
     try {
       assertDeclaredLengthWithinLimit(request.headers, 64 * 1024);
       body = await readTextLimited(request.body, 64 * 1024);
       const input = JSON.parse(body);
-      const allowed = isOps
+      const allowed = isOpsReconcile
+        ? ['decision', 'notes']
+        : isOps
         ? []
         : isCompile
         ? ['spec_id', 'mapping_id', 'transform', 'parent_candidate_id', 'proposal_id']
@@ -148,33 +161,42 @@ async function forward(request: Request, { params }: Context) {
         : ['relation_type', 'source', 'target', 'evidence', 'description'];
       if (!input || typeof input !== 'object' || Array.isArray(input) ||
           Object.keys(input).some(field => !allowed.includes(field))) {
-        return json({ code: 'INVALID_RESEARCH_REQUEST' }, 400);
+        return json({ code: 'INVALID_RESEARCH_REQUEST' }, 400, bffRequestId);
       }
       writeInput = input as Record<string, unknown>;
     } catch (error) {
       return json({ code: error instanceof PayloadTooLargeError ? 'REQUEST_TOO_LARGE' : 'INVALID_RESEARCH_REQUEST' },
-        error instanceof PayloadTooLargeError ? 413 : 400);
+        error instanceof PayloadTooLargeError ? 413 : 400, bffRequestId);
     }
   }
   const workspaceId = await workspaceIdentifierForUser(user.userId);
   try {
     if (!await new D1WorkspaceAccess(getD1()).isOwned(workspaceId, user.userId)) {
-      return json({ code: 'WORKSPACE_NOT_FOUND' }, 404);
+      return json({ code: 'WORKSPACE_NOT_FOUND' }, 404, bffRequestId);
     }
   } catch {
-    return json({ code: 'DATABASE_UNAVAILABLE' }, 503);
+    emitBffTelemetry('bff_research_proxy', {
+      bff_request_id: bffRequestId,
+      workspace_id: workspaceId,
+      collection,
+      method: request.method,
+      status: 503,
+      code: 'DATABASE_UNAVAILABLE',
+    });
+    return json({ code: 'DATABASE_UNAVAILABLE' }, 503, bffRequestId);
   }
   const configuration = resolveGraphApiConfiguration({
     GRAPH_API_URL: env.GRAPH_API_URL,
     GRAPH_API_SERVICE_TOKEN: env.GRAPH_API_SERVICE_TOKEN,
   }, !import.meta.env.DEV || env.APP_ENV !== 'development');
-  if (!configuration) return json({ code: 'GRAPH_API_NOT_CONFIGURED' }, 503);
+  if (!configuration) return json({ code: 'GRAPH_API_NOT_CONFIGURED' }, 503, bffRequestId);
   const upstreamBody = isCompile
     ? JSON.stringify({ ...writeInput, workspace_id: workspaceId })
     : body;
+  const upstreamUrl = new URL('/v1/research/' + slug.join('/') + url.search, configuration.baseUrl);
+  const method = isRead ? 'GET' : 'POST';
+  let upstreamRequestId: string | undefined;
   try {
-    const upstreamUrl = new URL('/v1/research/' + slug.join('/') + url.search, configuration.baseUrl);
-    const method = isRead ? 'GET' : 'POST';
     const response = await fetch(upstreamUrl, {
       method,
       headers: await signedGraphHeaders(configuration, upstreamUrl, method, upstreamBody,
@@ -183,15 +205,68 @@ async function forward(request: Request, { params }: Context) {
       redirect: 'manual',
       signal: AbortSignal.timeout(isProposalGenerate ? 100_000 : isEvolutionConfirm ? 75_000 : isResearchCase || isEvolutionGeneration ? 45_000 : isNumericalFixture ? 45_000 : 20_000),
     });
+    upstreamRequestId = safeUpstreamRequestId(response.headers);
     if (response.status < 200 || response.status >= 300 && response.status < 400) {
       await response.body?.cancel();
-      return json({ code: 'UPSTREAM_INVALID_RESPONSE' }, 502);
+      emitBffTelemetry('bff_research_proxy', {
+        bff_request_id: bffRequestId,
+        upstream_request_id: upstreamRequestId,
+        workspace_id: workspaceId,
+        collection,
+        method,
+        status: 502,
+        code: 'UPSTREAM_INVALID_RESPONSE',
+      });
+      return json({ code: 'UPSTREAM_INVALID_RESPONSE' }, 502, bffRequestId, upstreamRequestId);
     }
     assertDeclaredLengthWithinLimit(response.headers, 4 * 1024 * 1024);
-    const data = JSON.parse(await readTextLimited(response.body, 4 * 1024 * 1024));
-    return json(data, response.status);
+    const data = JSON.parse(await readTextLimited(response.body, 4 * 1024 * 1024)) as Record<string, unknown>;
+    const payloadObj = data && typeof data === 'object' ? data : {};
+    const nestedCandidate = payloadObj.candidate as Record<string, unknown> | undefined;
+    const nestedCampaign = payloadObj.campaign as Record<string, unknown> | undefined;
+    const nestedDecision = payloadObj.decision as Record<string, unknown> | undefined;
+    const nestedProposal = payloadObj.proposal as Record<string, unknown> | undefined;
+    const nestedResult = payloadObj.result as Record<string, unknown> | undefined;
+    emitBffTelemetry('bff_research_proxy', {
+      bff_request_id: bffRequestId,
+      upstream_request_id: upstreamRequestId,
+      workspace_id: workspaceId,
+      collection,
+      method,
+      status: response.status,
+      spec_id:
+        (collection === 'problems' && identifier && !['compare', 'readiness'].includes(identifier)
+          ? identifier
+          : undefined) ??
+        payloadObj.spec_id ??
+        writeInput?.spec_id,
+      candidate_id:
+        (collection === 'candidates' && identifier?.startsWith('cand_') ? identifier : undefined) ??
+        nestedCandidate?.candidate_id ??
+        payloadObj.candidate_id,
+      evolution_id:
+        (isEvolutionId ? identifier : undefined) ?? nestedCampaign?.evolution_id ?? payloadObj.evolution_id,
+      proposal_id:
+        (collection === 'proposals' && identifier?.startsWith('prop_') ? identifier : undefined) ??
+        nestedProposal?.proposal_id,
+      decision_id: nestedDecision?.decision_id,
+      job_id: (isOpsReconcile ? action : undefined) ?? payloadObj.job_id ?? nestedResult?.run_id,
+      reconciliation_id: payloadObj.reconciliation_id,
+      replayed: typeof payloadObj.replayed === 'boolean' ? payloadObj.replayed : undefined,
+    });
+    return json(data, response.status, bffRequestId, upstreamRequestId);
   } catch (error) {
-    return json({ code: error instanceof PayloadTooLargeError ? 'UPSTREAM_RESPONSE_TOO_LARGE' : 'UPSTREAM_UNAVAILABLE' }, 502);
+    const code = error instanceof PayloadTooLargeError ? 'UPSTREAM_RESPONSE_TOO_LARGE' : 'UPSTREAM_UNAVAILABLE';
+    emitBffTelemetry('bff_research_proxy', {
+      bff_request_id: bffRequestId,
+      upstream_request_id: upstreamRequestId,
+      workspace_id: workspaceId,
+      collection,
+      method,
+      status: 502,
+      code,
+    });
+    return json({ code }, 502, bffRequestId, upstreamRequestId);
   }
 }
 

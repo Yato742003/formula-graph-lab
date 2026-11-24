@@ -1,7 +1,54 @@
 'use client';
 
-import { Activity, AlertTriangle, CheckCircle2, Cpu, HardDrive, Layers, RefreshCw, ShieldCheck } from 'lucide-react';
+import { Activity, AlertTriangle, CheckCircle2, Cpu, HardDrive, Layers, Lock, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
+
+export type DeadLetterPriorState = 'queued' | 'running' | 'unknown';
+export type DeadLetterReconciliationStatus =
+  | 'pending'
+  | 'quarantined'
+  | 'retry_authorized'
+  | 'reconciled_receipt';
+export type DeadLetterReconcileDecision =
+  | 'quarantine'
+  | 'authorize_retry'
+  | 'reconcile_receipt';
+
+export interface DeadLetterJob {
+  job_id: string;
+  operation: string;
+  target_uuid: string;
+  prior_state: DeadLetterPriorState;
+  failure_reason: string | null;
+  reconciliation_status: DeadLetterReconciliationStatus;
+  reserved_ms: number;
+  reservation_retained: boolean;
+  retry_eligible: boolean;
+  authorized_retry_key: string | null;
+  reconciled_receipt_id: string | null;
+  recovered_at: number | null;
+  reconciled_at: string | null;
+  reconciled_by: string | null;
+}
+
+export interface DeadLetterReconcileResult {
+  reconciliation_id: string;
+  job_id: string;
+  workspace_id: string;
+  operation: string;
+  target_uuid: string;
+  prior_state: DeadLetterPriorState;
+  decision: DeadLetterReconcileDecision;
+  reconciliation_status: DeadLetterReconciliationStatus;
+  reserved_ms: number;
+  reservation_retained: boolean;
+  receipt_found: boolean;
+  reconciled_receipt_id: string | null;
+  authorized_retry_key: string | null;
+  reconciled_by: string;
+  reconciled_at: string;
+  replayed: boolean;
+}
 
 interface Subsystems {
   import?: {
@@ -33,6 +80,8 @@ interface Subsystems {
       finished?: number;
       failed?: number;
       stuck?: number;
+      dead_letter_pending?: number;
+      dead_letter_quarantined?: number;
     };
   };
   quotas?: {
@@ -50,6 +99,7 @@ interface OpsDashboardData {
   actor_id?: string;
   checked_at: string;
   subsystems?: Subsystems;
+  dead_letters?: DeadLetterJob[];
   quotas?: {
     status?: string;
     max_request_bytes?: number;
@@ -63,6 +113,70 @@ interface RecoveryResult {
   recovered_count: number;
   recovered_job_ids: string[];
   recovered_at: string;
+}
+
+const VALID_PRIOR_STATES = new Set<DeadLetterPriorState>(['queued', 'running', 'unknown']);
+const VALID_RECONCILIATION_STATUSES = new Set<DeadLetterReconciliationStatus>([
+  'pending',
+  'quarantined',
+  'retry_authorized',
+  'reconciled_receipt',
+]);
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string';
+}
+
+function isDeadLetterJob(value: unknown): value is DeadLetterJob {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const job = value as Record<string, unknown>;
+  return (
+    isNonEmptyString(job.job_id) &&
+    isNonEmptyString(job.operation) &&
+    isNonEmptyString(job.target_uuid) &&
+    typeof job.prior_state === 'string' &&
+    VALID_PRIOR_STATES.has(job.prior_state as DeadLetterPriorState) &&
+    isNullableString(job.failure_reason) &&
+    typeof job.reconciliation_status === 'string' &&
+    VALID_RECONCILIATION_STATUSES.has(job.reconciliation_status as DeadLetterReconciliationStatus) &&
+    typeof job.reserved_ms === 'number' &&
+    Number.isFinite(job.reserved_ms) &&
+    job.reserved_ms >= 0 &&
+    typeof job.reservation_retained === 'boolean' &&
+    typeof job.retry_eligible === 'boolean' &&
+    isNullableString(job.authorized_retry_key) &&
+    isNullableString(job.reconciled_receipt_id) &&
+    (job.recovered_at === null || (typeof job.recovered_at === 'number' && Number.isFinite(job.recovered_at))) &&
+    isNullableString(job.reconciled_at) &&
+    isNullableString(job.reconciled_by)
+  );
+}
+
+function createIdempotencyKey(prefix: string): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  const raw = `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  return raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+}
+
+function reconciliationDotColor(status: DeadLetterReconciliationStatus): string {
+  switch (status) {
+    case 'pending':
+      return 'oklch(72% 0.13 75)';
+    case 'quarantined':
+      return 'oklch(58% 0.15 25)';
+    case 'retry_authorized':
+      return 'oklch(62% 0.12 240)';
+    case 'reconciled_receipt':
+      return 'oklch(60% 0.12 150)';
+  }
 }
 
 function parseDashboard(value: unknown): OpsDashboardData {
@@ -94,6 +208,11 @@ function parseDashboard(value: unknown): OpsDashboardData {
       }
     }
   }
+  if (data.dead_letters !== undefined) {
+    if (!Array.isArray(data.dead_letters) || !data.dead_letters.every(isDeadLetterJob)) {
+      throw new Error('Operations dead-letter ledger is invalid.');
+    }
+  }
   return value as OpsDashboardData;
 }
 
@@ -107,6 +226,10 @@ export function OpsDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [recovering, setRecovering] = useState(false);
   const [recoveryResult, setRecoveryResult] = useState<RecoveryResult | null>(null);
+  const [rationaleByJob, setRationaleByJob] = useState<Record<string, string>>({});
+  const [validationByJob, setValidationByJob] = useState<Record<string, string>>({});
+  const [reconcilingJobId, setReconcilingJobId] = useState<string | null>(null);
+  const [reconcileResult, setReconcileResult] = useState<DeadLetterReconcileResult | null>(null);
 
   const fetchDashboard = useCallback(async () => {
     setLoading(true);
@@ -180,6 +303,54 @@ export function OpsDashboard() {
     }
   };
 
+  const handleReconcile = async (job: DeadLetterJob, decision: DeadLetterReconcileDecision) => {
+    const notes = (rationaleByJob[job.job_id] ?? '').trim();
+    if (notes.length < 3) {
+      setValidationByJob((prev) => ({
+        ...prev,
+        [job.job_id]: 'Rationale must be at least 3 characters.',
+      }));
+      return;
+    }
+    if (decision === 'authorize_retry' && (job.prior_state !== 'queued' || !job.retry_eligible)) {
+      return;
+    }
+
+    setValidationByJob((prev) => {
+      const next = { ...prev };
+      delete next[job.job_id];
+      return next;
+    });
+    setReconcilingJobId(job.job_id);
+    setError(null);
+    try {
+      const response = await fetch(`/api/research/ops/jobs/${encodeURIComponent(job.job_id)}/reconcile`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          'x-idempotency-key': createIdempotencyKey('reconcile'),
+        },
+        body: JSON.stringify({ decision, notes }),
+      });
+      if (!response.ok) {
+        throw new Error(`Dead-letter reconciliation failed: HTTP ${response.status}`);
+      }
+      const result = (await response.json()) as DeadLetterReconcileResult;
+      setReconcileResult(result);
+      setRationaleByJob((prev) => {
+        const next = { ...prev };
+        delete next[job.job_id];
+        return next;
+      });
+      await fetchDashboard();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Dead-letter reconciliation failed');
+    } finally {
+      setReconcilingJobId(null);
+    }
+  };
+
   // Safe normalized telemetry values preventing undefined property crashes
   const quotas = data?.quotas ?? data?.subsystems?.quotas;
   const rateLimitRpm = quotas?.rate_limit_per_minute ?? quotas?.workspace_rate_limit_rpm ?? 120;
@@ -205,6 +376,13 @@ export function OpsDashboard() {
   const activeRunning = workerSub?.active_running ?? metrics?.active_running ?? 0;
   const finishedJobs = workerSub?.finished_jobs ?? metrics?.finished ?? 0;
   const stuckJobs = workerSub?.stuck_jobs ?? metrics?.stuck ?? 0;
+  const deadLetters = data?.dead_letters ?? [];
+  const deadLetterPendingCount =
+    metrics?.dead_letter_pending ??
+    deadLetters.filter((job) => job.reconciliation_status === 'pending').length;
+  const deadLetterQuarantinedCount =
+    metrics?.dead_letter_quarantined ??
+    deadLetters.filter((job) => job.reconciliation_status === 'quarantined').length;
 
   const unavailable = Boolean(error) || !data || !importSub || !checkerSub || !workerSub ||
     workerStatus === 'unavailable';
@@ -557,6 +735,413 @@ export function OpsDashboard() {
             </dl>
           </article>
         </div>
+      )}
+
+      {/* Dead-Letter & Reconciliation Ledger */}
+      {data && (
+        <section
+          className="ops-card"
+          aria-labelledby="dead-letter-ledger-heading"
+          style={{ marginTop: '16px', padding: '16px', gap: '12px' }}
+        >
+          <div className="ops-card-header" style={{ flexWrap: 'wrap', gap: '8px' }}>
+            <h2 id="dead-letter-ledger-heading" className="ops-card-title">
+              <Lock size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
+              Dead-Letter &amp; Reconciliation Ledger
+            </h2>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+                fontSize: '12px',
+                fontFamily: 'var(--font-geist-mono, monospace)',
+                fontVariantNumeric: 'tabular-nums',
+                color: 'var(--muted-foreground)',
+              }}
+            >
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: '6px',
+                    height: '6px',
+                    borderRadius: '9999px',
+                    background: reconciliationDotColor('pending'),
+                  }}
+                />
+                pending: <strong style={{ color: 'var(--foreground)' }}>{deadLetterPendingCount}</strong>
+              </span>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: '6px',
+                    height: '6px',
+                    borderRadius: '9999px',
+                    background: reconciliationDotColor('quarantined'),
+                  }}
+                />
+                quarantined: <strong style={{ color: 'var(--foreground)' }}>{deadLetterQuarantinedCount}</strong>
+              </span>
+            </div>
+          </div>
+
+          <div
+            style={{
+              padding: '8px 12px',
+              borderRadius: '6px',
+              border: '1px solid var(--border)',
+              background: 'var(--accent)',
+              fontSize: '11px',
+              lineHeight: 1.45,
+              color: 'var(--muted-foreground)',
+            }}
+          >
+            <strong style={{ color: 'var(--foreground)', fontWeight: 600 }}>Safety invariants:</strong>{' '}
+            reservations (<code style={{ fontFamily: 'var(--font-geist-mono, monospace)' }}>reserved_ms</code>) stay consumed (
+            <code style={{ fontFamily: 'var(--font-geist-mono, monospace)' }}>retained</code>), uncertain{' '}
+            <code style={{ fontFamily: 'var(--font-geist-mono, monospace)' }}>running</code> jobs cannot be auto-retried, and
+            recovery never promotes campaign winners.
+          </div>
+
+          {reconcileResult && (
+            <output
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: '12px',
+                padding: '8px 12px',
+                borderRadius: '6px',
+                border: '1px solid var(--border)',
+                background: 'var(--card)',
+                fontSize: '12px',
+                color: 'var(--foreground)',
+              }}
+            >
+              <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                Reconciled <code style={{ fontFamily: 'var(--font-geist-mono, monospace)' }}>{reconcileResult.job_id}</code>{' '}
+                &rarr; <strong>{reconcileResult.reconciliation_status}</strong> ({reconcileResult.reserved_ms} ms{' '}
+                {reconcileResult.reservation_retained ? 'retained' : 'released'})
+                {reconcileResult.authorized_retry_key && (
+                  <>
+                    {' '}
+                    &bull; retry key:{' '}
+                    <code style={{ fontFamily: 'var(--font-geist-mono, monospace)' }}>
+                      {reconcileResult.authorized_retry_key}
+                    </code>
+                  </>
+                )}
+                {reconcileResult.reconciled_receipt_id && (
+                  <>
+                    {' '}
+                    &bull; receipt:{' '}
+                    <code style={{ fontFamily: 'var(--font-geist-mono, monospace)' }}>
+                      {reconcileResult.reconciled_receipt_id}
+                    </code>
+                  </>
+                )}
+                {reconcileResult.replayed && ' (idempotent replay)'}
+              </span>
+              <button
+                type="button"
+                onClick={() => setReconcileResult(null)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  fontSize: '11px',
+                  color: 'var(--muted-foreground)',
+                  cursor: 'pointer',
+                  textDecoration: 'underline',
+                }}
+              >
+                Dismiss
+              </button>
+            </output>
+          )}
+
+          {deadLetters.length === 0 ? (
+            <div
+              style={{
+                padding: '12px',
+                borderRadius: '6px',
+                border: '1px dashed var(--border)',
+                fontSize: '12px',
+                color: 'var(--muted-foreground)',
+                fontVariantNumeric: 'tabular-nums',
+              }}
+            >
+              <strong style={{ color: 'var(--foreground)' }}>0 dead-letter jobs awaiting reconciliation</strong>
+              <span style={{ marginLeft: '8px' }}>
+                Swept jobs appear here for receipt inspection, quarantine, or queued-only retry authorization.
+              </span>
+            </div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table
+                style={{
+                  width: '100%',
+                  borderCollapse: 'collapse',
+                  fontSize: '12px',
+                }}
+              >
+                <thead>
+                  <tr
+                    style={{
+                      borderBottom: '1px solid var(--border)',
+                      color: 'var(--muted-foreground)',
+                      fontSize: '11px',
+                      textAlign: 'left',
+                    }}
+                  >
+                    <th style={{ padding: '8px 12px', fontWeight: 600 }}>Job / Target</th>
+                    <th style={{ padding: '8px 12px', fontWeight: 600 }}>Operation</th>
+                    <th style={{ padding: '8px 12px', fontWeight: 600 }}>Prior State</th>
+                    <th style={{ padding: '8px 12px', fontWeight: 600, textAlign: 'right' }}>Budget</th>
+                    <th style={{ padding: '8px 12px', fontWeight: 600 }}>Status</th>
+                    <th style={{ padding: '8px 12px', fontWeight: 600 }}>Reconciliation</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {deadLetters.map((job) => {
+                    const isActionable =
+                      job.reconciliation_status === 'pending' || job.reconciliation_status === 'quarantined';
+                    const retryBlocked = job.prior_state !== 'queued' || !job.retry_eligible;
+                    const isBusy = reconcilingJobId === job.job_id;
+                    const rowValidation = validationByJob[job.job_id];
+                    const priorLabel =
+                      job.prior_state === 'queued'
+                        ? 'queued'
+                        : job.prior_state === 'running'
+                        ? 'running · uncertain'
+                        : 'unknown · uncertain';
+
+                    return (
+                      <tr
+                        key={job.job_id}
+                        style={{
+                          borderBottom: '1px solid color-mix(in oklab, var(--border) 60%, transparent)',
+                          verticalAlign: 'top',
+                        }}
+                      >
+                        <td
+                          style={{
+                            padding: '8px 12px',
+                            fontFamily: 'var(--font-geist-mono, monospace)',
+                            fontVariantNumeric: 'tabular-nums slashed-zero',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          <div style={{ color: 'var(--foreground)', fontWeight: 600 }}>{job.job_id}</div>
+                          <div style={{ fontSize: '11px', color: 'var(--muted-foreground)' }}>{job.target_uuid}</div>
+                        </td>
+                        <td style={{ padding: '8px 12px' }}>
+                          <div style={{ color: 'var(--foreground)', fontWeight: 500 }}>{job.operation}</div>
+                          {job.failure_reason && (
+                            <div
+                              style={{
+                                fontSize: '11px',
+                                color: 'var(--muted-foreground)',
+                                fontFamily: 'var(--font-geist-mono, monospace)',
+                              }}
+                            >
+                              {job.failure_reason}
+                            </div>
+                          )}
+                        </td>
+                        <td
+                          style={{
+                            padding: '8px 12px',
+                            fontFamily: 'var(--font-geist-mono, monospace)',
+                            whiteSpace: 'nowrap',
+                            color: job.prior_state === 'queued' ? 'var(--foreground)' : 'oklch(72% 0.13 75)',
+                          }}
+                        >
+                          {priorLabel}
+                        </td>
+                        <td
+                          style={{
+                            padding: '8px 12px',
+                            textAlign: 'right',
+                            fontFamily: 'var(--font-geist-mono, monospace)',
+                            fontVariantNumeric: 'tabular-nums',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          <div style={{ color: 'var(--foreground)', fontWeight: 600 }}>{job.reserved_ms} ms</div>
+                          <div style={{ fontSize: '11px', color: 'var(--muted-foreground)' }}>
+                            {job.reservation_retained ? 'retained' : 'released'}
+                          </div>
+                        </td>
+                        <td style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>
+                          <div
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '6px',
+                              fontFamily: 'var(--font-geist-mono, monospace)',
+                              color: 'var(--foreground)',
+                            }}
+                          >
+                            <span
+                              aria-hidden="true"
+                              style={{
+                                width: '6px',
+                                height: '6px',
+                                borderRadius: '9999px',
+                                background: reconciliationDotColor(job.reconciliation_status),
+                                flexShrink: 0,
+                              }}
+                            />
+                            {job.reconciliation_status}
+                          </div>
+                          {job.authorized_retry_key && (
+                            <div
+                              style={{
+                                fontSize: '11px',
+                                color: 'var(--muted-foreground)',
+                                fontFamily: 'var(--font-geist-mono, monospace)',
+                                fontVariantNumeric: 'tabular-nums slashed-zero',
+                              }}
+                            >
+                              retry: {job.authorized_retry_key}
+                            </div>
+                          )}
+                          {job.reconciled_receipt_id && (
+                            <div
+                              style={{
+                                fontSize: '11px',
+                                color: 'var(--muted-foreground)',
+                                fontFamily: 'var(--font-geist-mono, monospace)',
+                                fontVariantNumeric: 'tabular-nums slashed-zero',
+                              }}
+                            >
+                              receipt: {job.reconciled_receipt_id}
+                            </div>
+                          )}
+                        </td>
+                        <td style={{ padding: '8px 12px', minWidth: '280px' }}>
+                          {isActionable ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                              <input
+                                type="text"
+                                aria-label={`Reconciliation rationale for ${job.job_id}`}
+                                placeholder="Rationale (min 3 chars)"
+                                value={rationaleByJob[job.job_id] ?? ''}
+                                disabled={isBusy}
+                                onChange={(event) => {
+                                  const nextValue = event.target.value;
+                                  setRationaleByJob((prev) => ({ ...prev, [job.job_id]: nextValue }));
+                                  if (nextValue.trim().length >= 3 && rowValidation) {
+                                    setValidationByJob((prev) => {
+                                      const next = { ...prev };
+                                      delete next[job.job_id];
+                                      return next;
+                                    });
+                                  }
+                                }}
+                                style={{
+                                  width: '100%',
+                                  padding: '4px 8px',
+                                  borderRadius: '6px',
+                                  border: '1px solid var(--border)',
+                                  background: 'var(--card)',
+                                  color: 'var(--foreground)',
+                                  fontSize: '12px',
+                                  boxSizing: 'border-box',
+                                }}
+                              />
+                              {rowValidation && (
+                                <div style={{ fontSize: '11px', color: 'oklch(58% 0.15 25)' }}>{rowValidation}</div>
+                              )}
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => {
+                                    void handleReconcile(job, 'quarantine');
+                                  }}
+                                  style={{
+                                    padding: '4px 8px',
+                                    borderRadius: '6px',
+                                    border: '1px solid var(--border)',
+                                    background: 'var(--card)',
+                                    color: 'var(--foreground)',
+                                    fontSize: '11px',
+                                    fontWeight: 600,
+                                    cursor: isBusy ? 'not-allowed' : 'pointer',
+                                  }}
+                                >
+                                  Quarantine
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => {
+                                    void handleReconcile(job, 'reconcile_receipt');
+                                  }}
+                                  style={{
+                                    padding: '4px 8px',
+                                    borderRadius: '6px',
+                                    border: '1px solid var(--border)',
+                                    background: 'var(--card)',
+                                    color: 'var(--foreground)',
+                                    fontSize: '11px',
+                                    fontWeight: 600,
+                                    cursor: isBusy ? 'not-allowed' : 'pointer',
+                                  }}
+                                >
+                                  Check Receipt
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isBusy || retryBlocked}
+                                  title={
+                                    retryBlocked
+                                      ? 'Uncertain jobs that reached running state cannot be retried'
+                                      : 'Authorize retry for queued job'
+                                  }
+                                  onClick={() => {
+                                    void handleReconcile(job, 'authorize_retry');
+                                  }}
+                                  style={{
+                                    padding: '4px 8px',
+                                    borderRadius: '6px',
+                                    border: '1px solid var(--border)',
+                                    background: 'var(--card)',
+                                    color: retryBlocked ? 'var(--muted-foreground)' : 'var(--foreground)',
+                                    fontSize: '11px',
+                                    fontWeight: 600,
+                                    opacity: retryBlocked || isBusy ? 0.55 : 1,
+                                    cursor: retryBlocked || isBusy ? 'not-allowed' : 'pointer',
+                                  }}
+                                >
+                                  Authorize Retry
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div
+                              style={{
+                                fontSize: '11px',
+                                color: 'var(--muted-foreground)',
+                                fontFamily: 'var(--font-geist-mono, monospace)',
+                              }}
+                            >
+                              {job.reconciled_by ?? 'operator'}
+                              {job.reconciled_at ? ` · ${job.reconciled_at}` : ''}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
       )}
     </div>
   );

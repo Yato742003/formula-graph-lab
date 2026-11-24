@@ -221,6 +221,52 @@ describe('authenticated paper import workflow', () => {
       client.importEvidence('https://arxiv.org/html/2402.08954', 'ws_safe', 'user-1'),
     ).rejects.toMatchObject({ code: 'GRAPH_API_RESPONSE_TOO_LARGE' });
   });
+
+  it('correlates BFF import telemetry with upstream request ID and scrubs raw URLs', async () => {
+    const repository = new MemoryRepository();
+    const upstreamReqId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const logs: string[] = [];
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation((msg) => {
+      logs.push(String(msg));
+    });
+    const fetchImplementation = vi.fn(async () =>
+      Response.json(graphResponse, { headers: { 'x-request-id': upstreamReqId } }),
+    ) as unknown as typeof fetch;
+    const client = new HttpGraphImportClient(
+      {
+        baseUrl: new URL('https://graph.example'),
+        serviceToken: 'service-test-secret-with-at-least-32-chars',
+      },
+      fetchImplementation,
+    );
+
+    try {
+      const result = await runPaperImport({
+        canonicalUrl: 'https://arxiv.org/html/2402.08954',
+        userId: 'user-telemetry-1',
+        repository,
+        graphClient: client,
+        now: () => 1_725_000_000_000,
+        createId: () => 'telemetry-job-id',
+        bffRequestId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      });
+      expect(result.job_id).toBe('job_telemetry-job-id');
+      expect(logs.length).toBe(1);
+      const record = JSON.parse(logs[0]) as Record<string, unknown>;
+      expect(record).toMatchObject({
+        event: 'bff_paper_import',
+        bff_request_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        upstream_request_id: upstreamReqId,
+        import_job_id: 'job_telemetry-job-id',
+        import_uuid: 'import-1',
+        paper_id: '2402.08954',
+        status: 200,
+      });
+      expect(logs[0]).not.toContain('https://arxiv.org');
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
 });
 
 describe('Graph API configuration policy', () => {

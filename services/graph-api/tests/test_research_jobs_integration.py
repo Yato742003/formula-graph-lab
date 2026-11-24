@@ -170,3 +170,182 @@ async def test_execution_profile_drift_and_profile_scoped_idempotency(queue, mon
     )
     await q.claim(reviewed_ticket, actor, reviewed_payload, IMAGE)
     await q.finish(reviewed_ticket, '{"ok":true}')
+
+
+async def test_double_delivery_quarantine_and_dead_letter_reconciliation(queue, caplog):
+    import logging
+
+    from app.verification import CheckResult, VerificationVector
+
+    q, actor, target = queue
+    own = next(iter(actor.workspaces))
+
+    # 1. Double delivery with identical result is idempotent; conflicting payload fails 409.
+    t_dup = await admit(q, actor, target, "double-delivery-key", ms=10_000)
+    await q.claim(t_dup, actor, payload(10_000), IMAGE)
+    await q.finish(t_dup, '{"ok":true}')
+    await q.finish(t_dup, '{"ok": true}')
+    with pytest.raises(JobRejected, match="JOB_RESULT_CONFLICT") as conflict_exc:
+        await q.finish(t_dup, '{"ok":false}')
+    assert conflict_exc.value.status == 409
+
+    # 2. Late delivery commits quarantine metadata + dead_letter_alert and raises 409.
+    t_late = await admit(q, actor, target, "late-delivery-key", ms=10_000)
+    await q.claim(t_late, actor, payload(10_000), IMAGE)
+    with caplog.at_level(logging.INFO, logger="fgl.telemetry"):
+        await q.store.driver.execute_query(
+            "MATCH (j:ResearchJob {id:$id}) SET j.expires_at=1",
+            id=t_late.envelope.job_id,
+            database_=q.store.database,
+        )
+        with pytest.raises(JobRejected, match="JOB_RESULT_REQUIRES_RECONCILIATION"):
+            await q.finish(t_late, '{"late":true}')
+    dlq_rows = await q.list_dead_letter_jobs(own)
+    late_row = next(r for r in dlq_rows if r["job_id"] == t_late.envelope.job_id)
+    assert late_row["reconciliation_status"] == "quarantined"
+    assert late_row["prior_state"] == "running"
+    assert late_row["retry_eligible"] is False
+    assert late_row["reservation_retained"] is True
+    assert any(
+        json.loads(r.message).get("event") == "dead_letter_alert"
+        and json.loads(r.message).get("job_id") == t_late.envelope.job_id
+        for r in caplog.records
+        if r.name == "fgl.telemetry"
+    )
+
+    # 3. Controller crash recovery distinguishes queued (retryable) vs running (uncertain).
+    t_queued = await admit(q, actor, target, "crash-queued-key", ms=15_000)
+    t_running = await admit(q, actor, target, "crash-running-key", ms=15_000)
+    await q.claim(t_running, actor, payload(15_000), IMAGE)
+
+    expired_now = max(t_queued.envelope.expires_at, t_running.envelope.expires_at) + 5
+    metrics_before = await q.job_health_metrics(own, now=expired_now)
+    assert metrics_before["stuck"] == 2
+
+    report = await q.recover_stuck_jobs(own, now=expired_now)
+    assert set(report["recovered_job_ids"]) == {
+        t_queued.envelope.job_id,
+        t_running.envelope.job_id,
+    }
+    metrics_after = await q.job_health_metrics(own, now=expired_now)
+    assert metrics_after["stuck"] == 0
+    assert metrics_after["dead_letter_pending"] == 2
+    assert metrics_after["dead_letter_quarantined"] >= 1
+
+    # Running job cannot be auto-retried.
+    with pytest.raises(JobRejected, match="UNCERTAIN_JOB_CANNOT_AUTO_RETRY") as unc_exc:
+        await q.reconcile_dead_letter_job(
+            workspace_id=own,
+            job_id=t_running.envelope.job_id,
+            actor_id="operator-1",
+            actor_role="researcher",
+            decision="authorize_retry",
+            notes="must fail closed on running",
+            idempotency_key="rec-run-retry",
+        )
+    assert unc_exc.value.status == 409
+
+    # Queued job CAN authorize_retry and keeps reserved_ms + rejects foreign workspace.
+    queued_rec = await q.reconcile_dead_letter_job(
+        workspace_id=own,
+        job_id=t_queued.envelope.job_id,
+        actor_id="operator-1",
+        actor_role="researcher",
+        decision="authorize_retry",
+        notes="SECRET_QUEUE_NOTES never reached running state",
+        idempotency_key="rec-queued-1",
+    )
+    assert queued_rec.reconciliation_status == "retry_authorized"
+    assert queued_rec.reserved_ms == 15_000
+    assert queued_rec.reservation_retained is True
+    assert queued_rec.replayed is False
+
+    queued_replay = await q.reconcile_dead_letter_job(
+        workspace_id=own,
+        job_id=t_queued.envelope.job_id,
+        actor_id="operator-1",
+        actor_role="researcher",
+        decision="authorize_retry",
+        notes="SECRET_QUEUE_NOTES never reached running state",
+        idempotency_key="rec-queued-1",
+    )
+    assert queued_replay.replayed is True
+    assert queued_replay.authorized_retry_key == queued_rec.authorized_retry_key
+
+    with pytest.raises(JobRejected, match="RECONCILIATION_IDEMPOTENCY_CONFLICT"):
+        await q.reconcile_dead_letter_job(
+            workspace_id=own,
+            job_id=t_queued.envelope.job_id,
+            actor_id="operator-1",
+            actor_role="researcher",
+            decision="quarantine",
+            notes="altered intent",
+            idempotency_key="rec-queued-1",
+        )
+
+    # Foreign workspace cannot inspect or reconcile.
+    foreign = "ws_" + "f" * 48
+    assert await q.list_dead_letter_jobs(foreign) == []
+    with pytest.raises(JobRejected, match="DEAD_LETTER_JOB_NOT_FOUND") as iso_exc:
+        await q.reconcile_dead_letter_job(
+            workspace_id=foreign,
+            job_id=t_running.envelope.job_id,
+            actor_id="attacker",
+            actor_role="researcher",
+            decision="quarantine",
+            notes="cross workspace attempt",
+            idempotency_key="rec-foreign-1",
+        )
+    assert iso_exc.value.status == 404
+
+    # Reconcile running job against an already-committed CheckResult receipt.
+    from app.symbol_contracts import contract_review_state_hash
+
+    check_res = CheckResult(
+        check_id="placeholder",
+        workspace_id=own,
+        target_uuid=target,
+        outcome="supported",
+        vector=VerificationVector(
+            parse="supported",
+            type="well_typed",
+            domain="discharged",
+            symbolic="supported",
+        ),
+        duration_ms=12,
+        created_at=datetime.now(UTC),
+        job_id=t_running.envelope.job_id,
+        execution_image=IMAGE,
+        execution_profile=t_running.envelope.execution_profile,
+        contract_review_hash=contract_review_state_hash([]),
+        schema_version="check-result.v3",
+    )
+    persisted_check = await q.store.append_check_result(
+        workspace_id=own,
+        target_uuid=target,
+        idempotency_key="committed-before-controller-crash",
+        result=check_res,
+    )
+    rec_receipt = await q.reconcile_dead_letter_job(
+        workspace_id=own,
+        job_id=t_running.envelope.job_id,
+        actor_id="operator-1",
+        actor_role="researcher",
+        decision="reconcile_receipt",
+        notes="matched committed check receipt",
+        idempotency_key="rec-run-receipt-1",
+    )
+    assert rec_receipt.receipt_found is True
+    assert rec_receipt.reconciled_receipt_id == persisted_check.result.check_id
+    assert rec_receipt.reconciliation_status == "reconciled_receipt"
+    assert rec_receipt.reserved_ms == 15_000
+    assert rec_receipt.reservation_retained is True
+
+    # Reservations remain consumed across all dead-letter jobs (total reserved_ms = 50_000).
+    rows, _, _ = await q.store.driver.execute_query(
+        "MATCH (j:ResearchJob {workspace:$workspace}) "
+        "RETURN coalesce(sum(j.reserved_ms), 0) AS total_ms",
+        workspace=own,
+        database_=q.store.database,
+    )
+    assert int(rows[0]["total_ms"]) == 50_000

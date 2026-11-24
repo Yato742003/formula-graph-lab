@@ -194,6 +194,8 @@ _SENSITIVE_KEYS = {
     "raw_html",
     "prompt",
     "body",
+    "notes",
+    "rationale",
     "source_html", "html", "output_json", "input", "content", "source_text",
 }
 _BEARER_PATTERN = re.compile(r"Bearer\s+[a-zA-Z0-9_\-\.]+", re.IGNORECASE)

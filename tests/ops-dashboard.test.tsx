@@ -5,7 +5,18 @@ import './setup';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OpsDashboard } from '../components/ops-dashboard';
+import { OpsDashboard, type DeadLetterJob } from '../components/ops-dashboard';
+
+function toRequestUrl(input: RequestInfo | URL): string {
+  return typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+}
+
+function parseJsonBody(body: BodyInit | null | undefined): Record<string, unknown> {
+  if (typeof body !== 'string') {
+    throw new Error('Expected JSON string request body');
+  }
+  return JSON.parse(body) as Record<string, unknown>;
+}
 
 afterEach(() => {
   cleanup();
@@ -153,6 +164,282 @@ describe('OpsDashboard', () => {
     })));
     render(<OpsDashboard />);
     expect((await screen.findByRole('alert')).textContent).toContain('host policy is invalid');
+    expect(screen.getByText('Operations telemetry unavailable')).toBeTruthy();
+  });
+
+  it('renders dead-letter rows with retry enabled only for queued jobs', async () => {
+    const queuedJobId = '11111111-1111-4111-8111-111111111111';
+    const runningJobId = '22222222-2222-4222-8222-222222222222';
+    const fetcher = vi.fn(async () => Response.json({
+      ...mockDashboardData,
+      subsystems: {
+        ...mockDashboardData.subsystems,
+        worker: {
+          ...mockDashboardData.subsystems.worker,
+          metrics: {
+            dead_letter_pending: 2,
+            dead_letter_quarantined: 0,
+          },
+        },
+      },
+      dead_letters: [
+        {
+          job_id: queuedJobId,
+          operation: 'research_case_verify',
+          target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          prior_state: 'queued',
+          failure_reason: 'worker_lease_expired_before_start',
+          reconciliation_status: 'pending',
+          reserved_ms: 4500,
+          reservation_retained: true,
+          retry_eligible: true,
+          authorized_retry_key: null,
+          reconciled_receipt_id: null,
+          recovered_at: 1730000000,
+          reconciled_at: null,
+          reconciled_by: null,
+        },
+        {
+          job_id: runningJobId,
+          operation: 'sandbox_eval',
+          target_uuid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          prior_state: 'running',
+          failure_reason: 'heartbeat_timeout',
+          reconciliation_status: 'pending',
+          reserved_ms: 9200,
+          reservation_retained: true,
+          retry_eligible: false,
+          authorized_retry_key: null,
+          reconciled_receipt_id: null,
+          recovered_at: 1730000100,
+          reconciled_at: null,
+          reconciled_by: null,
+        },
+      ],
+    }));
+    vi.stubGlobal('fetch', fetcher);
+
+    render(<OpsDashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Dead-Letter & Reconciliation Ledger')).toBeTruthy();
+      expect(screen.getByText(queuedJobId)).toBeTruthy();
+      expect(screen.getByText(runningJobId)).toBeTruthy();
+      expect(screen.getByText('4500 ms')).toBeTruthy();
+      expect(screen.getByText('9200 ms')).toBeTruthy();
+      expect(screen.getByText('queued')).toBeTruthy();
+      expect(screen.getByText('running · uncertain')).toBeTruthy();
+    });
+
+    const retryButtons = screen.getAllByRole('button', { name: 'Authorize Retry' });
+    expect(retryButtons).toHaveLength(2);
+    expect(retryButtons[0].hasAttribute('disabled')).toBe(false);
+    expect(retryButtons[1].hasAttribute('disabled')).toBe(true);
+    expect(retryButtons[1].getAttribute('title')).toBe(
+      'Uncertain jobs that reached running state cannot be retried',
+    );
+  });
+
+  it('requires rationale >= 3 chars and reconciles queued and running dead-letter jobs', async () => {
+    const user = userEvent.setup();
+    const queuedJobId = '11111111-1111-4111-8111-111111111111';
+    const runningJobId = '22222222-2222-4222-8222-222222222222';
+
+    let currentDeadLetters: DeadLetterJob[] = [
+      {
+        job_id: queuedJobId,
+        operation: 'research_case_verify',
+        target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        prior_state: 'queued',
+        failure_reason: 'lease_expired',
+        reconciliation_status: 'pending',
+        reserved_ms: 4500,
+        reservation_retained: true,
+        retry_eligible: true,
+        authorized_retry_key: null,
+        reconciled_receipt_id: null,
+        recovered_at: 1730000000,
+        reconciled_at: null,
+        reconciled_by: null,
+      },
+      {
+        job_id: runningJobId,
+        operation: 'sandbox_eval',
+        target_uuid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        prior_state: 'running',
+        failure_reason: 'heartbeat_timeout',
+        reconciliation_status: 'pending',
+        reserved_ms: 9200,
+        reservation_retained: true,
+        retry_eligible: false,
+        authorized_retry_key: null,
+        reconciled_receipt_id: null,
+        recovered_at: 1730000100,
+        reconciled_at: null,
+        reconciled_by: null,
+      },
+    ];
+
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = toRequestUrl(input);
+      if (url.includes(`/api/research/ops/jobs/${queuedJobId}/reconcile`) && init?.method === 'POST') {
+        const body = parseJsonBody(init.body);
+        currentDeadLetters = currentDeadLetters.map((item) =>
+          item.job_id === queuedJobId
+            ? {
+                ...item,
+                reconciliation_status: 'retry_authorized' as const,
+                authorized_retry_key: 'retry-key-001',
+                reconciled_at: '2026-10-01T12:10:00Z',
+                reconciled_by: 'operator-1',
+              }
+            : item,
+        );
+        return Response.json({
+          reconciliation_id: 'rec-1',
+          job_id: queuedJobId,
+          workspace_id: 'ws_test_123',
+          operation: 'research_case_verify',
+          target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          prior_state: 'queued',
+          decision: body.decision,
+          reconciliation_status: 'retry_authorized',
+          reserved_ms: 4500,
+          reservation_retained: true,
+          receipt_found: false,
+          reconciled_receipt_id: null,
+          authorized_retry_key: 'retry-key-001',
+          reconciled_by: 'operator-1',
+          reconciled_at: '2026-10-01T12:10:00Z',
+          replayed: false,
+        });
+      }
+      if (url.includes(`/api/research/ops/jobs/${runningJobId}/reconcile`) && init?.method === 'POST') {
+        const body = parseJsonBody(init.body);
+        currentDeadLetters = currentDeadLetters.map((item) =>
+          item.job_id === runningJobId
+            ? {
+                ...item,
+                reconciliation_status: 'reconciled_receipt' as const,
+                reconciled_receipt_id: 'rcpt-999',
+                reconciled_at: '2026-10-01T12:11:00Z',
+                reconciled_by: 'operator-1',
+              }
+            : item,
+        );
+        return Response.json({
+          reconciliation_id: 'rec-2',
+          job_id: runningJobId,
+          workspace_id: 'ws_test_123',
+          operation: 'sandbox_eval',
+          target_uuid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          prior_state: 'running',
+          decision: body.decision,
+          reconciliation_status: 'reconciled_receipt',
+          reserved_ms: 9200,
+          reservation_retained: true,
+          receipt_found: true,
+          reconciled_receipt_id: 'rcpt-999',
+          authorized_retry_key: null,
+          reconciled_by: 'operator-1',
+          reconciled_at: '2026-10-01T12:11:00Z',
+          replayed: false,
+        });
+      }
+      return Response.json({
+        ...mockDashboardData,
+        dead_letters: currentDeadLetters,
+      });
+    });
+    vi.stubGlobal('fetch', fetcher);
+
+    render(<OpsDashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText(queuedJobId)).toBeTruthy();
+    });
+
+    const queuedRationale = screen.getByLabelText(`Reconciliation rationale for ${queuedJobId}`);
+    await user.type(queuedRationale, 'no');
+    const retryButtons = screen.getAllByRole('button', { name: 'Authorize Retry' });
+    await user.click(retryButtons[0]);
+
+    expect(screen.getByText(/at least 3 characters/i)).toBeTruthy();
+    expect(fetcher.mock.calls.some((c) => toRequestUrl(c[0]).includes('/reconcile'))).toBe(false);
+
+    await user.clear(queuedRationale);
+    await user.type(queuedRationale, 'Confirmed queued before worker lease drop');
+    await user.click(retryButtons[0]);
+
+    await waitFor(() => {
+      expect(screen.getAllByText('retry_authorized').length).toBeGreaterThanOrEqual(2);
+      expect(screen.getAllByText(/retry-key-001/).length).toBeGreaterThanOrEqual(1);
+    });
+
+    const queuedPost = fetcher.mock.calls.find((c) =>
+      toRequestUrl(c[0]).includes(`/api/research/ops/jobs/${queuedJobId}/reconcile`),
+    );
+    expect(queuedPost).toBeTruthy();
+    expect(queuedPost![1]?.method).toBe('POST');
+    const queuedHeaders = queuedPost![1]?.headers as Record<string, string>;
+    expect(queuedHeaders['x-idempotency-key']).toMatch(/^[\x20-\x7E]{8,128}$/);
+    expect(parseJsonBody(queuedPost![1]?.body)).toEqual({
+      decision: 'authorize_retry',
+      notes: 'Confirmed queued before worker lease drop',
+    });
+
+    const runningRationale = screen.getByLabelText(`Reconciliation rationale for ${runningJobId}`);
+    await user.type(runningRationale, 'Verify whether durable receipt committed');
+    const checkReceiptButtons = screen.getAllByRole('button', { name: 'Check Receipt' });
+    await user.click(checkReceiptButtons[0]);
+
+    await waitFor(() => {
+      expect(screen.getAllByText('reconciled_receipt').length).toBeGreaterThanOrEqual(2);
+      expect(screen.getAllByText(/rcpt-999/).length).toBeGreaterThanOrEqual(1);
+    });
+
+    const runningPost = fetcher.mock.calls.find((c) =>
+      toRequestUrl(c[0]).includes(`/api/research/ops/jobs/${runningJobId}/reconcile`),
+    );
+    expect(runningPost).toBeTruthy();
+    const runningHeaders = runningPost![1]?.headers as Record<string, string>;
+    expect(runningHeaders['x-idempotency-key']).toMatch(/^[\x20-\x7E]{8,128}$/);
+    expect(parseJsonBody(runningPost![1]?.body)).toEqual({
+      decision: 'reconcile_receipt',
+      notes: 'Verify whether durable receipt committed',
+    });
+  });
+
+  it('rejects malformed dead_letters payloads fail-closed', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({
+          ...mockDashboardData,
+          dead_letters: [
+            {
+              job_id: '11111111-1111-4111-8111-111111111111',
+              operation: 'sandbox_eval',
+              target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+              prior_state: 'invalid_state',
+              failure_reason: null,
+              reconciliation_status: 'pending',
+              reserved_ms: -5,
+              reservation_retained: true,
+              retry_eligible: false,
+              authorized_retry_key: null,
+              reconciled_receipt_id: null,
+              recovered_at: null,
+              reconciled_at: null,
+              reconciled_by: null,
+            },
+          ],
+        }),
+      ),
+    );
+
+    render(<OpsDashboard />);
+    expect((await screen.findByRole('alert')).textContent).toContain('dead-letter ledger is invalid');
     expect(screen.getByText('Operations telemetry unavailable')).toBeTruthy();
   });
 });

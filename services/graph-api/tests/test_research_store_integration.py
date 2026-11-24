@@ -857,6 +857,14 @@ async def test_compiler_persists_replayable_candidate_and_separate_lowering_acti
         assert persisted_numerical.result == numerical_receipt
         assert persisted_numerical.result.parent_refs == lowered.candidate.parents
         assert persisted_numerical.result.performance_claim is False
+        dup_numerical = await queue.finish_numerical_fixture(
+            ticket,
+            research_store=store,
+            idempotency_key="numerical-fixture-job",
+            result=numerical_receipt,
+        )
+        assert dup_numerical.replayed is True
+        assert dup_numerical.result == numerical_receipt
         replayed_numerical = await store.append_candidate_numerical_fixture(
             workspace_id=workspace_id,
             candidate_id=lowered.candidate.candidate_id,

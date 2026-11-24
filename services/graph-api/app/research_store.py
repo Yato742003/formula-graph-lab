@@ -686,7 +686,7 @@ class Neo4jResearchStore:
 
         # Real Neo4j write transaction
         async with self.driver.session(database=self.database) as session:
-            return await session.execute_write(
+            snapshot, replayed = await session.execute_write(
                 self._tx_freeze_problem_spec,
                 group_id,
                 workspace_id,
@@ -698,6 +698,16 @@ class Neo4jResearchStore:
                 definition,
                 idempotency_key,
             )
+        emit_event(
+            "problem_spec_frozen",
+            workspace_id=workspace_id,
+            spec_id=snapshot.spec_id,
+            campaign_id=snapshot.campaign_id,
+            version=snapshot.version,
+            parent_spec_id=snapshot.parent_spec_id,
+            replayed=replayed,
+        )
+        return snapshot, replayed
 
     @staticmethod
     async def _tx_freeze_problem_spec(
@@ -2051,7 +2061,7 @@ class Neo4jResearchStore:
             [workspace_id, candidate_id, actor_id, request.model_dump(mode="json")]
         )
         async with self.driver.session(database=self.database) as session:
-            return await session.execute_write(
+            res = await session.execute_write(
                 self._tx_evaluate_candidate_admission,
                 group_id,
                 workspace_id,
@@ -2061,6 +2071,19 @@ class Neo4jResearchStore:
                 receipt_key,
                 intent_hash,
             )
+        emit_event(
+            "admission_policy_decision",
+            workspace_id=workspace_id,
+            candidate_id=candidate_id,
+            decision_id=res.decision.decision_id,
+            action=res.decision.action,
+            claim_scope=res.decision.claim_scope,
+            allowed=res.decision.allowed,
+            outcome=res.decision.outcome,
+            rule_id=res.decision.rule_id,
+            replayed=res.replayed,
+        )
+        return res
 
     async def _tx_evaluate_candidate_admission(
         self,
@@ -3113,7 +3136,7 @@ class Neo4jResearchStore:
         )
         intent_hash = self._stable_hash([workspace_id, actor_id, output_json])
         async with self.driver.session(database=self.database) as session:
-            return await session.execute_write(
+            res = await session.execute_write(
                 self._tx_record_proposal,
                 group_id,
                 workspace_id,
@@ -3123,6 +3146,14 @@ class Neo4jResearchStore:
                 idempotency_key,
                 intent_hash,
             )
+        emit_event(
+            "proposal_recorded",
+            workspace_id=workspace_id,
+            proposal_id=res.proposal.proposal_id,
+            spec_id=res.proposal.problem_spec_id,
+            replayed=res.replayed,
+        )
+        return res
 
     async def _tx_record_proposal(
         self,
@@ -3379,7 +3410,7 @@ class Neo4jResearchStore:
         key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()
         operation_key = f"{group_id}:proposal-generation:{actor_id}:{key_hash}"
         async with self.driver.session(database=self.database) as session:
-            return await session.execute_write(
+            reservation = await session.execute_write(
                 self._tx_reserve_proposal_generation,
                 group_id,
                 operation_key,
@@ -3387,6 +3418,14 @@ class Neo4jResearchStore:
                 reserve_usd,
                 daily_limit_usd,
             )
+        emit_event(
+            "proposal_spend_transition",
+            workspace_id=workspace_id,
+            status=reservation["status"],
+            reserve_usd=str(reserve_usd),
+            replayed=reservation["status"] == "completed",
+        )
+        return reservation
 
     @staticmethod
     async def _tx_reserve_proposal_generation(
@@ -3514,6 +3553,11 @@ class Neo4jResearchStore:
                 status,
                 payload,
             )
+        emit_event(
+            "proposal_spend_transition",
+            workspace_id=workspace_id,
+            status=status,
+        )
 
     @staticmethod
     async def _tx_update_proposal_generation_operation(
@@ -4871,7 +4915,7 @@ class Neo4jResearchStore:
             return campaign, existing is not None
 
         async with self.driver.session(database=self.database) as session:
-            return await session.execute_write(
+            campaign, replayed = await session.execute_write(
                 self._tx_start_evolution_campaign,
                 group_id,
                 workspace_id,
@@ -4880,6 +4924,20 @@ class Neo4jResearchStore:
                 receipt_key,
                 intent_hash,
             )
+        emit_event(
+            "evolution_campaign_transition",
+            workspace_id=workspace_id,
+            evolution_id=campaign.evolution_id,
+            spec_id=campaign.spec.spec_id,
+            campaign_id=campaign.spec.campaign_id,
+            phase="started",
+            generation=campaign.generation,
+            status=campaign.status,
+            winner_ids=list(campaign.winner_ids),
+            finalist_count=len(campaign.finalist_ids),
+            replayed=replayed,
+        )
+        return campaign, replayed
 
     @staticmethod
     async def _tx_start_evolution_campaign(
@@ -5088,7 +5146,21 @@ class Neo4jResearchStore:
             return campaign, False
 
         async with self.driver.session(database=self.database) as session:
-            return await session.execute_write(write)
+            campaign, replayed = await session.execute_write(write)
+        emit_event(
+            "evolution_campaign_transition",
+            workspace_id=workspace_id,
+            evolution_id=campaign.evolution_id,
+            spec_id=campaign.spec.spec_id,
+            campaign_id=campaign.spec.campaign_id,
+            phase=operation,
+            generation=campaign.generation,
+            status=campaign.status,
+            winner_ids=list(campaign.winner_ids),
+            finalist_count=len(campaign.finalist_ids),
+            replayed=replayed,
+        )
+        return campaign, replayed
 
     async def reserve_evolution_generation(
         self,

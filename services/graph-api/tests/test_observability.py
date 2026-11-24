@@ -73,3 +73,40 @@ async def test_slow_body_has_total_deadline_and_correlated_failure(caplog):
     request_id = headers[b"x-request-id"].decode()
     assert request_id in caplog.text and "body_read_timeout" in caplog.text
     assert not request_context.get()
+
+
+def test_operator_notes_and_rationale_are_redacted_and_alerts_include_severity(caplog):
+    from app.security import log_audit_event
+
+    with caplog.at_level(logging.INFO, logger="fgl.telemetry"), caplog.at_level(
+        logging.WARNING, logger="fgl.audit"
+    ):
+        emit_event(
+            "dead_letter_alert",
+            level=logging.WARNING,
+            code="JOB_EXPIRED_OR_CRASHED",
+            job_id="11111111-1111-4111-8111-111111111111",
+            notes="OPERATOR_PRIVATE_NOTES",
+            rationale="OPERATOR_PRIVATE_RATIONALE",
+            reservation_retained=True,
+        )
+        log_audit_event(
+            "dead_letter_reconciled",
+            actor_id="user-1",
+            workspace_id="ws_test",
+            details={
+                "job_id": "11111111-1111-4111-8111-111111111111",
+                "notes": "AUDIT_SECRET_NOTE",
+            },
+        )
+
+    telemetry = next(
+        json.loads(r.message) for r in caplog.records if r.name == "fgl.telemetry"
+    )
+    assert telemetry["severity"] == "warning"
+    assert telemetry["notes"] == "[REDACTED]"
+    assert telemetry["rationale"] == "[REDACTED]"
+    assert telemetry["reservation_retained"] is True
+    assert "OPERATOR_PRIVATE_NOTES" not in caplog.text
+    assert "OPERATOR_PRIVATE_RATIONALE" not in caplog.text
+    assert "AUDIT_SECRET_NOTE" not in caplog.text

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import re
@@ -15,6 +16,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, Field, model_serializer, model_validator
 
+from app.auth import HUMAN_ROLES
 from app.episodes import workspace_group_id
 from app.execution_profile import (
     ExecutionProfile,
@@ -27,6 +29,7 @@ from app.numerical_verification import (
     NumericalFixtureReceiptResponse,
     build_numerical_suite_input,
 )
+from app.observability import emit_event
 from app.problem_spec import ProblemSpecSnapshot, definition_hash
 from app.research_case import (
     PER_TRIAL_TIMEOUT_MS,
@@ -40,6 +43,7 @@ from app.research_case import (
 from app.research_compiler import CompiledCandidate, _verify_candidate_identity
 from app.sandbox import IMAGE_ID
 from app.security import log_audit_event
+from app.verification import CheckResult
 from app.worker_auth import WorkerPrincipal, configured_credentials
 
 
@@ -47,6 +51,55 @@ class JobRejected(ValueError):
     def __init__(self, code: str, status: int = 409):
         super().__init__(code)
         self.status = status
+
+
+DeadLetterDecision = Literal["quarantine", "authorize_retry", "reconcile_receipt"]
+DeadLetterPriorState = Literal["queued", "running", "unknown"]
+DeadLetterReconcileStatus = Literal[
+    "pending", "quarantined", "retry_authorized", "reconciled_receipt"
+]
+
+
+class DeadLetterReconcileRequest(BaseModel):
+    decision: DeadLetterDecision
+    notes: str = Field(min_length=3, max_length=1000)
+    model_config = {"extra": "forbid", "frozen": True}
+
+
+class DeadLetterReconcileResponse(BaseModel):
+    reconciliation_id: str
+    job_id: str
+    workspace_id: str
+    operation: str
+    target_uuid: str
+    prior_state: DeadLetterPriorState
+    decision: DeadLetterDecision
+    reconciliation_status: Literal["quarantined", "retry_authorized", "reconciled_receipt"]
+    reserved_ms: int = Field(ge=0)
+    reservation_retained: Literal[True] = True
+    receipt_found: bool = False
+    reconciled_receipt_id: str | None = None
+    authorized_retry_key: str | None = None
+    reconciled_by: str
+    reconciled_at: str
+    replayed: bool = False
+    model_config = {"extra": "forbid", "frozen": True}
+
+
+def _envelope_meta(raw_envelope: object) -> tuple[str, str]:
+    if isinstance(raw_envelope, str) and raw_envelope:
+        try:
+            parsed = json.loads(raw_envelope)
+            if isinstance(parsed, dict):
+                op = parsed.get("operation")
+                target = parsed.get("target_uuid")
+                return (
+                    op if isinstance(op, str) and op else "unknown",
+                    target if isinstance(target, str) and target else "unknown",
+                )
+        except (ValueError, TypeError):
+            pass
+    return ("unknown", "unknown")
 
 
 OPERATION_WORKER_KIND: dict[str, WorkerKind] = {
@@ -319,6 +372,50 @@ class ResearchQueue:
     def _result_mac(self, job_id: str, result: str) -> str:
         return hmac.new(self.key, (job_id + "\n" + result).encode(), hashlib.sha256).hexdigest()
 
+    @staticmethod
+    def _emit_job_transition(
+        envelope: JobEnvelope,
+        *,
+        to_state: str,
+        replayed: bool,
+        from_state: str | None = None,
+    ) -> None:
+        emit_event(
+            "research_job_transition",
+            job_id=envelope.job_id,
+            workspace_id=envelope.workspace_id,
+            operation=envelope.operation,
+            target_uuid=envelope.target_uuid,
+            from_state=from_state,
+            to_state=to_state,
+            reserved_ms=envelope.reserved_ms,
+            replayed=replayed,
+        )
+
+    @staticmethod
+    def _emit_dead_letter_alert(
+        *,
+        code: str,
+        workspace_id: str,
+        job_id: str,
+        operation: str,
+        target_uuid: str,
+        prior_state: str,
+        reconciliation_status: str,
+    ) -> None:
+        emit_event(
+            "dead_letter_alert",
+            level=logging.WARNING,
+            code=code,
+            workspace_id=workspace_id,
+            job_id=job_id,
+            operation=operation,
+            target_uuid=target_uuid,
+            prior_state=prior_state,
+            reconciliation_status=reconciliation_status,
+            reservation_retained=True,
+        )
+
     async def admit(self, actor: WorkerPrincipal, *, workspace_id: str, target_uuid: str,
                     idempotency_key: str, request_hash: str, payload: dict[str, object],
                     image: str, execution_profile: ExecutionProfile | None = None) -> JobTicket:
@@ -362,6 +459,11 @@ class ResearchQueue:
             self._result_mac(envelope.job_id, result), result_mac or "",
         ):
             raise JobRejected("INVALID_RESULT_SIGNATURE", 403)
+        self._emit_job_transition(
+            ticket.envelope,
+            to_state="finished" if result is not None else "queued",
+            replayed=result is not None,
+        )
         return ticket
 
     async def admit_numerical_fixture(
@@ -455,6 +557,11 @@ class ResearchQueue:
             self._result_mac(envelope.job_id, result), result_mac or "",
         ):
             raise JobRejected("INVALID_RESULT_SIGNATURE", 403)
+        self._emit_job_transition(
+            ticket.envelope,
+            to_state="finished" if result is not None else "queued",
+            replayed=result is not None,
+        )
         return ticket
 
     async def admit_research_case(
@@ -539,6 +646,11 @@ class ResearchQueue:
             self._result_mac(envelope.job_id, result), result_mac or ""
         ):
             raise JobRejected("INVALID_RESULT_SIGNATURE", 403)
+        self._emit_job_transition(
+            ticket.envelope,
+            to_state="finished" if result is not None else "queued",
+            replayed=result is not None,
+        )
         return ticket
 
     @staticmethod
@@ -667,6 +779,12 @@ class ResearchQueue:
             )
         async with self.store.driver.session(database=self.store.database) as session:
             await session.execute_write(self._claim, ticket)
+        self._emit_job_transition(
+            envelope,
+            from_state="queued",
+            to_state="running",
+            replayed=False,
+        )
 
     async def _resolve_numerical_fixture_source(
         self,
@@ -840,9 +958,74 @@ class ResearchQueue:
         if row is None:
             raise JobRejected("JOB_NOT_CLAIMABLE")
 
+    async def _inspect_finish_row(self, tx, envelope: JobEnvelope, mac: str):
+        return await (await tx.run(
+            "MATCH (j:ResearchJob {id:$id, envelope:$envelope, mac:$mac}) "
+            "RETURN j.state AS state, j.expires_at AS expires_at, "
+            "j.result AS result, j.result_mac AS result_mac, "
+            "j.prior_state AS prior_state",
+            id=envelope.job_id,
+            envelope=envelope.model_dump_json(),
+            mac=mac,
+        )).single()
+
+    @staticmethod
+    async def _quarantine_late_job(
+        tx, envelope: JobEnvelope, mac: str, now: int,
+    ) -> DeadLetterPriorState:
+        q_row = await (await tx.run(
+            "MATCH (j:ResearchJob {id:$id, envelope:$envelope, mac:$mac}) "
+            "WHERE j.state <> 'finished' "
+            "SET j.prior_state = CASE WHEN j.state IN ['queued', 'running'] "
+            "THEN j.state ELSE coalesce(j.prior_state, 'running') END, "
+            "j.state = 'failed', "
+            "j.dead_letter = true, "
+            "j.failure_reason = coalesce(j.failure_reason, 'LATE_OR_EXPIRED_RESULT_DELIVERY'), "
+            "j.reconciliation_status = CASE "
+            "WHEN j.reconciliation_status IN ['reconciled_receipt', 'retry_authorized'] "
+            "THEN j.reconciliation_status ELSE 'quarantined' END, "
+            "j.quarantined_at = coalesce(j.quarantined_at, $now) "
+            "RETURN j.prior_state AS prior_state",
+            id=envelope.job_id,
+            envelope=envelope.model_dump_json(),
+            mac=mac,
+            now=now,
+        )).single()
+        prior = q_row["prior_state"] if q_row else "unknown"
+        return prior if prior in ("queued", "running") else "unknown"
+
+    def _verify_finished_result_mac(self, job_id: str, row) -> str:
+        stored_raw = row["result"]
+        if stored_raw is None or not hmac.compare_digest(
+            self._result_mac(job_id, str(stored_raw)), str(row["result_mac"] or ""),
+        ):
+            raise JobRejected("INVALID_RESULT_SIGNATURE", 403)
+        return str(stored_raw)
+
     async def finish(self, ticket: JobTicket, result: str):
+        if not hmac.compare_digest(signature(ticket.envelope, self.key), ticket.mac):
+            raise JobRejected("INVALID_JOB_SIGNATURE", 403)
         async with self.store.driver.session(database=self.store.database) as session:
-            await session.execute_write(self._finish, ticket, result)
+            status_tag, prior_state = await session.execute_write(self._finish, ticket, result)
+        if status_tag in ("finished", "replayed"):
+            self._emit_job_transition(
+                ticket.envelope,
+                from_state="running",
+                to_state="finished",
+                replayed=(status_tag == "replayed"),
+            )
+            return
+        if status_tag == "quarantined":
+            self._emit_dead_letter_alert(
+                code="JOB_RESULT_REQUIRES_RECONCILIATION",
+                workspace_id=ticket.envelope.workspace_id,
+                job_id=ticket.envelope.job_id,
+                operation=ticket.envelope.operation,
+                target_uuid=ticket.envelope.target_uuid,
+                prior_state=prior_state,
+                reconciliation_status="quarantined",
+            )
+        raise JobRejected("JOB_RESULT_REQUIRES_RECONCILIATION")
 
     async def finish_numerical_fixture(
         self,
@@ -865,16 +1048,47 @@ class ResearchQueue:
             or result.workspace_id != envelope.workspace_id
             or result.candidate_id != envelope.target_uuid
             or result.actor_id != envelope.actor_id
+            or not hmac.compare_digest(signature(envelope, self.key), ticket.mac)
         ):
             raise JobRejected("JOB_RESULT_MISMATCH", 422)
         async with self.store.driver.session(database=self.store.database) as session:
-            return await session.execute_write(
+            status_tag, persisted, prior_state = await session.execute_write(
                 self._finish_numerical_fixture,
                 ticket,
                 research_store,
                 idempotency_key,
                 result,
             )
+        if status_tag in ("finished", "replayed") and persisted is not None:
+            self._emit_job_transition(
+                envelope,
+                from_state="running",
+                to_state="finished",
+                replayed=persisted.replayed,
+            )
+            emit_event(
+                "numerical_fixture_receipt",
+                workspace_id=envelope.workspace_id,
+                candidate_id=envelope.target_uuid,
+                spec_id=persisted.result.problem_spec_id,
+                result_id=persisted.result.result_id,
+                run_id=persisted.result.run_id,
+                seed=persisted.result.seed,
+                outcome=persisted.result.outcome,
+                replayed=persisted.replayed,
+            )
+            return persisted
+        if status_tag == "quarantined":
+            self._emit_dead_letter_alert(
+                code="JOB_RESULT_REQUIRES_RECONCILIATION",
+                workspace_id=envelope.workspace_id,
+                job_id=envelope.job_id,
+                operation=envelope.operation,
+                target_uuid=envelope.target_uuid,
+                prior_state=prior_state,
+                reconciliation_status="quarantined",
+            )
+        raise JobRejected("JOB_RESULT_REQUIRES_RECONCILIATION")
 
     async def _finish_numerical_fixture(
         self,
@@ -883,19 +1097,27 @@ class ResearchQueue:
         research_store,
         idempotency_key: str,
         result: NumericalFixtureReceipt,
-    ) -> NumericalFixtureReceiptResponse:
+    ) -> tuple[str, NumericalFixtureReceiptResponse | None, DeadLetterPriorState]:
         await self._lock(tx)
         envelope = ticket.envelope
-        row = await (await tx.run(
-            "MATCH (j:ResearchJob {id:$id, state:'running', envelope:$envelope, mac:$mac}) "
-            "WHERE j.expires_at>$now RETURN j.id AS id",
-            id=envelope.job_id,
-            envelope=envelope.model_dump_json(),
-            mac=ticket.mac,
-            now=int(time.time()),
-        )).single()
+        now = int(time.time())
+        row = await self._inspect_finish_row(tx, envelope, ticket.mac)
         if row is None:
-            raise JobRejected("JOB_RESULT_REQUIRES_RECONCILIATION")
+            return ("missing", None, "unknown")
+        if row["state"] == "finished":
+            stored = NumericalFixtureReceipt.model_validate_json(
+                self._verify_finished_result_mac(envelope.job_id, row)
+            )
+            if stored != result:
+                raise JobRejected("JOB_RESULT_CONFLICT", 409)
+            return (
+                "replayed",
+                NumericalFixtureReceiptResponse(result=stored, replayed=True),
+                "running",
+            )
+        if row["state"] != "running" or int(row["expires_at"] or 0) <= now:
+            prior = await self._quarantine_late_job(tx, envelope, ticket.mac, now)
+            return ("quarantined", None, prior)
 
         group_id, receipt_key, intent_hash = research_store.numerical_fixture_receipt_identity(
             workspace_id=envelope.workspace_id,
@@ -918,17 +1140,18 @@ class ResearchQueue:
         updated = await (await tx.run(
             "MATCH (j:ResearchJob {id:$id, state:'running', envelope:$envelope, mac:$mac}) "
             "WHERE j.expires_at>$now SET j.state='finished', j.result=$result, "
-            "j.result_mac=$result_mac RETURN j.id AS id",
+            "j.result_mac=$result_mac, j.finished_at=$now RETURN j.id AS id",
             id=envelope.job_id,
             envelope=envelope.model_dump_json(),
             mac=ticket.mac,
-            now=int(time.time()),
+            now=now,
             result=result_json,
             result_mac=self._result_mac(envelope.job_id, result_json),
         )).single()
         if updated is None:
-            raise JobRejected("JOB_RESULT_REQUIRES_RECONCILIATION")
-        return appended
+            prior = await self._quarantine_late_job(tx, envelope, ticket.mac, now)
+            return ("quarantined", None, prior)
+        return ("finished", appended, "running")
 
     async def finish_research_case(
         self,
@@ -968,7 +1191,7 @@ class ResearchQueue:
         ):
             raise JobRejected("JOB_RESULT_MISMATCH", 422)
         async with self.store.driver.session(database=self.store.database) as session:
-            return await session.execute_write(
+            status_tag, persisted, prior_state = await session.execute_write(
                 self._finish_research_case,
                 ticket,
                 research_store,
@@ -976,6 +1199,38 @@ class ResearchQueue:
                 binding,
                 result,
             )
+        if status_tag in ("finished", "replayed") and persisted is not None:
+            self._emit_job_transition(
+                envelope,
+                from_state="running",
+                to_state="finished",
+                replayed=persisted.replayed,
+            )
+            emit_event(
+                "research_case_receipt",
+                workspace_id=envelope.workspace_id,
+                candidate_id=envelope.target_uuid,
+                spec_id=persisted.result.problem_spec_id,
+                binding_id=persisted.binding.binding_id,
+                result_id=persisted.result.result_id,
+                run_id=persisted.result.run_id,
+                evaluation_role=persisted.result.evaluation_role,
+                evolution_id=persisted.result.evolution_id,
+                outcome=persisted.result.outcome,
+                replayed=persisted.replayed,
+            )
+            return persisted
+        if status_tag == "quarantined":
+            self._emit_dead_letter_alert(
+                code="JOB_RESULT_REQUIRES_RECONCILIATION",
+                workspace_id=envelope.workspace_id,
+                job_id=envelope.job_id,
+                operation=envelope.operation,
+                target_uuid=envelope.target_uuid,
+                prior_state=prior_state,
+                reconciliation_status="quarantined",
+            )
+        raise JobRejected("JOB_RESULT_REQUIRES_RECONCILIATION")
 
     async def _finish_research_case(
         self,
@@ -985,19 +1240,25 @@ class ResearchQueue:
         idempotency_key: str,
         binding: ImplementationBindingReceipt,
         result: ResearchCaseReceipt,
-    ) -> ResearchCaseReceiptResponse:
+    ) -> tuple[str, ResearchCaseReceiptResponse | None, DeadLetterPriorState]:
         await self._lock(tx)
         envelope = ticket.envelope
-        row = await (await tx.run(
-            "MATCH (j:ResearchJob {id:$id, state:'running', envelope:$envelope, mac:$mac}) "
-            "WHERE j.expires_at>$now RETURN j.id AS id",
-            id=envelope.job_id,
-            envelope=envelope.model_dump_json(),
-            mac=ticket.mac,
-            now=int(time.time()),
-        )).single()
+        now = int(time.time())
+        row = await self._inspect_finish_row(tx, envelope, ticket.mac)
         if row is None:
-            raise JobRejected("JOB_RESULT_REQUIRES_RECONCILIATION")
+            return ("missing", None, "unknown")
+        if row["state"] == "finished":
+            stored = ResearchCaseReceiptResponse.model_validate_json(
+                self._verify_finished_result_mac(envelope.job_id, row)
+            )
+            incoming = ResearchCaseReceiptResponse(binding=binding, result=result, replayed=False)
+            if stored.model_copy(update={"replayed": False}) != incoming:
+                raise JobRejected("JOB_RESULT_CONFLICT", 409)
+            return ("replayed", stored.model_copy(update={"replayed": True}), "running")
+        if row["state"] != "running" or int(row["expires_at"] or 0) <= now:
+            prior = await self._quarantine_late_job(tx, envelope, ticket.mac, now)
+            return ("quarantined", None, prior)
+
         group_id, receipt_key, intent_hash = research_store.research_case_receipt_identity(
             workspace_id=envelope.workspace_id,
             candidate_id=envelope.target_uuid,
@@ -1023,30 +1284,49 @@ class ResearchQueue:
         updated = await (await tx.run(
             "MATCH (j:ResearchJob {id:$id, state:'running', envelope:$envelope, mac:$mac}) "
             "WHERE j.expires_at>$now SET j.state='finished', j.result=$result, "
-            "j.result_mac=$result_mac RETURN j.id AS id",
+            "j.result_mac=$result_mac, j.finished_at=$now RETURN j.id AS id",
             id=envelope.job_id,
             envelope=envelope.model_dump_json(),
             mac=ticket.mac,
-            now=int(time.time()),
+            now=now,
             result=result_json,
             result_mac=self._result_mac(envelope.job_id, result_json),
         )).single()
         if updated is None:
-            raise JobRejected("JOB_RESULT_REQUIRES_RECONCILIATION")
-        return appended
+            prior = await self._quarantine_late_job(tx, envelope, ticket.mac, now)
+            return ("quarantined", None, prior)
+        return ("finished", appended, "running")
 
-    async def _finish(self, tx, ticket, result):
+    async def _finish(self, tx, ticket: JobTicket, result: str) -> tuple[str, DeadLetterPriorState]:
         await self._lock(tx)
-        row = await (await tx.run(
+        now = int(time.time())
+        row = await self._inspect_finish_row(tx, ticket.envelope, ticket.mac)
+        if row is None:
+            return ("missing", "unknown")
+        if row["state"] == "finished":
+            stored_raw = self._verify_finished_result_mac(ticket.envelope.job_id, row)
+            try:
+                equal = json.loads(stored_raw) == json.loads(result)
+            except (ValueError, TypeError):
+                equal = stored_raw == result
+            if not equal:
+                raise JobRejected("JOB_RESULT_CONFLICT", 409)
+            return ("replayed", "running")
+        if row["state"] != "running" or int(row["expires_at"] or 0) <= now:
+            prior = await self._quarantine_late_job(tx, ticket.envelope, ticket.mac, now)
+            return ("quarantined", prior)
+        updated = await (await tx.run(
             "MATCH (j:ResearchJob {id:$id, state:'running', envelope:$envelope, mac:$mac}) "
             "WHERE j.expires_at>$now SET j.state='finished', j.result=$result, "
-            "j.result_mac=$result_mac RETURN j.id AS id",
+            "j.result_mac=$result_mac, j.finished_at=$now RETURN j.id AS id",
             id=ticket.envelope.job_id, envelope=ticket.envelope.model_dump_json(),
-            mac=ticket.mac, now=int(time.time()), result=result,
+            mac=ticket.mac, now=now, result=result,
             result_mac=self._result_mac(ticket.envelope.job_id, result),
         )).single()
-        if row is None:
-            raise JobRejected("JOB_RESULT_REQUIRES_RECONCILIATION")
+        if updated is None:
+            prior = await self._quarantine_late_job(tx, ticket.envelope, ticket.mac, now)
+            return ("quarantined", prior)
+        return ("finished", "running")
 
     async def recover_stuck_jobs(
         self, workspace_id: str, now: int | None = None,
@@ -1061,32 +1341,70 @@ class ResearchQueue:
         if not getattr(self, "store", None) or not getattr(self.store, "driver", None):
             raise JobRejected("RESEARCH_QUEUE_UNAVAILABLE", 503)
         async with self.store.driver.session(database=self.store.database) as session:
-            report = await session.execute_write(
-                self._recover_stuck_jobs, workspace_id, current_now,
+            report, alerts = await session.execute_write(
+                self._recover_stuck_jobs_with_details, workspace_id, current_now,
             )
         # Managed transactions can retry: emit only after the write has committed.
-        for job_id in report["recovered_job_ids"]:
-            log_audit_event("job_recovered", workspace_id=workspace_id,
-                            details={"job_id": job_id, "reason": "JOB_EXPIRED_OR_CRASHED"})
+        for item in alerts:
+            log_audit_event(
+                "job_recovered",
+                workspace_id=workspace_id,
+                details={
+                    "job_id": item["job_id"],
+                    "reason": "JOB_EXPIRED_OR_CRASHED",
+                    "prior_state": item["prior_state"],
+                    "reservation_retained": True,
+                },
+            )
+            self._emit_dead_letter_alert(
+                code="JOB_EXPIRED_OR_CRASHED",
+                workspace_id=workspace_id,
+                job_id=str(item["job_id"]),
+                operation=str(item["operation"]),
+                target_uuid=str(item["target_uuid"]),
+                prior_state=str(item["prior_state"]),
+                reconciliation_status="pending",
+            )
         return report
 
     async def _recover_stuck_jobs(self, tx, workspace_id: str, now: int) -> dict[str, object]:
+        report, _alerts = await self._recover_stuck_jobs_with_details(tx, workspace_id, now)
+        return report
+
+    async def _recover_stuck_jobs_with_details(
+        self, tx, workspace_id: str, now: int,
+    ) -> tuple[dict[str, object], list[dict[str, object]]]:
         await self._lock(tx)
         cursor = await tx.run(
             "MATCH (j:ResearchJob {workspace:$workspace}) "
             "WHERE j.state IN ['queued', 'running'] AND j.expires_at <= $now "
-            "SET j.state = 'failed', j.failure_reason = 'JOB_EXPIRED_OR_CRASHED', "
+            "WITH j, j.state AS prior_state "
+            "SET j.prior_state = coalesce(j.prior_state, prior_state), "
+            "j.state = 'failed', j.dead_letter = true, "
+            "j.failure_reason = 'JOB_EXPIRED_OR_CRASHED', "
+            "j.reconciliation_status = coalesce(j.reconciliation_status, 'pending'), "
             "j.recovered_at = $now "
-            "RETURN j.id AS id, j.workspace AS workspace, j.state AS state",
+            "RETURN j.id AS id, j.workspace AS workspace, j.state AS state, "
+            "j.prior_state AS prior_state, j.envelope AS envelope, j.reserved_ms AS reserved_ms",
             now=now, workspace=workspace_id,
         )
         records = [record async for record in cursor]
         recovered_ids = [r["id"] for r in records]
+        alerts: list[dict[str, object]] = []
+        for record in records:
+            operation, target_uuid = _envelope_meta(record.get("envelope"))
+            prior = record.get("prior_state") or record.get("state") or "unknown"
+            alerts.append({
+                "job_id": record["id"],
+                "prior_state": prior if prior in ("queued", "running") else "unknown",
+                "operation": operation,
+                "target_uuid": target_uuid,
+            })
         return {
             "recovered_count": len(recovered_ids),
             "recovered_job_ids": recovered_ids,
             "recovered_at": datetime.now(UTC).isoformat(),
-        }
+        }, alerts
 
     async def job_health_metrics(
         self, workspace_id: str, now: int | None = None,
@@ -1108,7 +1426,13 @@ class ResearchQueue:
                 "sum(CASE WHEN j.state = 'finished' THEN 1 ELSE 0 END) AS finished, "
                 "sum(CASE WHEN j.state = 'failed' THEN 1 ELSE 0 END) AS failed, "
                 "sum(CASE WHEN j.state IN ['queued', 'running'] AND j.expires_at <= $now "
-                "THEN 1 ELSE 0 END) AS stuck",
+                "THEN 1 ELSE 0 END) AS stuck, "
+                "sum(CASE WHEN j.state = 'failed' AND coalesce(j.dead_letter, false) = true "
+                "AND coalesce(j.reconciliation_status, 'pending') = 'pending' "
+                "THEN 1 ELSE 0 END) AS dead_letter_pending, "
+                "sum(CASE WHEN j.state = 'failed' AND coalesce(j.dead_letter, false) = true "
+                "AND j.reconciliation_status = 'quarantined' "
+                "THEN 1 ELSE 0 END) AS dead_letter_quarantined",
                 now=current_now, workspace=workspace_id,
             )
             record = await cursor.single()
@@ -1120,6 +1444,8 @@ class ResearchQueue:
                     "finished": 0,
                     "failed": 0,
                     "stuck": 0,
+                    "dead_letter_pending": 0,
+                    "dead_letter_quarantined": 0,
                 }
             return {
                 "total": int(record["total"] or 0),
@@ -1128,4 +1454,293 @@ class ResearchQueue:
                 "finished": int(record["finished"] or 0),
                 "failed": int(record["failed"] or 0),
                 "stuck": int(record["stuck"] or 0),
+                "dead_letter_pending": int(record["dead_letter_pending"] or 0),
+                "dead_letter_quarantined": int(record["dead_letter_quarantined"] or 0),
             }
+
+    async def list_dead_letter_jobs(
+        self, workspace_id: str, limit: int = 25,
+    ) -> list[dict[str, object]]:
+        """Lists bounded dead-letter jobs for the authenticated workspace without secrets/notes."""
+        if not workspace_id:
+            raise JobRejected("WORKSPACE_REQUIRED", 403)
+        if not getattr(self, "store", None) or not getattr(self.store, "driver", None):
+            raise JobRejected("RESEARCH_QUEUE_UNAVAILABLE", 503)
+        bounded_limit = max(1, min(limit, 50))
+        async with self.store.driver.session(database=self.store.database) as session:
+            cursor = await session.run(
+                "MATCH (j:ResearchJob {workspace:$workspace}) "
+                "WHERE j.state = 'failed' AND (coalesce(j.dead_letter, false) = true "
+                "OR j.failure_reason IS NOT NULL) "
+                "RETURN j.id AS id, j.envelope AS envelope, j.prior_state AS prior_state, "
+                "j.failure_reason AS failure_reason, "
+                "coalesce(j.reconciliation_status, 'pending') AS reconciliation_status, "
+                "coalesce(j.reserved_ms, 0) AS reserved_ms, "
+                "j.authorized_retry_key AS authorized_retry_key, "
+                "j.reconciled_receipt_id AS reconciled_receipt_id, "
+                "coalesce(j.recovered_at, j.quarantined_at) AS recovered_at, "
+                "j.reconciled_at AS reconciled_at, j.reconciled_by AS reconciled_by "
+                "ORDER BY coalesce(j.recovered_at, j.quarantined_at, j.expires_at, 0) DESC "
+                "LIMIT $limit",
+                workspace=workspace_id,
+                limit=bounded_limit,
+            )
+            rows = [row async for row in cursor]
+        items: list[dict[str, object]] = []
+        for row in rows:
+            operation, target_uuid = _envelope_meta(row.get("envelope"))
+            raw_prior = row.get("prior_state")
+            prior_state = raw_prior if raw_prior in ("queued", "running") else "unknown"
+            status = row.get("reconciliation_status")
+            if status not in ("pending", "quarantined", "retry_authorized", "reconciled_receipt"):
+                status = "pending"
+            items.append({
+                "job_id": str(row["id"]),
+                "operation": operation,
+                "target_uuid": target_uuid,
+                "prior_state": prior_state,
+                "failure_reason": str(row["failure_reason"]) if row.get("failure_reason") else None,
+                "reconciliation_status": status,
+                "reserved_ms": max(0, int(row.get("reserved_ms") or 0)),
+                "reservation_retained": True,
+                "retry_eligible": prior_state == "queued" and status in ("pending", "quarantined"),
+                "authorized_retry_key": row.get("authorized_retry_key"),
+                "reconciled_receipt_id": row.get("reconciled_receipt_id"),
+                "recovered_at": (
+                    int(row["recovered_at"]) if row.get("recovered_at") is not None else None
+                ),
+                "reconciled_at": row.get("reconciled_at"),
+                "reconciled_by": row.get("reconciled_by"),
+            })
+        return items
+
+    async def reconcile_dead_letter_job(
+        self,
+        *,
+        workspace_id: str,
+        job_id: str,
+        actor_id: str,
+        actor_role: str,
+        decision: DeadLetterDecision,
+        notes: str,
+        idempotency_key: str,
+    ) -> DeadLetterReconcileResponse:
+        """Human-authorized dead-letter recovery; never reruns running jobs or refunds."""
+        if not workspace_id:
+            raise JobRejected("WORKSPACE_REQUIRED", 403)
+        if actor_role not in HUMAN_ROLES:
+            raise JobRejected("RECONCILIATION_FORBIDDEN", 403)
+        cleaned_notes = notes.strip()
+        if not 3 <= len(cleaned_notes) <= 1000:
+            raise JobRejected("INVALID_RECONCILIATION_NOTES", 422)
+        cleaned_key = idempotency_key.strip()
+        if not cleaned_key or len(cleaned_key) > 200 or not cleaned_key.isascii():
+            raise JobRejected("IDEMPOTENCY_KEY_REQUIRED", 400)
+        if not getattr(self, "store", None) or not getattr(self.store, "driver", None):
+            raise JobRejected("RESEARCH_QUEUE_UNAVAILABLE", 503)
+
+        async with self.store.driver.session(database=self.store.database) as session:
+            response = await session.execute_write(
+                self._tx_reconcile_dead_letter_job,
+                workspace_id=workspace_id,
+                job_id=job_id,
+                actor_id=actor_id,
+                actor_role=actor_role,
+                decision=decision,
+                cleaned_notes=cleaned_notes,
+                idempotency_key=cleaned_key,
+            )
+
+        log_audit_event(
+            "dead_letter_reconciled",
+            actor_id=actor_id,
+            workspace_id=workspace_id,
+            details={
+                "reconciliation_id": response.reconciliation_id,
+                "job_id": response.job_id,
+                "decision": response.decision,
+                "prior_state": response.prior_state,
+                "reconciliation_status": response.reconciliation_status,
+                "receipt_found": response.receipt_found,
+                "reservation_retained": True,
+                "replayed": response.replayed,
+            },
+        )
+        emit_event(
+            "dead_letter_reconciled",
+            workspace_id=workspace_id,
+            job_id=response.job_id,
+            operation=response.operation,
+            target_uuid=response.target_uuid,
+            prior_state=response.prior_state,
+            decision=response.decision,
+            reconciliation_status=response.reconciliation_status,
+            reconciliation_id=response.reconciliation_id,
+            receipt_found=response.receipt_found,
+            reconciled_receipt_id=response.reconciled_receipt_id,
+            reservation_retained=True,
+            replayed=response.replayed,
+        )
+        return response
+
+    async def _tx_reconcile_dead_letter_job(
+        self,
+        tx,
+        *,
+        workspace_id: str,
+        job_id: str,
+        actor_id: str,
+        actor_role: str,
+        decision: DeadLetterDecision,
+        cleaned_notes: str,
+        idempotency_key: str,
+    ) -> DeadLetterReconcileResponse:
+        await self._lock(tx)
+        row = await (await tx.run(
+            "MATCH (j:ResearchJob {id:$job_id, workspace:$workspace}) "
+            "RETURN j.state AS state, j.envelope AS envelope, j.prior_state AS prior_state, "
+            "j.reserved_ms AS reserved_ms, j.reconciliation_status AS reconciliation_status, "
+            "j.reconciliation_key AS reconciliation_key, "
+            "j.reconciliation_intent_hash AS reconciliation_intent_hash, "
+            "j.reconciliation_payload AS reconciliation_payload",
+            job_id=job_id,
+            workspace=workspace_id,
+        )).single()
+        if row is None:
+            raise JobRejected("DEAD_LETTER_JOB_NOT_FOUND", 404)
+        if row["state"] != "failed":
+            raise JobRejected("JOB_NOT_IN_DEAD_LETTER", 409)
+
+        intent_hash = digest([workspace_id, job_id, actor_id, actor_role, decision, cleaned_notes])
+        if row.get("reconciliation_key") == idempotency_key:
+            if row.get("reconciliation_intent_hash") != intent_hash:
+                raise JobRejected("RECONCILIATION_IDEMPOTENCY_CONFLICT", 409)
+            saved = DeadLetterReconcileResponse.model_validate_json(
+                str(row["reconciliation_payload"])
+            )
+            return saved.model_copy(update={"replayed": True})
+        if row.get("reconciliation_status") in ("retry_authorized", "reconciled_receipt"):
+            raise JobRejected("JOB_ALREADY_RECONCILED", 409)
+
+        operation, target_uuid = _envelope_meta(row.get("envelope"))
+        raw_prior = row.get("prior_state")
+        prior_state: DeadLetterPriorState = (
+            raw_prior if raw_prior in ("queued", "running") else "unknown"
+        )
+        reserved_ms = max(0, int(row.get("reserved_ms") or 0))
+        authorized_retry_key: str | None = None
+        reconciled_receipt_id: str | None = None
+        receipt_found = False
+
+        if decision == "authorize_retry":
+            if prior_state != "queued":
+                raise JobRejected("UNCERTAIN_JOB_CANNOT_AUTO_RETRY", 409)
+            new_status: Literal["quarantined", "retry_authorized", "reconciled_receipt"] = (
+                "retry_authorized"
+            )
+            authorized_retry_key = f"dlq-retry:{job_id}:{digest([idempotency_key, job_id])[:16]}"
+        elif decision == "reconcile_receipt":
+            reconciled_receipt_id = await self._find_existing_receipt_id(
+                tx, workspace_id=workspace_id, job_id=job_id,
+                operation=operation, target_uuid=target_uuid,
+            )
+            receipt_found = reconciled_receipt_id is not None
+            new_status = "reconciled_receipt" if receipt_found else "quarantined"
+        else:
+            new_status = "quarantined"
+
+        reconciled_at = datetime.now(UTC).isoformat()
+        response = DeadLetterReconcileResponse(
+            reconciliation_id="dlq_" + digest([workspace_id, job_id, idempotency_key])[:32],
+            job_id=job_id,
+            workspace_id=workspace_id,
+            operation=operation,
+            target_uuid=target_uuid,
+            prior_state=prior_state,
+            decision=decision,
+            reconciliation_status=new_status,
+            reserved_ms=reserved_ms,
+            reservation_retained=True,
+            receipt_found=receipt_found,
+            reconciled_receipt_id=reconciled_receipt_id,
+            authorized_retry_key=authorized_retry_key,
+            reconciled_by=actor_id,
+            reconciled_at=reconciled_at,
+            replayed=False,
+        )
+        await (await tx.run(
+            "MATCH (j:ResearchJob {id:$job_id, workspace:$workspace}) "
+            "SET j.dead_letter = true, "
+            "j.reconciliation_status = $status, "
+            "j.reconciliation_id = $reconciliation_id, "
+            "j.reconciliation_key = $reconciliation_key, "
+            "j.reconciliation_intent_hash = $intent_hash, "
+            "j.reconciliation_notes_sha256 = $notes_sha256, "
+            "j.reconciled_by = $reconciled_by, "
+            "j.reconciled_at = $reconciled_at, "
+            "j.authorized_retry_key = $authorized_retry_key, "
+            "j.reconciled_receipt_id = $reconciled_receipt_id, "
+            "j.reconciliation_payload = $payload "
+            "RETURN j.id AS id",
+            job_id=job_id,
+            workspace=workspace_id,
+            status=new_status,
+            reconciliation_id=response.reconciliation_id,
+            reconciliation_key=idempotency_key,
+            intent_hash=intent_hash,
+            notes_sha256=digest(cleaned_notes),
+            reconciled_by=actor_id,
+            reconciled_at=reconciled_at,
+            authorized_retry_key=authorized_retry_key,
+            reconciled_receipt_id=reconciled_receipt_id,
+            payload=response.model_dump_json(),
+        )).single(strict=True)
+        return response
+
+    @staticmethod
+    async def _find_existing_receipt_id(
+        tx, *, workspace_id: str, job_id: str, operation: str, target_uuid: str,
+    ) -> str | None:
+        group_id = workspace_group_id(workspace_id)
+        specs = (
+            (
+                "checks:run",
+                "MATCH (c:CheckResult {group_id:$group}) WHERE c.payload CONTAINS $job_id "
+                "RETURN c.uuid AS receipt_id, c.payload AS payload",
+                CheckResult,
+                "job_id",
+                "target_uuid",
+            ),
+            (
+                "numerical_fixture:run",
+                "MATCH (r:ResearchNumericalFixtureResult {group_id:$group, "
+                "workspace_id:$workspace}) WHERE r.payload CONTAINS $job_id "
+                "RETURN r.result_id AS receipt_id, r.payload AS payload",
+                NumericalFixtureReceipt,
+                "run_id",
+                "candidate_id",
+            ),
+            (
+                "research_case:run",
+                "MATCH (r:ResearchExperimentResult {group_id:$group, "
+                "workspace_id:$workspace}) WHERE r.payload CONTAINS $job_id "
+                "RETURN r.result_id AS receipt_id, r.payload AS payload",
+                ResearchCaseReceipt,
+                "run_id",
+                "candidate_id",
+            ),
+        )
+        for op_name, query, model_cls, run_attr, target_attr in specs:
+            if operation not in (op_name, "unknown"):
+                continue
+            cursor = await tx.run(query, group=group_id, workspace=workspace_id, job_id=job_id)
+            async for rec in cursor:
+                try:
+                    parsed = model_cls.model_validate_json(str(rec["payload"]))
+                    if getattr(parsed, run_attr) == job_id and (
+                        target_uuid == "unknown" or getattr(parsed, target_attr) == target_uuid
+                    ):
+                        return str(rec["receipt_id"])
+                except ValueError:
+                    continue
+        return None

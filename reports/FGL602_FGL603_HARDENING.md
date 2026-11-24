@@ -1,4 +1,4 @@
-# FGL-602/603 hardening — checkpoint 2026-10-01
+# FGL-602/603 hardening — checkpoint 2026-11-25
 
 ## Release status
 
@@ -16,7 +16,8 @@ provider call was performed in this work.
 | Browser headers | Per-response random script nonce, same policy forwarded to SSR, caller nonce/policy removed; nosniff/no-referrer/no-store/HSTS on HTTPS, script attributes denied, frame restriction | Production HTTP/SSR smoke is not authenticated browser acceptance. Standalone framing denied; explicitly trusted Sites allows only `https://chatgpt.com`, not arbitrary origins. The identity flag is not a gateway authenticator. |
 | Narrow CSS exception | Script policy has neither unsafe-inline nor unsafe-eval; style elements use nonce | `style-src-attr 'unsafe-inline'` remains for KaTeX/React Flow geometry. This is an explicit, reviewable CSS exception, **not** completion of a zero-inline-style policy. Do not relax script CSP to resolve renderer problems. |
 | Hidden paid path | Setting the proposal API key no longer automatically activates Graphiti LLM/embedding work | Semantic enrichment requires separate opt-in in development and remains disabled in production until durable cost reservation/metering/reconciliation exists. Exact evidence ingestion/search remains available. |
-| Correlation | Server-owned HTTP request ID, isolated request context, signed service nonce and authenticated tenant; JSON telemetry for extraction/yield, graph receipt, semantic status, candidate/parent/version and checker receipt | Logs use route templates, never raw query/body/headers. Receipt events occur after managed transactions commit. IDs in logs do not replace persisted provenance. BFF-to-worker/campaign correlation is not yet complete. |
+| Correlation | Server-owned HTTP request ID (`x-request-id`), BFF↔FastAPI correlation (`x-upstream-request-id` + `bff_request_id`), isolated request context, signed service nonce and authenticated tenant; JSON telemetry after commit for extraction, graph receipt, semantic enrichment, frozen specs, proposals/spend, candidates, symbolic/numerical/research-case receipts, admission policy decisions, evolution transitions and redacted `WARNING`/`ERROR` provider/DB/dead-letter alerts (`notes`/`rationale` scrubbed) | Logs use route templates, never raw query/body/headers/notes. Receipt and policy events occur only after managed transactions commit. Telemetry remains operational telemetry rather than an immutable audit store. |
+| Execution-profile & dead-letter recovery (603) | `ExecutionProfile` (`sandbox-policy.v2`) bound into signed job envelopes and receipts with drift fail-closed (`409 EXECUTION_PROFILE_DRIFT`); idempotent double-delivery handling on `finish*` (`409 JOB_RESULT_CONFLICT` on altered result), late-delivery quarantine, `_recover_stuck_jobs` `prior_state` preservation, `/v1/research/ops/dashboard` `dead_letters`, `/v1/research/ops/jobs/{job_id}/reconcile`, BFF route allowlist & `/ops` Dead-Letter Ledger UI | `authorize_retry` blocked (`409 UNCERTAIN_JOB_CANNOT_AUTO_RETRY`) unless `prior_state == 'queued'`; `reserved_ms` and proposal spend reservations are never refunded; reconciliation never promotes campaign winners. Historical v1/v2 receipts stay readable for replay only. |
 | Provider metering | Duration/status, reserved cost bound, validated provider input/output token counts and estimated cost using configured unit prices | Missing usage stays unknown, not zero. Estimated cost is not invoice/billing truth; cached/reasoning pricing and reconciliation need operator validation. No prompt/model output/API key logged. |
 | Supply chain | Full npm audit cleaned by scoped esbuild override, migration-loader regression; digest-pinned base/tool images; Graph API installs frozen uv lock without dev extras; non-root, read-only Compose API and loopback ports | Pipeline is configured with SHA-pinned actions and failing scans, not a certification. Runtime images change IDs after rebuild: no environment image pin was silently replaced. |
 
@@ -42,8 +43,12 @@ npm start -- --port 4173 --ip 127.0.0.1 --log-level error
 node tests/production-security-smoke.mjs http://127.0.0.1:4173
 ```
 
-Latest recorded runs: 687 backend offline tests; 186 frontend tests; 33 real
-Neo4j integration tests; 7 sandbox tests and one clean-container replay test.
+Latest recorded runs (`2026-11-25` after FGL-603 implementation): 700 backend
+offline tests, 208 frontend tests (28 files), and 35 real Neo4j integration
+tests (`test-integration.ps1`, including `test_double_delivery_quarantine_and_dead_letter_reconciliation`
+and double-delivery `finish_numerical_fixture`) passed alongside Ruff, Oxlint
+(`0` warnings/errors), TypeScript (`0` errors) and `npm run build` (`vinext build`);
+prior `2026-11-24` sandbox runs recorded 7 sandbox + 1 clean-container replay test.
 Ruff, lint, TypeScript, production build and production HTTP smoke pass.
 Frozen runtime requirements audit: 41 packages, zero known advisories.
 Full and production-only npm audit: zero known advisories at scan time.
@@ -75,37 +80,23 @@ image digest, reachability evidence, owner and expiry. None has been granted.
 
 ## Remaining implementation work, in order
 
-1. **Execution-profile identity (603).** Capture normalized memory/CPU/effective
-   timeout alongside image/module/protocol at admission. Bind the profile into
-   signed job identity and versioned receipts; reject config drift before run.
-   Preserve old receipt readability without treating old resources as current.
-   Tests: different profiles cannot replay each other; changing environment
-   between queue admission/execution fails closed; sandbox observed settings
-   match the receipt. This is still open, not covered by telemetry.
-2. **Complete telemetry/recovery (603).** Correlate BFF, import, candidate,
-   worker job, admission and campaign using persisted IDs; record numerical/
-   empirical outcomes and queue/policy/spend transitions after commit. Add
-   controlled dead-letter reconciliation with separately authorized retry and
-   idempotency. Never rerun uncertain jobs, refund reservations or promote a
-   winner just because recovery changed a status. Test double delivery,
-   controller death, DB/provider failure and redacted actionable alerts.
-3. **Durable audit (602).** Select an append-only external sink with a distinct
+1. **Durable audit (602).** Select an append-only external sink with a distinct
    writer credential, encryption, retention and verification/export. Standard
    logs here remain telemetry. Design fail policy per security operation and
    test sink outage, TX retry/rollback and delete/edit denial or detection.
    Do not call a normal mutable Neo4j collection or local logfile immutable.
-4. **Retention/backup/incident (602).** Approve storage/retention/RPO/RTO and
+2. **Retention/backup/incident (602).** Approve storage/retention/RPO/RTO and
    encryption key ownership, then implement and run an isolated D1 + Neo4j
    restore drill. Restore source bytes/hashes, review records, versions, job
    reservations and replay bundles, not just graph node counts. No cleanup may
    delete immutable evidence or release an uncertain reservation. Runbook below
    is a proposed operational procedure, not a completed backup test.
-5. **Supply-chain release decision (602).** Execute new CI on the pushed
+3. **Supply-chain release decision (602).** Execute new CI on the pushed
    revision, scan all three actual image variants, address reachable findings
    or obtain scoped exceptions. Validate the rebuilt Performer worker before
    replacing any deployment image ID. npm/Python scan success cannot override
    a failing base-OS scan.
-6. **Browser/identity acceptance (601/602).** Deferred by owner: staging and
+4. **Browser/identity acceptance (601/602).** Deferred by owner: staging and
    direct-origin/header forgery tests, two-user isolation, authenticated
    desktop/tablet/mobile CSP and source-to-export flow. Keep release gate open.
 

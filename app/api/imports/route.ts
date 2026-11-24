@@ -1,5 +1,6 @@
 import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { getD1 } from '@/db';
+import { emitBffTelemetry, newBffRequestId } from '@/lib/server/bff-telemetry';
 import { isSameOriginRequest } from '@/lib/server/request-origin';
 import { env } from 'cloudflare:workers';
 import { normalizeArxivHtmlUrl, PaperUrlError } from '@/lib/paper-url';
@@ -18,22 +19,25 @@ import {
 
 const MAX_REQUEST_BYTES = 4 * 1024;
 
-function json(body: unknown, status: number) {
-  return Response.json(body, {
-    status,
-    headers: {
-      'cache-control': 'no-store',
-      'x-content-type-options': 'nosniff',
-    },
-  });
+function json(body: unknown, status: number, requestId: string, upstreamRequestId?: string) {
+  const headers: Record<string, string> = {
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+    'x-request-id': requestId,
+  };
+  if (upstreamRequestId) {
+    headers['x-upstream-request-id'] = upstreamRequestId;
+  }
+  return Response.json(body, { status, headers });
 }
 
 export async function POST(request: Request) {
+  const bffRequestId = newBffRequestId();
   const user = await getChatGPTUser();
-  if (!user) return json({ code: 'AUTH_REQUIRED' }, 401);
+  if (!user) return json({ code: 'AUTH_REQUIRED' }, 401, bffRequestId);
 
   if (!isSameOriginRequest(request)) {
-    return json({ code: 'CROSS_SITE_REQUEST_REJECTED' }, 403);
+    return json({ code: 'CROSS_SITE_REQUEST_REJECTED' }, 403, bffRequestId);
   }
   const mediaType = request.headers
     .get('content-type')
@@ -41,7 +45,7 @@ export async function POST(request: Request) {
     .trim()
     .toLowerCase();
   if (mediaType !== 'application/json') {
-    return json({ code: 'JSON_REQUIRED' }, 415);
+    return json({ code: 'JSON_REQUIRED' }, 415, bffRequestId);
   }
 
   let submittedUrl: unknown;
@@ -50,11 +54,11 @@ export async function POST(request: Request) {
     const rawBody = await readTextLimited(request.body, MAX_REQUEST_BYTES);
     const body = JSON.parse(rawBody) as unknown;
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
-      return json({ code: 'INVALID_JSON' }, 400);
+      return json({ code: 'INVALID_JSON' }, 400, bffRequestId);
     }
     const fields = Object.keys(body);
     if (fields.length !== 1 || fields[0] !== 'url') {
-      return json({ code: 'INVALID_REQUEST' }, 400);
+      return json({ code: 'INVALID_REQUEST' }, 400, bffRequestId);
     }
     submittedUrl = (body as { url?: unknown }).url;
   } catch (error) {
@@ -66,10 +70,11 @@ export async function POST(request: Request) {
             : 'INVALID_JSON',
       },
       error instanceof PayloadTooLargeError ? 413 : 400,
+      bffRequestId,
     );
   }
   if (typeof submittedUrl !== 'string') {
-    return json({ code: 'URL_REQUIRED' }, 400);
+    return json({ code: 'URL_REQUIRED' }, 400, bffRequestId);
   }
 
   let canonicalUrl: string;
@@ -85,6 +90,7 @@ export async function POST(request: Request) {
             : 'Paper URL is not supported.',
       },
       400,
+      bffRequestId,
     );
   }
 
@@ -96,28 +102,42 @@ export async function POST(request: Request) {
     !import.meta.env.DEV || env.APP_ENV !== 'development',
   );
   if (!graphConfiguration) {
-    return json({ code: 'GRAPH_API_NOT_CONFIGURED' }, 503);
+    emitBffTelemetry('bff_paper_import', {
+      bff_request_id: bffRequestId,
+      status: 503,
+      code: 'GRAPH_API_NOT_CONFIGURED',
+    });
+    return json({ code: 'GRAPH_API_NOT_CONFIGURED' }, 503, bffRequestId);
   }
 
   let repository: D1ImportRepository;
   try {
     repository = new D1ImportRepository(getD1());
   } catch {
-    return json({ code: 'DATABASE_UNAVAILABLE' }, 503);
+    emitBffTelemetry('bff_paper_import', {
+      bff_request_id: bffRequestId,
+      status: 503,
+      code: 'DATABASE_UNAVAILABLE',
+    });
+    return json({ code: 'DATABASE_UNAVAILABLE' }, 503, bffRequestId);
   }
 
+  let upstreamRequestId: string | undefined;
   try {
+    const graphClient = new HttpGraphImportClient(graphConfiguration);
     const result = await runPaperImport({
       canonicalUrl,
       userId: user.userId,
       repository,
-      graphClient: new HttpGraphImportClient(graphConfiguration),
+      graphClient,
+      bffRequestId,
     });
-    return json(result, 200);
+    upstreamRequestId = graphClient.lastUpstreamRequestId;
+    return json(result, 200, bffRequestId, upstreamRequestId);
   } catch (error) {
     if (error instanceof ImportWorkflowError) {
-      return json({ code: error.code }, error.status);
+      return json({ code: error.code }, error.status, bffRequestId, upstreamRequestId);
     }
-    return json({ code: 'IMPORT_FAILED' }, 503);
+    return json({ code: 'IMPORT_FAILED' }, 503, bffRequestId, upstreamRequestId);
   }
 }

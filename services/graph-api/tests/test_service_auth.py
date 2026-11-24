@@ -15,7 +15,7 @@ from app.auth import ServiceActor, require_human_service_actor, require_research
 from app.main import app, require_search_service
 from app.models import EvidenceSearchResponse
 from app.research_store import Neo4jResearchStore
-from tests.service_auth_helpers import TEST_KEY, TEST_WORKSPACE, sign_request
+from tests.service_auth_helpers import TEST_ACTOR, TEST_KEY, TEST_WORKSPACE, sign_request
 
 
 class Nonces:
@@ -437,6 +437,58 @@ def test_ops_uses_only_authenticated_workspace_and_does_not_accept_selectors(mon
     body = b'{"workspace_id":"foreign"}'
     response = client.post(path, content=body, headers=sign_request("POST", path, body))
     assert response.status_code == 403
+
+    job_id = "11111111-1111-4111-8111-111111111111"
+    queue.list_dead_letter_jobs = AsyncMock(return_value=[])
+    queue.reconcile_dead_letter_job = AsyncMock(return_value=SimpleNamespace(
+        model_dump=lambda mode="json": {
+            "reconciliation_id": "dlq_" + "a" * 32,
+            "job_id": job_id,
+            "workspace_id": TEST_WORKSPACE,
+            "operation": "checks:run",
+            "target_uuid": "eq-1",
+            "prior_state": "queued",
+            "decision": "authorize_retry",
+            "reconciliation_status": "retry_authorized",
+            "reserved_ms": 2000,
+            "reservation_retained": True,
+            "receipt_found": False,
+            "reconciled_receipt_id": None,
+            "authorized_retry_key": "dlq-retry:key",
+            "reconciled_by": TEST_ACTOR,
+            "reconciled_at": "2026-11-24T00:00:00Z",
+            "replayed": False,
+        }
+    ))
+    reconcile_path = f"/v1/research/ops/jobs/{job_id}/reconcile"
+    rec_body = b'{"decision":"authorize_retry","notes":"queued job verified"}'
+    rec_headers = {
+        **sign_request("POST", reconcile_path, rec_body, idempotency_key="dlq-auth-1"),
+        "x-idempotency-key": "dlq-auth-1",
+    }
+    rec_resp = client.post(reconcile_path, content=rec_body, headers=rec_headers)
+    assert rec_resp.status_code == 200
+    queue.reconcile_dead_letter_job.assert_awaited_once_with(
+        workspace_id=TEST_WORKSPACE,
+        job_id=job_id,
+        actor_id=TEST_ACTOR,
+        actor_role="researcher",
+        decision="authorize_retry",
+        notes="queued job verified",
+        idempotency_key="dlq-auth-1",
+    )
+    bad_body = b'{"decision":"authorize_retry","notes":"ok","workspace_id":"foreign"}'
+    bad_headers = {
+        **sign_request("POST", reconcile_path, bad_body, idempotency_key="dlq-auth-2"),
+        "x-idempotency-key": "dlq-auth-2",
+    }
+    assert client.post(reconcile_path, content=bad_body, headers=bad_headers).status_code == 403
+    extra_body = b'{"decision":"authorize_retry","notes":"ok","refund_ms":500}'
+    extra_headers = {
+        **sign_request("POST", reconcile_path, extra_body, idempotency_key="dlq-auth-3"),
+        "x-idempotency-key": "dlq-auth-3",
+    }
+    assert client.post(reconcile_path, content=extra_body, headers=extra_headers).status_code == 422
 
 
 def test_auth_failure_never_logs_validation_input_or_unverified_actor(caplog):

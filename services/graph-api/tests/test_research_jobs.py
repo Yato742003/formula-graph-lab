@@ -624,3 +624,133 @@ def test_validate_symbolic_check_payload_supports_4_and_6_keys():
         with pytest.raises(JobRejected, match="INVALID_JOB_INPUT"):
             validate_symbolic_check_payload(bad)
 
+
+@pytest.mark.asyncio
+async def test_reconcile_dead_letter_job_validation_and_uncertain_block(caplog):
+    import logging
+
+    queue = ResearchQueue(SimpleNamespace(driver=None), KEY)
+    with pytest.raises(JobRejected, match="WORKSPACE_REQUIRED"):
+        await queue.reconcile_dead_letter_job(
+            workspace_id="",
+            job_id="11111111-1111-4111-8111-111111111111",
+            actor_id="user-1",
+            actor_role="researcher",
+            decision="quarantine",
+            notes="valid notes",
+            idempotency_key="dlq-k1",
+        )
+    with pytest.raises(JobRejected, match="RECONCILIATION_FORBIDDEN"):
+        await queue.reconcile_dead_letter_job(
+            workspace_id="ws_1",
+            job_id="11111111-1111-4111-8111-111111111111",
+            actor_id="worker-1",
+            actor_role="verifier",
+            decision="quarantine",
+            notes="valid notes",
+            idempotency_key="dlq-k2",
+        )
+    with pytest.raises(JobRejected, match="INVALID_RECONCILIATION_NOTES"):
+        await queue.reconcile_dead_letter_job(
+            workspace_id="ws_1",
+            job_id="11111111-1111-4111-8111-111111111111",
+            actor_id="user-1",
+            actor_role="researcher",
+            decision="quarantine",
+            notes="  ",
+            idempotency_key="dlq-k3",
+        )
+
+    fake_envelope = envelope().model_dump_json()
+
+    class MockResult:
+        def __init__(self, row):
+            self._row = row
+
+        async def single(self, strict=False):
+            if self._row is None and strict:
+                raise AssertionError("Expected row")
+            return self._row
+
+        async def consume(self):
+            return None
+
+    class FakeSession:
+        def __init__(self, state_row):
+            self.state_row = state_row
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def execute_write(self, fn, **kwargs):
+            row = self.state_row
+
+            class Tx:
+                async def run(self, query, **qkwargs):
+                    if "ResearchJob" in query and "RETURN j.state" in query:
+                        return MockResult(row)
+                    return MockResult({"id": row["id"] if row else None})
+
+            return await fn(Tx(), **kwargs)
+
+    # Running (uncertain) job CANNOT be auto-retried.
+    running_row = {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "state": "failed",
+        "envelope": fake_envelope,
+        "prior_state": "running",
+        "reserved_ms": 2000,
+        "reconciliation_status": "pending",
+        "reconciliation_key": None,
+        "reconciliation_intent_hash": None,
+        "reconciliation_payload": None,
+    }
+    queue_running = ResearchQueue(
+        SimpleNamespace(
+            driver=SimpleNamespace(session=lambda database=None: FakeSession(running_row)),
+            database="neo4j",
+        ),
+        KEY,
+    )
+    with pytest.raises(JobRejected, match="UNCERTAIN_JOB_CANNOT_AUTO_RETRY") as exc_info:
+        await queue_running.reconcile_dead_letter_job(
+            workspace_id="w1",
+            job_id="22222222-2222-4222-8222-222222222222",
+            actor_id="user-1",
+            actor_role="researcher",
+            decision="authorize_retry",
+            notes="should fail closed",
+            idempotency_key="dlq-uncertain-1",
+        )
+    assert exc_info.value.status == 409
+
+    # Queued job CAN authorize_retry and keeps reserved_ms + redacts notes in logs.
+    queued_row = {**running_row, "prior_state": "queued"}
+    queue_queued = ResearchQueue(
+        SimpleNamespace(
+            driver=SimpleNamespace(session=lambda database=None: FakeSession(queued_row)),
+            database="neo4j",
+        ),
+        KEY,
+    )
+    with caplog.at_level(logging.INFO, logger="fgl.telemetry"), caplog.at_level(
+        logging.WARNING, logger="fgl.audit"
+    ):
+        receipt = await queue_queued.reconcile_dead_letter_job(
+            workspace_id="w1",
+            job_id="11111111-1111-4111-8111-111111111111",
+            actor_id="user-1",
+            actor_role="researcher",
+            decision="authorize_retry",
+            notes="SECRET_QUEUED_OPERATOR_NOTE crashed before claim",
+            idempotency_key="dlq-queued-1",
+        )
+    assert receipt.reconciliation_status == "retry_authorized"
+    assert receipt.reservation_retained is True
+    assert receipt.reserved_ms == 2000
+    assert receipt.authorized_retry_key is not None
+    assert "SECRET_QUEUED_OPERATOR_NOTE" not in caplog.text
+

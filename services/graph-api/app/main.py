@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from contextlib import asynccontextmanager, suppress
@@ -120,6 +121,7 @@ from app.research_case import (
 )
 from app.research_compiler import CompileCandidateRequest, CompileCandidateResponse
 from app.research_jobs import (
+    DeadLetterReconcileRequest,
     JobRejected,
     ResearchQueue,
     configured_queue_key,
@@ -353,6 +355,14 @@ async def import_evidence(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (Neo4jError, ServiceUnavailable, OSError) as exc:
+        emit_event(
+            "db_unavailable_alert",
+            level=logging.ERROR,
+            code="NEO4J_UNAVAILABLE",
+            operation="import_evidence",
+            workspace_id=body.workspace_id,
+            error_type=type(exc).__name__,
+        )
         raise HTTPException(status_code=503, detail="Exact evidence storage failed.") from exc
     emit_event("exact_graph_written", import_uuid=receipt.import_uuid,
                node_count=receipt.node_count, edge_count=receipt.edge_count,
@@ -773,6 +783,14 @@ async def create_problem_spec(
     except ParentSpecNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (Neo4jError, ServiceUnavailable, OSError) as exc:
+        emit_event(
+            "db_unavailable_alert",
+            level=logging.ERROR,
+            code="NEO4J_UNAVAILABLE",
+            operation="create_problem_spec",
+            workspace_id=workspace_id,
+            error_type=type(exc).__name__,
+        )
         raise HTTPException(status_code=503, detail="Database operation failed.") from exc
 
     return JSONResponse(
@@ -782,6 +800,20 @@ async def create_problem_spec(
     )
 
 
+def _resolve_ops_queue(request: Request) -> ResearchQueue | None:
+    queue = getattr(request.app.state, "research_queue", None)
+    if queue is not None:
+        return queue
+    try:
+        store = getattr(request.app.state, "evidence_store", None)
+        key = configured_queue_key()
+        if store is not None:
+            return ResearchQueue(store, key)
+    except Exception:
+        return None
+    return None
+
+
 @app.get("/v1/research/ops/dashboard")
 async def ops_dashboard(
     auth_ctx: Annotated[tuple[ServiceActor, str], Depends(require_research_service_actor)],
@@ -789,26 +821,27 @@ async def ops_dashboard(
     response: Response,
 ) -> dict[str, object]:
     response.headers["Cache-Control"] = "no-store"
-    queue = getattr(request.app.state, "research_queue", None)
-    if queue is None:
-        try:
-            store = getattr(request.app.state, "evidence_store", None)
-            key = configured_queue_key()
-            if store is not None:
-                queue = ResearchQueue(store, key)
-        except Exception:
-            queue = None
-
+    queue = _resolve_ops_queue(request)
     _, workspace_id = auth_ctx
     job_metrics = None
+    dead_letters: list[dict[str, object]] = []
     if queue is not None:
         # Missing telemetry stays unavailable, never a healthy zero.
         with suppress(JobRejected, Neo4jError, ServiceUnavailable, OSError):
             job_metrics = await queue.job_health_metrics(workspace_id)
+        list_dlq = getattr(queue, "list_dead_letter_jobs", None)
+        if callable(list_dlq):
+            with suppress(JobRejected, Neo4jError, ServiceUnavailable, OSError):
+                dead_letters = await list_dlq(workspace_id)
 
     limits = worker_execution_limits()
     image = os.getenv("FGL_SANDBOX_IMAGE", "")
-    status = "degraded" if job_metrics is None or job_metrics.get("stuck", 0) > 0 else "ok"
+    queue_degraded = bool(
+        job_metrics is None
+        or job_metrics.get("stuck", 0) > 0
+        or job_metrics.get("dead_letter_pending", 0) > 0
+    )
+    status = "degraded" if queue_degraded else "ok"
     quotas_info = {
         "status": "ok",
         "request_body_cap_bytes": MAX_REQUEST_BODY_BYTES,
@@ -821,6 +854,7 @@ async def ops_dashboard(
         "status": status,
         "workspace_id": workspace_id,
         "checked_at": datetime.now(UTC).isoformat(),
+        "dead_letters": dead_letters,
         "subsystems": {
             "import": {
                 "status": "configured",
@@ -839,7 +873,7 @@ async def ops_dashboard(
             },
             "worker": {
                 "status": "unavailable" if job_metrics is None else (
-                    "degraded" if job_metrics.get("stuck", 0) > 0 else "configured"
+                    "degraded" if queue_degraded else "configured"
                 ),
                 "sandbox_image": image or "none",
                 "sandbox_available": bool(image),
@@ -863,16 +897,7 @@ async def ops_recover_jobs(
     response: Response,
 ) -> dict[str, object]:
     response.headers["Cache-Control"] = "no-store"
-    queue = getattr(request.app.state, "research_queue", None)
-    if queue is None:
-        try:
-            store = getattr(request.app.state, "evidence_store", None)
-            key = configured_queue_key()
-            if store is not None:
-                queue = ResearchQueue(store, key)
-        except Exception:
-            queue = None
-
+    queue = _resolve_ops_queue(request)
     if queue is None:
         raise HTTPException(503, "Research queue unavailable.")
 
@@ -881,7 +906,59 @@ async def ops_recover_jobs(
     except JobRejected as exc:
         raise HTTPException(exc.status, str(exc)) from exc
     except (Neo4jError, ServiceUnavailable, OSError) as exc:
+        emit_event(
+            "db_unavailable_alert",
+            level=logging.ERROR,
+            code="NEO4J_UNAVAILABLE",
+            operation="ops_recover_jobs",
+            workspace_id=auth_ctx[1],
+            error_type=type(exc).__name__,
+        )
         raise HTTPException(503, "Research queue unavailable.") from exc
+
+
+@app.post("/v1/research/ops/jobs/{job_id}/reconcile")
+async def ops_reconcile_job(
+    job_id: Annotated[str, Path(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]{1,120}$")],
+    body: DeadLetterReconcileRequest,
+    auth_ctx: Annotated[tuple[ServiceActor, str], Depends(require_research_service_actor)],
+    request: Request,
+    x_idempotency_key: Annotated[str | None, Header()] = None,
+):
+    actor, workspace_id = auth_ctx
+    queue = _resolve_ops_queue(request)
+    if queue is None:
+        raise HTTPException(503, "Research queue unavailable.")
+
+    try:
+        receipt = await queue.reconcile_dead_letter_job(
+            workspace_id=workspace_id,
+            job_id=job_id,
+            actor_id=actor.actor_id,
+            actor_role=actor.role,
+            decision=body.decision,
+            notes=body.notes,
+            idempotency_key=x_idempotency_key or "",
+        )
+    except JobRejected as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    except (Neo4jError, ServiceUnavailable, OSError) as exc:
+        emit_event(
+            "db_unavailable_alert",
+            level=logging.ERROR,
+            code="NEO4J_UNAVAILABLE",
+            operation="ops_reconcile_job",
+            workspace_id=workspace_id,
+            job_id=job_id,
+            error_type=type(exc).__name__,
+        )
+        raise HTTPException(503, "Research queue unavailable.") from exc
+
+    return JSONResponse(
+        content=receipt.model_dump(mode="json"),
+        status_code=200,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/v1/research/problems")
@@ -1373,11 +1450,29 @@ async def generate_research_proposal(
             response_json=json.dumps(result.model_dump(mode="json"), separators=(",", ":")),
         )
     except ProposalProviderError as exc:
+        emit_event(
+            "proposal_provider_alert",
+            level=logging.WARNING,
+            code="PROPOSAL_GENERATION_UNAVAILABLE",
+            workspace_id=workspace_id,
+            spec_id=body.spec_id,
+            reservation_retained=True,
+            error_type=type(exc).__name__,
+        )
         raise HTTPException(
             status_code=503,
             detail={"code": "PROPOSAL_GENERATION_UNAVAILABLE", "reason": str(exc)},
         ) from exc
     except ProposalGenerationError as exc:
+        emit_event(
+            "proposal_provider_alert",
+            level=logging.WARNING,
+            code="PROPOSAL_RETRY_LIMIT_REACHED",
+            workspace_id=workspace_id,
+            spec_id=body.spec_id,
+            attempts=exc.attempts,
+            reservation_retained=True,
+        )
         raise HTTPException(
             status_code=422,
             detail={"code": "PROPOSAL_RETRY_LIMIT_REACHED", "attempts": exc.attempts},
@@ -1389,6 +1484,13 @@ async def generate_research_proposal(
     except IdempotencyConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ProposalGenerationBudgetExceededError as exc:
+        emit_event(
+            "proposal_spend_transition",
+            level=logging.WARNING,
+            workspace_id=workspace_id,
+            spec_id=body.spec_id,
+            status="budget_exceeded",
+        )
         raise HTTPException(
             status_code=429, detail={"code": "PROPOSAL_DAILY_CAP_EXCEEDED"}
         ) from exc
@@ -1397,6 +1499,15 @@ async def generate_research_proposal(
             status_code=409, detail={"code": "PROPOSAL_GENERATION_IN_PROGRESS"}
         ) from exc
     except (ResearchStoreError, Neo4jError, ServiceUnavailable, OSError) as exc:
+        emit_event(
+            "db_unavailable_alert",
+            level=logging.ERROR,
+            code="NEO4J_UNAVAILABLE",
+            operation="generate_research_proposal",
+            workspace_id=workspace_id,
+            spec_id=body.spec_id,
+            error_type=type(exc).__name__,
+        )
         raise HTTPException(
             status_code=503, detail="Proposal generation/storage unavailable."
         ) from exc
@@ -1756,6 +1867,15 @@ async def run_research_case(
     except ResearchValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (ValueError, ResearchStoreError, Neo4jError, ServiceUnavailable, OSError) as exc:
+        emit_event(
+            "db_unavailable_alert",
+            level=logging.ERROR,
+            code="NEO4J_UNAVAILABLE",
+            operation="run_research_case",
+            workspace_id=workspace_id,
+            candidate_id=candidate_id,
+            error_type=type(exc).__name__,
+        )
         raise HTTPException(
             status_code=503, detail="Research-case service is unavailable or misconfigured."
         ) from exc
@@ -1866,6 +1986,15 @@ async def evolution_execution_response(function, store, auth_ctx, evolution_id, 
     except (ResearchValidationError, IdempotencyConflictError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (ResearchStoreError, Neo4jError, ServiceUnavailable, OSError) as exc:
+        emit_event(
+            "db_unavailable_alert",
+            level=logging.ERROR,
+            code="NEO4J_UNAVAILABLE",
+            operation="evolution_execution",
+            workspace_id=workspace,
+            evolution_id=evolution_id,
+            error_type=type(exc).__name__,
+        )
         raise HTTPException(status_code=503, detail="Evolution execution is unavailable.") from exc
     return JSONResponse(
         content=EvolutionCampaignResponse(

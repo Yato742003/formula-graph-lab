@@ -6,6 +6,7 @@ import type {
   WorkspaceImportResponse,
 } from '../import-types';
 import { normalizeArxivHtmlUrl } from '../paper-url';
+import { emitBffTelemetry, newBffRequestId, safeUpstreamRequestId } from './bff-telemetry';
 import { signedGraphHeaders } from './graph-service-auth';
 import {
   assertDeclaredLengthWithinLimit,
@@ -94,6 +95,8 @@ export interface GraphImportClient {
 }
 
 export class HttpGraphImportClient implements GraphImportClient {
+  lastUpstreamRequestId?: string;
+
   constructor(
     private readonly configuration: GraphApiConfiguration,
     private readonly fetchImplementation: typeof fetch = fetch,
@@ -117,6 +120,7 @@ export class HttpGraphImportClient implements GraphImportClient {
           signal: AbortSignal.timeout(20_000),
         },
       );
+      this.lastUpstreamRequestId = safeUpstreamRequestId(response.headers);
     } catch (error) {
       logGraphClientFailure(error);
       throw new ImportWorkflowError('GRAPH_API_UNAVAILABLE', 502);
@@ -335,7 +339,9 @@ export async function runPaperImport(input: {
   graphClient: GraphImportClient;
   now?: () => number;
   createId?: () => string;
+  bffRequestId?: string;
 }): Promise<WorkspaceImportResponse> {
+  const bffRequestId = input.bffRequestId ?? newBffRequestId();
   const now = input.now ?? Date.now;
   const createId = input.createId ?? (() => crypto.randomUUID());
   const workspaceId = await stableIdentifier('ws', input.userId);
@@ -362,6 +368,13 @@ export async function runPaperImport(input: {
       now: startedAt,
     });
   } catch {
+    emitBffTelemetry('bff_paper_import', {
+      bff_request_id: bffRequestId,
+      workspace_id: workspaceId,
+      import_job_id: jobId,
+      status: 503,
+      code: 'DATABASE_UNAVAILABLE',
+    });
     throw databaseUnavailable();
   }
 
@@ -371,6 +384,10 @@ export async function runPaperImport(input: {
       workspaceId,
       input.userId,
     );
+    const upstreamRequestId =
+      input.graphClient instanceof HttpGraphImportClient
+        ? input.graphClient.lastUpstreamRequestId
+        : undefined;
     const paperId = await stableIdentifier(
       'paper',
       `${workspaceId}\u0000${imported.paper.paper_id}\u0000v${imported.paper.version}`,
@@ -389,10 +406,25 @@ export async function runPaperImport(input: {
         now: now(),
       },
     });
+    emitBffTelemetry('bff_paper_import', {
+      bff_request_id: bffRequestId,
+      upstream_request_id: upstreamRequestId,
+      workspace_id: workspaceId,
+      import_job_id: jobId,
+      import_uuid: imported.receipt.import_uuid,
+      paper_id: imported.paper.paper_id,
+      paper_record_id: paperId,
+      replayed: imported.receipt.replayed,
+      status: 200,
+    });
     return { job_id: jobId, ...imported };
   } catch (error) {
     const failure =
       error instanceof ImportWorkflowError ? error : databaseUnavailable();
+    const upstreamRequestId =
+      input.graphClient instanceof HttpGraphImportClient
+        ? input.graphClient.lastUpstreamRequestId
+        : undefined;
     try {
       await input.repository.markFailed({
         jobId,
@@ -402,8 +434,24 @@ export async function runPaperImport(input: {
         now: now(),
       });
     } catch {
+      emitBffTelemetry('bff_paper_import', {
+        bff_request_id: bffRequestId,
+        upstream_request_id: upstreamRequestId,
+        workspace_id: workspaceId,
+        import_job_id: jobId,
+        status: 503,
+        code: 'DATABASE_UNAVAILABLE',
+      });
       throw databaseUnavailable();
     }
+    emitBffTelemetry('bff_paper_import', {
+      bff_request_id: bffRequestId,
+      upstream_request_id: upstreamRequestId,
+      workspace_id: workspaceId,
+      import_job_id: jobId,
+      status: failure.status,
+      code: failure.code,
+    });
     throw failure;
   }
 }

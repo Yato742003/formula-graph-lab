@@ -766,3 +766,76 @@ it('forwards ops dashboard and job recovery requests with workspace authenticati
   if (!recCall) throw new Error('Recovery call was not forwarded');
   expect((recCall[0] as URL).pathname).toBe('/v1/research/ops/jobs/recover');
 });
+
+it('forwards dead-letter reconciliation with correlation headers and redacts notes in telemetry', async () => {
+  mocks.user.mockResolvedValue({ userId: 'user-1' });
+  mocks.owned.mockResolvedValue(true);
+  const jobId = '11111111-1111-4111-8111-111111111111';
+  const upstreamReqId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const logs: string[] = [];
+  const infoSpy = vi.spyOn(console, 'info').mockImplementation((msg) => {
+    logs.push(String(msg));
+  });
+  const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+    Response.json(
+      {
+        reconciliation_id: 'dlq_' + 'a'.repeat(32),
+        job_id: jobId,
+        decision: 'authorize_retry',
+        reconciliation_status: 'retry_authorized',
+        reserved_ms: 4000,
+        reservation_retained: true,
+        replayed: false,
+      },
+      { headers: { 'x-request-id': upstreamReqId } },
+    ),
+  );
+  vi.stubGlobal('fetch', fetcher);
+
+  try {
+    const okRes = await POST(
+      new Request(`https://app.test/api/research/ops/jobs/${jobId}/reconcile`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-idempotency-key': 'dlq-reconcile-1' },
+        body: JSON.stringify({
+          decision: 'authorize_retry',
+          notes: 'SECRET_OPERATOR_RATIONALE queued crash verified',
+        }),
+      }),
+      context(['ops', 'jobs', jobId, 'reconcile']),
+    );
+    expect(okRes.status).toBe(200);
+    expect(okRes.headers.get('x-request-id')).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(okRes.headers.get('x-upstream-request-id')).toBe(upstreamReqId);
+    const call = fetcher.mock.calls[0];
+    if (!call) throw new Error('Reconcile call was not forwarded');
+    expect((call[0] as URL).pathname).toBe(`/v1/research/ops/jobs/${jobId}/reconcile`);
+    expect(logs.some((line) => line.includes(upstreamReqId) && line.includes(jobId))).toBe(true);
+    expect(logs.some((line) => line.includes('SECRET_OPERATOR_RATIONALE'))).toBe(false);
+
+    const extraField = await POST(
+      new Request(`https://app.test/api/research/ops/jobs/${jobId}/reconcile`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-idempotency-key': 'dlq-reconcile-2' },
+        body: JSON.stringify({ decision: 'quarantine', notes: 'valid notes', refund_ms: 4000 }),
+      }),
+      context(['ops', 'jobs', jobId, 'reconcile']),
+    );
+    expect(extraField.status).toBe(400);
+
+    const badJobId = await POST(
+      new Request('https://app.test/api/research/ops/jobs/not-a-uuid/reconcile', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-idempotency-key': 'dlq-reconcile-3' },
+        body: JSON.stringify({ decision: 'quarantine', notes: 'valid notes' }),
+      }),
+      context(['ops', 'jobs', 'not-a-uuid', 'reconcile']),
+    );
+    expect(badJobId.status).toBe(404);
+    expect(fetcher).toHaveBeenCalledOnce();
+  } finally {
+    infoSpy.mockRestore();
+  }
+});
