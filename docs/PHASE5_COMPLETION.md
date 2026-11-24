@@ -99,10 +99,10 @@ an explicitly configured provider, model and spending cap.
 ## Reproduce and use the pilot
 
 ```powershell
-pwsh -NoProfile -File verify-research.ps1
-pwsh -NoProfile -File test-phase5.ps1
-pwsh -NoProfile -File test-sandbox.ps1
-pwsh -NoProfile -File replay-bundle.ps1 -Bundle campaign.json -Evolution
+pwsh -NoProfile -File scripts/verify-research.ps1
+pwsh -NoProfile -File scripts/test-phase5.ps1
+pwsh -NoProfile -File scripts/test-sandbox.ps1
+pwsh -NoProfile -File scripts/replay-bundle.ps1 -Bundle campaign.json -Evolution
 ```
 
 The test runner creates its own disposable Neo4j project and pinned worker image.

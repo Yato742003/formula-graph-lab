@@ -1,9 +1,10 @@
 $ErrorActionPreference = 'Stop'
+$projectRoot = Split-Path -Parent $PSScriptRoot
 $phase5Tag = 'fgl-phase5-' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
 $previousPhase5Image = $env:TEST_SANDBOX_IMAGE
 $previousPhase5Replay = $env:TEST_PHASE5_CLEAN_REPLAY
 try {
-    & docker build -f "$PSScriptRoot/services/graph-api/Dockerfile.sandbox" -t $phase5Tag "$PSScriptRoot/services/graph-api"
+    & docker build -f "$projectRoot/services/graph-api/Dockerfile.sandbox" -t $phase5Tag "$projectRoot/services/graph-api"
     if ($LASTEXITCODE -ne 0) { throw 'Phase 5 sandbox build failed.' }
     $env:TEST_SANDBOX_IMAGE = (& docker image inspect --format '{{.Id}}' $phase5Tag).Trim()
     $env:TEST_PHASE5_CLEAN_REPLAY = '1'

@@ -2,17 +2,18 @@
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 
-Write-Host "[CHECK] 1. Parsing run.ps1 syntax..." -ForegroundColor Cyan
+Write-Host "[CHECK] 1. Parsing scripts/run.ps1 syntax..." -ForegroundColor Cyan
 $errors = $null
 $tokens = $null
-$ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $ProjectRoot "run.ps1"), [ref]$tokens, [ref]$errors)
+$runScript = Join-Path $ProjectRoot "scripts\run.ps1"
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($runScript, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) {
     throw "run.ps1 syntax error: $($errors[0].Message)"
 }
 Write-Host "  -> Syntax OK" -ForegroundColor Green
 
 Write-Host "[CHECK] 2. Testing clean stop idempotency..." -ForegroundColor Cyan
-& (Join-Path $ProjectRoot "run.ps1") -Stop
+& $runScript -Stop
 $pidFile = Join-Path $ProjectRoot ".services.pids.json"
 $lockFile = Join-Path $ProjectRoot ".vinext\dev\lock.json"
 if (Test-Path $pidFile) { throw "PID file was not removed by Stop" }

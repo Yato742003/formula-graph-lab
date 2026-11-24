@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$repoRoot = $PSScriptRoot
+$repoRoot = Split-Path -Parent $PSScriptRoot
 $imageTag = 'fgl-performer-pilot-' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
 $previousImage = $env:FGL_PERFORMER_SANDBOX_IMAGE
 Push-Location $repoRoot

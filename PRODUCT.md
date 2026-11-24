@@ -29,7 +29,7 @@ Unlike general-purpose LLM chat interfaces or unverified CAS notebooks that fabr
 
 - **Primary Desktop Research Workspace**: Three-column workbench (`1280×720`+ and wide monitors) featuring left multi-paper source rail, center 2D Section Swimlanes (`@xyflow/react`) / 3D Sacred Timeline (`Three.js` WebGL) viewport, and right formula/provenance inspector, with keyboard navigation (`Ctrl+K` / `/` search, arrow keys for graph node traversal).
 - **Responsive Narrow & Tablet Viewports**: Collapsible rails and wrapping workflow status bar tested down to `390px` width without horizontal formula overflow.
-- **Verification & Operations Context**: Automated CLI & CI gates (`verify-research.ps1`, `test-integration.ps1`, `test-sandbox.ps1`, `test-phase5.ps1`, `replay-bundle.ps1`) plus semantic desktop inspection via `desktop-cli`.
+- **Verification & Operations Context**: Automated CLI & CI gates (`Makefile`, `scripts/verify-research.ps1`, `scripts/test-integration.ps1`, `scripts/test-sandbox.ps1`, `scripts/test-phase5.ps1`, `scripts/replay-bundle.ps1`) plus semantic desktop inspection via `desktop-cli`.
 
 ## Capabilities and Constraints
 

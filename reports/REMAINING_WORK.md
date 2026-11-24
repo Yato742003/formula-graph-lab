@@ -26,7 +26,7 @@ Tham chiếu chi tiết: [`FGL602_FGL603_HARDENING.md`](FGL602_FGL603_HARDENING.
 ## 2. Việc cần làm ngay khi quay lại chạy local
 
 1. **Giải phóng xung đột cổng `8000` (nếu bật dev live):**
-   - Kiểm tra xem có container dự án khác (ví dụ `ketoan-backend-backend-1`) chiếm `0.0.0.0:8000->8000/tcp` không trước khi chạy `.\run.ps1 -NoNgrok` để nối Neo4j thật.
+   - Kiểm tra xem có container dự án khác (ví dụ `ketoan-backend-backend-1`) chiếm `0.0.0.0:8000->8000/tcp` không trước khi chạy `.\scripts\run.ps1 -NoNgrok` để nối Neo4j thật.
 2. **Bật AI proposal drafting (chỉ khi cần test AI):**
    - Các cờ `FGL_ENABLE_PROPOSALS` và `FGL_ENABLE_PROPOSAL_GENERATION` hiện giữ `false` (fail-closed). Chỉ bật khi đã cấu hình provider/model và trần chi phí (`cost cap` / `daily cap`).
 

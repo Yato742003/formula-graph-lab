@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$sandboxRoot = $PSScriptRoot
+$sandboxRoot = Split-Path -Parent $PSScriptRoot
 $sandboxTag = 'fgl-sandbox-test-' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
 $previousImage = $env:TEST_SANDBOX_IMAGE
 $previousProbe = $env:TEST_SANDBOX_PROBE_IMAGE

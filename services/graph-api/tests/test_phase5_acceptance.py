@@ -403,7 +403,7 @@ async def test_phase5_source_to_confirmation_and_replay(monkeypatch, tmp_path):
                     shutil.which("pwsh") or "powershell.exe",
                     "-NoProfile",
                     "-File",
-                    os.path.join(root, "replay-bundle.ps1"),
+                    os.path.join(root, "scripts", "replay-bundle.ps1"),
                     "-Bundle",
                     str(path),
                     "-Evolution",

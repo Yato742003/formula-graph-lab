@@ -568,7 +568,7 @@ def test_source_authorized_compiler_bundle_replays_and_binds_provenance(tmp_path
                 "powershell.exe",
                 "-NoProfile",
                 "-File",
-                str(Path(__file__).resolve().parents[3] / "replay-bundle.ps1"),
+                str(Path(__file__).resolve().parents[3] / "scripts" / "replay-bundle.ps1"),
                 "-Bundle",
                 str(bundle_path),
             ],

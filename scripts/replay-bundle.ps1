@@ -5,7 +5,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$projectRoot = $PSScriptRoot
+$projectRoot = Split-Path -Parent $PSScriptRoot
 $bundlePath = (Resolve-Path -LiteralPath $Bundle -ErrorAction Stop).Path
 $bundleItem = Get-Item -LiteralPath $bundlePath
 if ($bundleItem.PSIsContainer) { throw 'Replay bundle must be a file.' }

@@ -1,6 +1,6 @@
 param([string[]]$TestPaths = @(), [switch]$ShowOutput)
 $ErrorActionPreference = 'Stop'
-$projectRoot = $PSScriptRoot
+$projectRoot = Split-Path -Parent $PSScriptRoot
 $composeFile = Join-Path $projectRoot 'docker-compose.test.yml'
 $pythonExe = Join-Path $projectRoot '.venv\Scripts\python.exe'
 $runProject = 'fgl-test-' + [Guid]::NewGuid().ToString('N').Substring(0, 12)

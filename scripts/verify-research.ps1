@@ -2,7 +2,7 @@
 param([switch]$IncludeIntegration)
 
 $ErrorActionPreference = 'Stop'
-$researchRoot = $PSScriptRoot
+$researchRoot = Split-Path -Parent $PSScriptRoot
 $researchPython = Join-Path $researchRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $researchPython)) {
     throw 'Missing .venv Python. Install the project development dependencies first.'
@@ -39,7 +39,7 @@ try {
         # The existing runner creates its own isolated Neo4j Compose project.
         $psExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
         Invoke-ResearchCheck $psExe @(
-            '-NoProfile', '-File', (Join-Path $researchRoot 'test-integration.ps1')
+            '-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-integration.ps1')
         )
     }
 } finally {

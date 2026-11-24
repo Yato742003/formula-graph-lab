@@ -13,11 +13,11 @@
 .PARAMETER Restart
     Khoi dong lai toan bo cac dich vu tu dau.
 .EXAMPLE
-    .\run.ps1
+    .\scripts\run.ps1
 .EXAMPLE
-    .\run.ps1 -Stop
+    .\scripts\run.ps1 -Stop
 .EXAMPLE
-    .\run.ps1 -NoDocker
+    .\scripts\run.ps1 -NoDocker
 #>
 
 [CmdletBinding()]
@@ -29,8 +29,7 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$ProjectRoot = $PSScriptRoot
-if (-not $ProjectRoot) { $ProjectRoot = (Get-Location).Path }
+$ProjectRoot = if ($PSScriptRoot) { Split-Path -Parent $PSScriptRoot } else { (Get-Location).Path }
 $PidFile = Join-Path $ProjectRoot ".services.pids.json"
 $EnvFile = Join-Path $ProjectRoot ".env"
 $VinextLock = Join-Path $ProjectRoot ".vinext\dev\lock.json"
@@ -92,6 +91,11 @@ function Free-PortProcesses {
     $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
     $pidsToKill = $conns | ForEach-Object { $_.OwningProcess } | Where-Object { $_ -gt 4 -and $_ -ne $PID } | Select-Object -Unique
     foreach ($processId in $pidsToKill) {
+        $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($proc -and $proc.ProcessName -notin @("node", "python", "python3", "uvicorn", "workerd")) {
+            Write-WarningMsg "Bo qua tien trinh '$($proc.ProcessName)' (PID: $processId) dang giu port $Port (khong phai service FormulaGraph Lab)."
+            continue
+        }
         Write-Step "KILL" "Giai phong port $Port (PID: $processId)..."
         Kill-ProcessTree -TargetPid $processId
     }
