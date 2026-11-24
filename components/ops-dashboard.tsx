@@ -882,10 +882,20 @@ export function OpsDashboard() {
               <table
                 style={{
                   width: '100%',
+                  minWidth: '900px',
+                  tableLayout: 'fixed',
                   borderCollapse: 'collapse',
                   fontSize: '12px',
                 }}
               >
+                <colgroup>
+                  <col style={{ width: '19%' }} />
+                  <col style={{ width: '16%' }} />
+                  <col style={{ width: '14%' }} />
+                  <col style={{ width: '9%' }} />
+                  <col style={{ width: '16%' }} />
+                  <col style={{ width: '26%' }} />
+                </colgroup>
                 <thead>
                   <tr
                     style={{
@@ -895,12 +905,12 @@ export function OpsDashboard() {
                       textAlign: 'left',
                     }}
                   >
-                    <th style={{ padding: '8px 12px', fontWeight: 600 }}>Job / Target</th>
-                    <th style={{ padding: '8px 12px', fontWeight: 600 }}>Operation</th>
-                    <th style={{ padding: '8px 12px', fontWeight: 600 }}>Prior State</th>
-                    <th style={{ padding: '8px 12px', fontWeight: 600, textAlign: 'right' }}>Budget</th>
-                    <th style={{ padding: '8px 12px', fontWeight: 600 }}>Status</th>
-                    <th style={{ padding: '8px 12px', fontWeight: 600 }}>Reconciliation</th>
+                    <th style={{ padding: '8px 10px', fontWeight: 600 }}>Job / Target</th>
+                    <th style={{ padding: '8px 10px', fontWeight: 600 }}>Operation</th>
+                    <th style={{ padding: '8px 10px', fontWeight: 600 }}>Prior State</th>
+                    <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Budget</th>
+                    <th style={{ padding: '8px 10px', fontWeight: 600 }}>Status</th>
+                    <th style={{ padding: '8px 10px', fontWeight: 600 }}>Reconciliation</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -916,6 +926,11 @@ export function OpsDashboard() {
                         : job.prior_state === 'running'
                         ? 'running · uncertain'
                         : 'unknown · uncertain';
+                    const truncateCellStyle = {
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap' as const,
+                    };
 
                     return (
                       <tr
@@ -927,20 +942,36 @@ export function OpsDashboard() {
                       >
                         <td
                           style={{
-                            padding: '8px 12px',
+                            padding: '8px 10px',
                             fontFamily: 'var(--font-geist-mono, monospace)',
                             fontVariantNumeric: 'tabular-nums slashed-zero',
-                            whiteSpace: 'nowrap',
                           }}
                         >
-                          <div style={{ color: 'var(--foreground)', fontWeight: 600 }}>{job.job_id}</div>
-                          <div style={{ fontSize: '11px', color: 'var(--muted-foreground)' }}>{job.target_uuid}</div>
+                          <div
+                            title={job.job_id}
+                            style={{ ...truncateCellStyle, color: 'var(--foreground)', fontWeight: 600 }}
+                          >
+                            {job.job_id}
+                          </div>
+                          <div
+                            title={job.target_uuid}
+                            style={{ ...truncateCellStyle, fontSize: '11px', color: 'var(--muted-foreground)' }}
+                          >
+                            {job.target_uuid}
+                          </div>
                         </td>
-                        <td style={{ padding: '8px 12px' }}>
-                          <div style={{ color: 'var(--foreground)', fontWeight: 500 }}>{job.operation}</div>
+                        <td style={{ padding: '8px 10px' }}>
+                          <div
+                            title={job.operation}
+                            style={{ ...truncateCellStyle, color: 'var(--foreground)', fontWeight: 500 }}
+                          >
+                            {job.operation}
+                          </div>
                           {job.failure_reason && (
                             <div
+                              title={job.failure_reason}
                               style={{
+                                ...truncateCellStyle,
                                 fontSize: '11px',
                                 color: 'var(--muted-foreground)',
                                 fontFamily: 'var(--font-geist-mono, monospace)',
@@ -952,7 +983,7 @@ export function OpsDashboard() {
                         </td>
                         <td
                           style={{
-                            padding: '8px 12px',
+                            padding: '8px 10px',
                             fontFamily: 'var(--font-geist-mono, monospace)',
                             whiteSpace: 'nowrap',
                             color: job.prior_state === 'queued' ? 'var(--foreground)' : 'oklch(72% 0.13 75)',
@@ -962,7 +993,7 @@ export function OpsDashboard() {
                         </td>
                         <td
                           style={{
-                            padding: '8px 12px',
+                            padding: '8px 10px',
                             textAlign: 'right',
                             fontFamily: 'var(--font-geist-mono, monospace)',
                             fontVariantNumeric: 'tabular-nums',
@@ -974,14 +1005,16 @@ export function OpsDashboard() {
                             {job.reservation_retained ? 'retained' : 'released'}
                           </div>
                         </td>
-                        <td style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>
+                        <td style={{ padding: '8px 10px' }}>
                           <div
                             style={{
                               display: 'inline-flex',
                               alignItems: 'center',
                               gap: '6px',
+                              maxWidth: '100%',
                               fontFamily: 'var(--font-geist-mono, monospace)',
                               color: 'var(--foreground)',
+                              whiteSpace: 'nowrap',
                             }}
                           >
                             <span
@@ -994,11 +1027,13 @@ export function OpsDashboard() {
                                 flexShrink: 0,
                               }}
                             />
-                            {job.reconciliation_status}
+                            <span style={truncateCellStyle}>{job.reconciliation_status}</span>
                           </div>
                           {job.authorized_retry_key && (
                             <div
+                              title={job.authorized_retry_key}
                               style={{
+                                ...truncateCellStyle,
                                 fontSize: '11px',
                                 color: 'var(--muted-foreground)',
                                 fontFamily: 'var(--font-geist-mono, monospace)',
@@ -1010,7 +1045,9 @@ export function OpsDashboard() {
                           )}
                           {job.reconciled_receipt_id && (
                             <div
+                              title={job.reconciled_receipt_id}
                               style={{
+                                ...truncateCellStyle,
                                 fontSize: '11px',
                                 color: 'var(--muted-foreground)',
                                 fontFamily: 'var(--font-geist-mono, monospace)',
@@ -1021,9 +1058,9 @@ export function OpsDashboard() {
                             </div>
                           )}
                         </td>
-                        <td style={{ padding: '8px 12px', minWidth: '280px' }}>
+                        <td style={{ padding: '8px 10px' }}>
                           {isActionable ? (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                               <input
                                 type="text"
                                 aria-label={`Reconciliation rationale for ${job.job_id}`}
@@ -1055,7 +1092,7 @@ export function OpsDashboard() {
                               {rowValidation && (
                                 <div style={{ fontSize: '11px', color: 'oklch(58% 0.15 25)' }}>{rowValidation}</div>
                               )}
-                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                                 <button
                                   type="button"
                                   disabled={isBusy}
@@ -1063,7 +1100,7 @@ export function OpsDashboard() {
                                     void handleReconcile(job, 'quarantine');
                                   }}
                                   style={{
-                                    padding: '4px 8px',
+                                    padding: '4px 7px',
                                     borderRadius: '6px',
                                     border: '1px solid var(--border)',
                                     background: 'var(--card)',
@@ -1082,7 +1119,7 @@ export function OpsDashboard() {
                                     void handleReconcile(job, 'reconcile_receipt');
                                   }}
                                   style={{
-                                    padding: '4px 8px',
+                                    padding: '4px 7px',
                                     borderRadius: '6px',
                                     border: '1px solid var(--border)',
                                     background: 'var(--card)',
@@ -1106,7 +1143,7 @@ export function OpsDashboard() {
                                     void handleReconcile(job, 'authorize_retry');
                                   }}
                                   style={{
-                                    padding: '4px 8px',
+                                    padding: '4px 7px',
                                     borderRadius: '6px',
                                     border: '1px solid var(--border)',
                                     background: 'var(--card)',
@@ -1127,6 +1164,7 @@ export function OpsDashboard() {
                                 fontSize: '11px',
                                 color: 'var(--muted-foreground)',
                                 fontFamily: 'var(--font-geist-mono, monospace)',
+                                overflowWrap: 'anywhere',
                               }}
                             >
                               {job.reconciled_by ?? 'operator'}

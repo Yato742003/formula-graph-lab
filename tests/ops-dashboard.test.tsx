@@ -224,12 +224,17 @@ describe('OpsDashboard', () => {
     await waitFor(() => {
       expect(screen.getByText('Dead-Letter & Reconciliation Ledger')).toBeTruthy();
       expect(screen.getByText(queuedJobId)).toBeTruthy();
+      expect(screen.getByText(queuedJobId).getAttribute('title')).toBe(queuedJobId);
       expect(screen.getByText(runningJobId)).toBeTruthy();
       expect(screen.getByText('4500 ms')).toBeTruthy();
       expect(screen.getByText('9200 ms')).toBeTruthy();
       expect(screen.getByText('queued')).toBeTruthy();
       expect(screen.getByText('running · uncertain')).toBeTruthy();
     });
+
+    const ledgerTable = screen.getByRole('table');
+    expect(ledgerTable.style.tableLayout).toBe('fixed');
+    expect(ledgerTable.querySelectorAll('colgroup col')).toHaveLength(6);
 
     const retryButtons = screen.getAllByRole('button', { name: 'Authorize Retry' });
     expect(retryButtons).toHaveLength(2);
