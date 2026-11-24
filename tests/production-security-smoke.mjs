@@ -19,7 +19,11 @@ for (let i = 0; i < 2; i++) {
   assert.ok(scripts.length > 0);
   assert.ok(scripts.every((script) => script.includes(`nonce="${nonce}"`)));
   assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
-  assert.equal(response.headers.get('cache-control'), 'no-store');
+  const cacheControl = response.headers.get('cache-control') ?? '';
+  assert.ok(
+    cacheControl.split(',').map((d) => d.trim()).includes('no-store'),
+    `Expected Cache-Control to include no-store, received: ${cacheControl}`,
+  );
   policies.push(policy);
 }
 assert.notEqual(...policies);

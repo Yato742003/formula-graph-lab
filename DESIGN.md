@@ -64,13 +64,18 @@ spacing:
 
 ## 1. Design Direction: Scientific Precision & Epistemic Honesty
 
-- **Single Navigation Surface**: Exactly one primary 5-stage navigation rail (`1. Graph` → `2. Spec` → `3. Compatibility` → `4. Proposals` → `5. Reports`) plus utility links (`/ops`, `/help`) in `components/workspace-shell.tsx` and `app/research-workspace.tsx`. Duplicate view-switching controls are prohibited (`docs/UI_UPGRADE_AUDIT.md`).
-- **One Meaning, One Semantic Color Token**: Every graph role and verification boundary maps consistently across 2D nodes, legends, inspectors, and reports via `app/globals.css`:
+- **Open Design Binding (`.open-design.json`)**: Anchored to the `linear-app` design system (`design-systems/linear-app`) paired with the `dashboard` design template (`design-templates/dashboard`), adapted to FormulaGraph Lab's light-first Cobalt scientific palette (`--primary: oklch(0.46 0.18 256)`), hairline borders, sentence-case micro-headings, and `tabular-nums` monospace telemetry.
+- **Unified 3-Zone Linear × Cursor Multi-Tenant SaaS Workbench (`.wb-shell`)**: Every research route (`/graph`, `/spec`, `/compatibility`, `/proposals`, `/reports`, `/ops`, `/help`) shares a persistent 3-column desktop grid (`252px` Left App Spine | Sticky `42px` Breadcrumb Subbar + Main Stage | Persistent `320px` Contextual Right Inspector) implemented in `components/workspace-shell.tsx` and `app/research-workspace.tsx`:
+  - **Zone 1 (`252px` Left App Spine, `.wb-sidebar`)**: Tenant brand lockup (`SAAS` / `Tenant workspace`), pinned `Paper` & `Spec` context card, vertical 5-stage pipeline (`01 Graph` → `02 Spec` → `03 Compatibility` → `04 Proposals` → `05 Reports`), optional `Sample walkthrough` toggle, stage-scoped paper drawer, and bottom SaaS utility footer (`Search`, `Ops`, `Help`, isolated tenant pill).
+  - **Zone 2 (Sticky `42px` Breadcrumb Subbar + Main Stage, `.wb-center-column`)**: `Workspace › <Stage>` breadcrumb, single Cobalt forward-stage CTA (`.wb-primary-cta`), inspector toggle, full-bleed 2D/3D canvas height on `/graph` (`.wb-main-scroll.is-graph-canvas`), and determinate 4-step import progress pills (`.wb-import-stepper`).
+  - **Zone 3 (`320px` Contextual Right Inspector, `.wb-inspector`)**: Persistent formula/stage inspector with scoped key-value context, G1/G3/sandbox guarantees, and keyboard shortcut reference; gracefully stacks vertically below `1024px`.
+- **Single Navigation Surface**: Exactly one primary 5-stage navigation rail (`01 Graph` → `02 Spec` → `03 Compatibility` → `04 Proposals` → `05 Reports`) plus utility links (`/ops`, `/help`). Duplicate view-switching controls are prohibited (`docs/UI_UPGRADE_AUDIT.md`).
+- **One Meaning, One Semantic Color Token & `6px` Epistemic Status Dots**: Every graph role, pipeline dot (`.stage-nav-dot`, `.wb-status-dot`), legend, inspector, and report maps consistently via `app/globals.css`:
   - **Evidence** (`--color-evidence` / `--surface-evidence`) — immutable source paper/equation artifacts.
   - **Citation / Concept** (`--color-citation` / `--surface-citation`) — structural/citation links.
   - **Derivation / Hypothesis** (`--color-derivation` / `--surface-derivation`) — candidate transformations and mathematical derivations.
-  - **Review / Gate** (`--color-review` / `--surface-review`) — human review and protocol authorization gates.
-- **No False Confidence**: Untested compatibility gates stay neutral (`background: var(--muted)`), example ProblemSpec presets carry draft labels, and synthetic research receipts prominently display `synthetic_operator_only_no_product_claim` alongside holdout uncertainty (`docs/PHASE5_FLOW_AUDIT.json`).
+  - **Review / Gate** (`--color-review` / `--surface-review`) — human review and protocol authorization gates, plus `#10b981` ready dots and neutral pending dots (`oklch(0.76 0.02 252)`).
+- **No False Confidence**: Untested compatibility gates stay neutral (`background: var(--muted)`), example ProblemSpec presets carry draft labels, illustrative `Sample walkthrough` cards explicitly declare `Read-only preview · not stored evidence` or `synthetic_operator_only_no_product_claim · preview only` with zero fake `"Verified"` badges, and synthetic research receipts prominently display holdout uncertainty (`docs/PHASE5_FLOW_AUDIT.json`).
 
 ## 2. Visual Hierarchy & Surface Contracts
 
@@ -98,6 +103,8 @@ spacing:
 
 - **Zero Formula Overflow**: Both `.flow-evidence-node .node-latex-math` and `.formula-display .inspector-latex-math` use single-line horizontal scrolling (`white-space: nowrap`) with a sleek `4px` custom scrollbar and hidden native arrow buttons so long tensors/integrals never blow out card widths.
 - **Keyboard Ergonomics**:
+  - `Alt+1..5` jumps directly across the 5 research stages while preserving pinned `paper_id`, `spec_id`, and `candidate_id` query context.
+  - `[` and `]` collapse or expand the Left App Spine and Right Contextual Inspector respectively (ignored while typing inside form inputs).
   - `Ctrl+K` or `/` opens graph search.
   - Arrow keys traverse selected nodes inside `EvidenceGraphViewport`.
   - All primary buttons, stage tabs, and `.onboarding-toggle` controls maintain accessible contrast (`>= 4.5:1`) and minimum `44px` hit height where required (`tests/color-system.test.ts`, `tests/contrast-tokens.test.ts`).

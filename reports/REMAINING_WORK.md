@@ -1,23 +1,21 @@
 # FormulaGraph Lab — Remaining Work & Release Checklist
 
-Cập nhật: `2026-11-23` (sau đợt hoàn thiện `FGL-603 ExecutionProfile`, sửa provenance `/api/graph`, sửa `run.ps1`, và đại tu UX/UI luồng 5 bước).  
-Tham chiếu chi tiết: [`FGL602_FGL603_HARDENING.md`](FGL602_FGL603_HARDENING.md), [`SPRINT6_REVIEW_2026-10-01.md`](SPRINT6_REVIEW_2026-10-01.md), [`../docs/PHASE5_COMPLETION.md`](../docs/PHASE5_COMPLETION.md).
+Cập nhật: `2026-11-24` (sau đợt đại tu giao diện **Linear × Cursor 3-Zone Multi-Tenant SaaS Workbench** tích hợp `.open-design.json` và Visual Manifest Builder cho Bước 2).  
+Tham chiếu chi tiết: [`FGL602_FGL603_HARDENING.md`](FGL602_FGL603_HARDENING.md), [`SPRINT6_REVIEW_2026-10-01.md`](SPRINT6_REVIEW_2026-10-01.md), [`../DESIGN.md`](../DESIGN.md), [`../docs/PHASE5_COMPLETION.md`](../docs/PHASE5_COMPLETION.md).
 
 > **Trạng thái phát hành hiện tại:** **Chưa release-ready (Production gates vẫn mở).**  
 > Không bật `FGL_TRUST_SITES_IDENTITY=true` trên origin công khai và không mở các cờ gọi AI/model khi chưa chốt đủ các cổng dưới đây.
 
 ---
 
-## 1. Đã hoàn thành gần đây (chốt trong đợt push này)
+## 1. Đã hoàn thành gần đây (chốt trong đợt đại tu SaaS Workbench này)
 
-- **FGL-603 Execution-Profile Identity (`sandbox-policy.v2`):** Chuẩn hóa RAM/CPU/timeout + image digest + module/protocol tại thời điểm nạp queue, gắn vào chữ ký `JobEnvelope` và biên nhận phiên bản mới; chặn ngay `EXECUTION_PROFILE_DRIFT` trước khi chạy; vẫn giữ khả năng đọc/replay biên nhận lịch sử (`v1`/`v2`).
-- **Provenance & Local Runner:** Sửa tải snapshot provenance trên `/api/graph`, bổ sung fallback `powershell.exe` khi thiếu `pwsh` trong `verify-research.ps1` / `test-phase5.ps1`, và sửa `run.ps1` (chờ Neo4j HTTP engine, `--reload-dir`, cold-start timeout 240s cho Vite 8).
-- **Đại tu UX/UI 5 bước (`01 Graph → 02 Spec → 03 Compatibility → 04 Proposals → 05 Reports`):**
-  - Đồng bộ `?spec_id=` xuyên suốt 5 bước + bộ chọn spec trực tiếp trên `/reports`.
-  - Gọn thanh công cụ đồ thị 1 hàng, nâng độ rõ node (`opacity: 0.72`), thu gọn `Multi-paper lineage (0 indexed)`, nút hành động rõ cho `Add evidence` và nút chuyển bước `Next: Step 2/4`.
-  - `/spec` đưa toàn bộ Bước 1 + nút `Continue to manifest` lên trên nếp gấp (above-the-fold), nạp sẵn 1-click **`Linear Attention CPU Pilot`**, tóm tắt 4 ô dễ đọc đầu Bước 2, nhóm 13 ô JSON + kiểm tra cú pháp tức thời.
-  - `/compatibility` thêm hướng dẫn 3 bước + nút `+ Map two formula symbols`; `/proposals` thêm thanh kiểm tra điều kiện tiên quyết + hạ nút AI optional về đúng vai trò phụ; `/reports` bỏ form biên dịch ẩn dư thừa.
-- **Kiểm chứng offline mới nhất:** `verify-research.ps1` pass 100% (**698** Pytest offline, **199** Vitest / 28 files, **0** Ruff / Oxlint / TypeScript lỗi), `npm run build` + `tests/production-security-smoke.mjs` pass, kiểm tra Chrome DevTools trực tiếp 5 trang đạt 0 console `issue`.
+- **Gắn kết Open Design (`linear-app` + `dashboard`) & Hợp nhất khung SaaS 3 vùng (`.wb-shell`):**
+  - Hợp nhất toàn bộ 5 bước (`01 Graph` → `02 Spec` → `03 Compatibility` → `04 Proposals` → `05 Reports`) cùng `/ops` và `/help` vào một bàn làm việc desktop đồng nhất: **Cột trái `252px`** (tenant workspace, ngữ cảnh `Paper`/`Spec` được ghim, chấm trạng thái nhận thức `6px`, phím tắt `Alt+1..5`) | **Thanh điều hướng sticky `42px`** + vùng chính full-height trên `/graph` | **Inspector phải `320px`** đóng/mở bằng `[` / `]`.
+  - Bổ sung thanh tiến trình import 4 bước xác định (`.wb-import-stepper`) và chế độ xem thử **`Sample walkthrough`** chỉ đọc (`Read-only preview · not stored evidence`) kèm biểu đồ SVG nội tuyến trên `/reports` nhằm trị cold-start mà không giả mạo trạng thái `"Verified"`.
+- **Visual Manifest Builder đồng bộ 2 chiều với JSON trong `/spec`:**
+  - Người dùng có thể chỉnh trực quan `Primary metric`, `Primary guardrail`, `Pinned runtime`, `Search budget & seeds`, và các phép biến đổi DSL được phép mà vẫn đồng bộ tức thời hai chiều với 13 ô JSON bên dưới; lỗi cú pháp JSON được cảnh báo an toàn không sập UI.
+- **Bảo mật & Chuỗi cung ứng (đã đẩy `origin/main` ở `92cdb00`):** Vá sạch toàn bộ `npm audit` (0 advisory), `pip-audit` (`certifi 2026.11.20`), các gói Debian đã có bản vá trên 3 Dockerfile, `FGL-603 ExecutionProfile` (`sandbox-policy.v2`), và bỏ qua `@openai/sites-vite-plugin` khi thiếu `.openai/hosting.json` trên CI.
 
 ---
 
@@ -55,5 +53,4 @@ Tham chiếu chi tiết: [`FGL602_FGL603_HARDENING.md`](FGL602_FGL603_HARDENING.
 ### P2 — Cải tiến trải nghiệm UX/UI tiếp theo (tùy chọn)
 
 - **QA trình duyệt đầy đủ với dữ liệu Neo4j sống:** Chạy tay trọn luồng `Graph (import arXiv thật) → Spec (freeze) → Compatibility (map & review) → Proposals (compile) → Reports (compare + evolution + replay bundle)` trên desktop, tablet và mobile (`390px`) sau khi giải phóng cổng `8000`.
-- **Trình dựng form trực quan cho Bước 2 `/spec`:** Hiện Bước 2 đã có dải tóm tắt 4 ô dễ đọc + nhóm 13 ô JSON + kiểm tra cú pháp tức thời; có thể thêm chế độ nhập form thân thiện (metric/budget/seeds) đồng bộ 2 chiều với JSON nâng cao nếu cần thường xuyên chỉnh tay nhiều cấu hình.
-- **Cập nhật ảnh chụp màn hình trong `README.md`:** Hai ảnh hiện tại dưới `docs/screenshots/` là bản cũ; có thể chụp lại giao diện mới sau khi nối lại Neo4j có bài báo thật.
+- **Cập nhật ảnh chụp màn hình trong `README.md`:** Hai ảnh hiện tại dưới `docs/screenshots/` là bản cũ; có thể chụp lại giao diện Linear × Cursor mới sau khi nối lại Neo4j có bài báo thật.
