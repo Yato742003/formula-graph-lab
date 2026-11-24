@@ -12,9 +12,11 @@
 > **Source-bound mathematical knowledge graph and verification harness.**
 > FormulaGraph Lab converts arXiv HTML papers into an immutable, provenance-tracked formula graph—strictly separating extracted ground-truth evidence from AI hypotheses, enforcing human-reviewed symbol contracts before symbolic or numerical execution, and running verification workers inside air-gapped Docker sandboxes.
 
-| 2D & 3D Formula Evidence Graph & LaTeX Inspector | Reproducible Research Problem Specification (G1 Gate) |
-| :---: | :---: |
-| ![FormulaGraph Lab 2D/3D Graph Viewport](docs/screenshots/evidence-graph-2d.jpg) | ![FormulaGraph Lab Problem Spec Gate](docs/screenshots/research-problem-spec.png) |
+![FormulaGraph Lab Live End-to-End Walkthrough: 2D Graph → 3D Sacred Timeline → Spec Builder → Proposals → Reports → /ops Dead-Letter Ledger](docs/screenshots/workbench-demo.gif)
+
+| 2D Formula Graph & KaTeX Inspector | Visual Problem Spec Builder (G1) | `/ops` Dead-Letter & Reconciliation Ledger |
+| :---: | :---: | :---: |
+| ![FormulaGraph Lab 2D Graph Viewport](docs/screenshots/evidence-graph-2d.jpg) | ![FormulaGraph Lab Problem Spec Gate](docs/screenshots/research-problem-spec.png) | ![FormulaGraph Lab Ops Dead-Letter Ledger](docs/screenshots/ops-dead-letter-ledger.png) |
 
 ---
 
