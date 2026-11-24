@@ -47,8 +47,31 @@ type Snapshot = {
   parent_spec_id: string | null; definition: Record<string, unknown>;
 };
 
+const REGISTERED_V1_TRANSFORMS = [
+  { name: 'mix_positive_feature_maps', version: '1' },
+  { name: 'lower_mixture_to_concatenation', version: '1' },
+] as const;
+
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseJsonArray(raw: string): { ok: true; items: unknown[] } | { ok: false } {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? { ok: true, items: parsed } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function parseJsonRecord(raw: string): { ok: true; value: Record<string, unknown> } | { ok: false } {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return record(parsed) ? { ok: true, value: parsed } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
 }
 
 function parseSnapshot(value: unknown): Snapshot {
@@ -115,6 +138,7 @@ export default function ProblemSpecPanel({ showEvolution = true }: { showEvoluti
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [copiedHash, setCopiedHash] = useState(false);
+  const [builderDrafts, setBuilderDrafts] = useState<Record<string, { source: string; text: string }>>({});
   const inFlight = useRef(false);
   const retry = useRef<{ body: string; key: string } | null>(null);
 
@@ -395,11 +419,200 @@ export default function ProblemSpecPanel({ showEvolution = true }: { showEvoluti
     } finally { inFlight.current = false; setBusy(false); }
   }
 
+  function draftValue(draftKey: string, source: string, canonical: string): string {
+    const entry = builderDrafts[draftKey];
+    return entry && entry.source === source ? entry.text : canonical;
+  }
+
+  function clearDraftValue(draftKey: string) {
+    setBuilderDrafts(curr => {
+      if (!(draftKey in curr)) return curr;
+      const next = { ...curr };
+      delete next[draftKey];
+      return next;
+    });
+  }
+
+  function updatePrimaryMetric(patch: { name?: string; unit?: string; direction?: 'minimize' | 'maximize' }) {
+    setFields(curr => {
+      const parsed = parseJsonArray(curr.metrics);
+      if (!parsed.ok) return curr;
+      const first = record(parsed.items[0]) ? parsed.items[0] : {};
+      const prevName = typeof first.name === 'string' ? first.name : '';
+      const nextFirst = {
+        ...first,
+        name: patch.name !== undefined ? patch.name : prevName,
+        unit: patch.unit !== undefined ? patch.unit : (typeof first.unit === 'string' ? first.unit : 'unit'),
+        direction: patch.direction !== undefined
+          ? patch.direction
+          : (first.direction === 'minimize' ? 'minimize' : 'maximize'),
+      };
+      const restMetrics = parsed.items.slice(1);
+      const next: Record<string, string> = {
+        ...curr,
+        metrics: JSON.stringify([nextFirst, ...restMetrics], null, 2),
+      };
+      if (patch.name !== undefined && patch.name !== prevName) {
+        const stillDeclaredElsewhere = restMetrics.some(item => record(item) && item.name === prevName);
+        if (!stillDeclaredElsewhere) {
+          const qc = parseJsonArray(curr.quality_constraints);
+          if (qc.ok && qc.items.some(item => record(item) && item.metric === prevName)) {
+            next.quality_constraints = JSON.stringify(
+              qc.items.map(item => (record(item) && item.metric === prevName ? { ...item, metric: patch.name } : item)),
+              null,
+              2,
+            );
+          }
+          const sc = parseJsonArray(curr.stop_conditions);
+          if (sc.ok && sc.items.some(item => record(item) && item.metric === prevName)) {
+            next.stop_conditions = JSON.stringify(
+              sc.items.map(item => (record(item) && item.metric === prevName ? { ...item, metric: patch.name } : item)),
+              null,
+              2,
+            );
+          }
+        }
+      }
+      return next;
+    });
+  }
+
+  function updateGuardrailRelation(relation: string) {
+    clearDraftValue('guardrailThreshold');
+    setFields(curr => {
+      const qc = parseJsonArray(curr.quality_constraints);
+      if (!qc.ok) return curr;
+      if (relation === 'none') {
+        return { ...curr, quality_constraints: JSON.stringify([], null, 2) };
+      }
+      const metrics = parseJsonArray(curr.metrics);
+      const metricName = metrics.ok && record(metrics.items[0]) && typeof metrics.items[0].name === 'string' && metrics.items[0].name
+        ? metrics.items[0].name
+        : (record(qc.items[0]) && typeof qc.items[0].metric === 'string' ? qc.items[0].metric : 'metric');
+      const first = record(qc.items[0]) ? qc.items[0] : {};
+      const threshold = typeof first.threshold === 'number' && Number.isFinite(first.threshold) ? first.threshold : 0;
+      return {
+        ...curr,
+        quality_constraints: JSON.stringify([{ ...first, metric: metricName, relation, threshold }, ...qc.items.slice(1)], null, 2),
+      };
+    });
+  }
+
+  function updateGuardrailThreshold(raw: string) {
+    const qcNow = parseJsonArray(fields.quality_constraints);
+    if (!qcNow.ok) return;
+    if (raw.trim() === '') {
+      setBuilderDrafts(curr => ({ ...curr, guardrailThreshold: { source: fields.quality_constraints, text: '' } }));
+      return;
+    }
+    const threshold = Number(raw);
+    if (!Number.isFinite(threshold)) return;
+    const metricsNow = parseJsonArray(fields.metrics);
+    const fallbackMetric = metricsNow.ok && record(metricsNow.items[0]) && typeof metricsNow.items[0].name === 'string' && metricsNow.items[0].name
+      ? metricsNow.items[0].name
+      : (record(qcNow.items[0]) && typeof qcNow.items[0].metric === 'string' ? qcNow.items[0].metric : 'metric');
+    const firstNow = record(qcNow.items[0]) ? qcNow.items[0] : {};
+    const relNow = typeof firstNow.relation === 'string' ? firstNow.relation : '<=';
+    const predictedJson = JSON.stringify([{ ...firstNow, metric: fallbackMetric, relation: relNow, threshold }, ...qcNow.items.slice(1)], null, 2);
+    setBuilderDrafts(curr => ({ ...curr, guardrailThreshold: { source: predictedJson, text: raw } }));
+    setFields(curr => {
+      const qc = parseJsonArray(curr.quality_constraints);
+      if (!qc.ok) return curr;
+      const metrics = parseJsonArray(curr.metrics);
+      const metricName = metrics.ok && record(metrics.items[0]) && typeof metrics.items[0].name === 'string' && metrics.items[0].name
+        ? metrics.items[0].name
+        : (record(qc.items[0]) && typeof qc.items[0].metric === 'string' ? qc.items[0].metric : 'metric');
+      const first = record(qc.items[0]) ? qc.items[0] : {};
+      const relation = typeof first.relation === 'string' ? first.relation : '<=';
+      return {
+        ...curr,
+        quality_constraints: JSON.stringify([{ ...first, metric: metricName, relation, threshold }, ...qc.items.slice(1)], null, 2),
+      };
+    });
+  }
+
+  function updateBudgetNumber(fieldKey: 'max_candidates' | 'max_generations' | 'compute_budget', raw: string, integerOnly: boolean) {
+    const budgetNow = parseJsonRecord(fields.budget);
+    if (!budgetNow.ok) return;
+    if (raw.trim() === '') {
+      setBuilderDrafts(curr => ({ ...curr, [fieldKey]: { source: fields.budget, text: '' } }));
+      return;
+    }
+    const parsedNum = Number(raw);
+    if (!Number.isFinite(parsedNum)) return;
+    const normalized = integerOnly ? Math.max(1, Math.trunc(parsedNum)) : Math.max(0, parsedNum);
+    const predictedJson = JSON.stringify({ ...budgetNow.value, [fieldKey]: normalized }, null, 2);
+    setBuilderDrafts(curr => ({ ...curr, [fieldKey]: { source: predictedJson, text: raw } }));
+    setFields(curr => {
+      const b = parseJsonRecord(curr.budget);
+      if (!b.ok) return curr;
+      return { ...curr, budget: JSON.stringify({ ...b.value, [fieldKey]: normalized }, null, 2) };
+    });
+  }
+
+  function updateSeedsInput(raw: string) {
+    const tokens = raw.split(',').map(part => part.trim()).filter(Boolean);
+    if (tokens.every(token => /^-?\d+$/.test(token) && Number.isSafeInteger(Number(token)))) {
+      const nextJson = JSON.stringify(tokens.map(token => Number.parseInt(token, 10)), null, 2);
+      setBuilderDrafts(curr => ({ ...curr, seeds: { source: nextJson, text: raw } }));
+      setFields(curr => ({ ...curr, seeds: nextJson }));
+    } else {
+      setBuilderDrafts(curr => ({ ...curr, seeds: { source: fields.seeds, text: raw } }));
+    }
+  }
+
+  function toggleRegisteredTransform(name: string, version: string, checked: boolean) {
+    setFields(curr => {
+      const parsed = parseJsonArray(curr.allowed_transforms);
+      if (!parsed.ok) return curr;
+      const custom = parsed.items.filter(
+        item => !REGISTERED_V1_TRANSFORMS.some(reg => record(item) && item.name === reg.name && item.version === reg.version),
+      );
+      const nextRegistered = REGISTERED_V1_TRANSFORMS.flatMap(reg => {
+        const existing = parsed.items.find(item => record(item) && item.name === reg.name && item.version === reg.version);
+        if (reg.name === name && reg.version === version) {
+          return checked ? [existing ?? { name: reg.name, version: reg.version }] : [];
+        }
+        return existing ? [existing] : [];
+      });
+      return {
+        ...curr,
+        allowed_transforms: JSON.stringify([...nextRegistered, ...custom], null, 2),
+      };
+    });
+  }
+
   const isSavedNotice = notice.includes('ProblemSpec saved') || notice.includes('Frozen snapshot loaded') || notice.includes('loaded');
   const isErrorNotice = notice.includes('Could not save') || notice.includes('Invalid') ||
     notice.includes('before continuing');
   const isDefaultDraftNotice = !notice || notice === 'Draft (unfrozen)';
   const manifestSummary = step === 2 ? summarizeManifest(fields) : null;
+  const metricsParsed = step === 2 ? parseJsonArray(fields.metrics) : { ok: false as const };
+  const firstMetricObj = metricsParsed.ok && record(metricsParsed.items[0]) ? metricsParsed.items[0] : null;
+  const primaryMetricName = typeof firstMetricObj?.name === 'string' ? firstMetricObj.name : '';
+  const primaryMetricUnit = typeof firstMetricObj?.unit === 'string' ? firstMetricObj.unit : '';
+  const primaryMetricDirection = firstMetricObj?.direction === 'minimize' ? 'minimize' : 'maximize';
+  const guardrailsParsed = step === 2 ? parseJsonArray(fields.quality_constraints) : { ok: false as const };
+  const firstGuardrailObj = guardrailsParsed.ok && record(guardrailsParsed.items[0]) ? guardrailsParsed.items[0] : null;
+  const guardrailRelation = firstGuardrailObj && typeof firstGuardrailObj.relation === 'string' ? firstGuardrailObj.relation : 'none';
+  const canonicalGuardrailThreshold = firstGuardrailObj && typeof firstGuardrailObj.threshold === 'number' ? String(firstGuardrailObj.threshold) : '';
+  const hardwareParsed = step === 2 ? parseJsonRecord(fields.hardware) : { ok: false as const };
+  const hardwareTarget = hardwareParsed.ok && typeof hardwareParsed.value.target === 'string' ? hardwareParsed.value.target : '';
+  const backendParsed = step === 2 ? parseJsonRecord(fields.backend) : { ok: false as const };
+  const backendName = backendParsed.ok && typeof backendParsed.value.name === 'string' ? backendParsed.value.name : '';
+  const backendVersion = backendParsed.ok && typeof backendParsed.value.version === 'string' ? backendParsed.value.version : '';
+  const budgetParsed = step === 2 ? parseJsonRecord(fields.budget) : { ok: false as const };
+  const canonicalMaxCandidates = budgetParsed.ok && typeof budgetParsed.value.max_candidates === 'number' ? String(budgetParsed.value.max_candidates) : '';
+  const canonicalMaxGenerations = budgetParsed.ok && typeof budgetParsed.value.max_generations === 'number' ? String(budgetParsed.value.max_generations) : '';
+  const canonicalComputeBudget = budgetParsed.ok && typeof budgetParsed.value.compute_budget === 'number' ? String(budgetParsed.value.compute_budget) : '';
+  const computeUnit = budgetParsed.ok && typeof budgetParsed.value.compute_unit === 'string' ? budgetParsed.value.compute_unit : '';
+  const seedsParsed = step === 2 ? parseJsonArray(fields.seeds) : { ok: false as const };
+  const seedsValid = seedsParsed.ok && seedsParsed.items.every(item => typeof item === 'number' && Number.isInteger(item));
+  const canonicalSeeds = seedsValid ? seedsParsed.items.join(', ') : '';
+  const transformsParsed = step === 2 ? parseJsonArray(fields.allowed_transforms) : { ok: false as const };
+  const customTransformsCount = transformsParsed.ok
+    ? transformsParsed.items.filter(item => !REGISTERED_V1_TRANSFORMS.some(reg => record(item) && item.name === reg.name && item.version === reg.version)).length
+    : 0;
 
   return (
     <section aria-label="ProblemSpec editor" className="max-w-6xl mx-auto px-4 md:px-6 pt-2 pb-8 space-y-4">
@@ -504,18 +717,18 @@ export default function ProblemSpecPanel({ showEvolution = true }: { showEvoluti
 
           <div className="grid gap-3 sm:grid-cols-2 text-xs">
             <div className="p-2.5 rounded-lg bg-card/80 border border-border/50">
-              <span className="text-muted-foreground block text-[11px] uppercase tracking-wider mb-1">Spec Identifier</span>
+              <span className="text-muted-foreground block text-[11px] font-medium mb-1">Spec identifier</span>
               <code className="font-mono text-foreground font-semibold">{snapshot.spec_id}</code>
             </div>
             <div className="p-2.5 rounded-lg bg-card/80 border border-border/50">
-              <span className="text-muted-foreground block text-[11px] uppercase tracking-wider mb-1">Campaign Identifier</span>
+              <span className="text-muted-foreground block text-[11px] font-medium mb-1">Campaign identifier</span>
               <code className="font-mono text-foreground font-semibold">{snapshot.campaign_id}</code>
             </div>
           </div>
 
           <div className="p-3 rounded-lg bg-card/90 border border-border/60 space-y-1.5">
             <div className="flex items-center justify-between">
-              <span className="text-muted-foreground text-[11px] uppercase tracking-wider">Content Manifest SHA-256</span>
+              <span className="text-muted-foreground text-[11px] font-medium">Content manifest SHA-256</span>
               <button
                 type="button"
                 onClick={() => {
@@ -565,8 +778,8 @@ export default function ProblemSpecPanel({ showEvolution = true }: { showEvoluti
       {snapshot && showEvolution ? <EvolutionPanel key={snapshot.spec_id} specId={snapshot.spec_id} /> : null}
 
       {/* 2-Column Responsive Workbench Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        <div className="lg:col-span-8 space-y-6">
+      <div className="problem-spec-workbench-grid grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        <div className="problem-spec-main-col lg:col-span-8 space-y-6">
           {/* Main Spec Editor Form */}
           <form onSubmit={event => { if (step === 3) void freeze(event); else { event.preventDefault(); continueSetup(); } }} className="space-y-6">
         <fieldset disabled={busy || snapshot !== null} className="space-y-6">
@@ -588,8 +801,8 @@ export default function ProblemSpecPanel({ showEvolution = true }: { showEvoluti
 
             {/* Quick Start Research Presets */}
             <div className="space-y-1.5">
-              <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider block">
-                Quick-start drafts — click one to prefill, then review before freezing:
+              <span className="text-xs font-medium text-muted-foreground block">
+                Quick-start drafts (click one to prefill, then review before freezing):
               </span>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <button
@@ -726,113 +939,431 @@ export default function ProblemSpecPanel({ showEvolution = true }: { showEvoluti
             {manifestSummary ? (
               <dl aria-label="Plain-English manifest overview" className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 text-xs">
                 <div className="rounded-lg border border-border/50 bg-muted/25 px-3 py-2">
-                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Primary metric</dt>
+                  <dt className="text-[11px] font-medium text-muted-foreground">Primary metric</dt>
                   <dd className="mt-0.5 font-medium text-foreground truncate" title={manifestSummary.firstMetric}>{manifestSummary.firstMetric}</dd>
                 </div>
                 <div className="rounded-lg border border-border/50 bg-muted/25 px-3 py-2">
-                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Baselines</dt>
+                  <dt className="text-[11px] font-medium text-muted-foreground">Baselines</dt>
                   <dd className="mt-0.5 font-medium text-foreground truncate" title={manifestSummary.baselineLabel}>{manifestSummary.baselineLabel}</dd>
                 </div>
                 <div className="rounded-lg border border-border/50 bg-muted/25 px-3 py-2">
-                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Runtime</dt>
+                  <dt className="text-[11px] font-medium text-muted-foreground">Runtime</dt>
                   <dd className="mt-0.5 font-mono text-[11px] font-medium text-foreground truncate" title={manifestSummary.runtimeLabel}>{manifestSummary.runtimeLabel}</dd>
                 </div>
                 <div className="rounded-lg border border-border/50 bg-muted/25 px-3 py-2">
-                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Budget &amp; seeds</dt>
+                  <dt className="text-[11px] font-medium text-muted-foreground">Budget &amp; seeds</dt>
                   <dd className="mt-0.5 font-mono tabular-nums text-[11px] font-medium text-foreground truncate" title={manifestSummary.budgetLabel}>{manifestSummary.budgetLabel}</dd>
                 </div>
               </dl>
             ) : null}
 
             <p className="text-xs text-muted-foreground">
-              Use the notes below to fill each section. Template values are scaffolding, not verified inputs.
+              Configure common experiment bounds visually or edit the 13 JSON sections directly below. Template values are scaffolding, not verified inputs.
             </p>
 
-            {(
-              [
-                ['Objective & Guardrails', ['metrics', 'quality_constraints', 'stop_conditions']],
-                ['Data, Baselines & Environment', ['baselines', 'dataset', 'model', 'tokenizer', 'hardware', 'backend', 'evaluator']],
-                ['Search Bounds & Allowed Moves', ['seeds', 'budget', 'allowed_transforms']],
-              ] as const
-            ).map(([groupTitle, groupKeys]) => (
-              <div key={groupTitle} className="space-y-3">
-                <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground border-b border-border/30 pb-1">
-                  {groupTitle}
-                </h4>
-                <div className="grid gap-4 md:grid-cols-2">
-                  {sections
-                    .filter(([key]) => (groupKeys as readonly string[]).includes(key))
-                    .map(([key, label, , description]) => {
-                      const parseError = jsonFieldError(key);
-                      const errorId = `problem-spec-section-${key}-error`;
-                      return (
-                        <div
-                          key={key}
-                          className={`p-3.5 rounded-lg border space-y-2 ${
-                            parseError
-                              ? 'border-destructive/60 bg-destructive/5'
-                              : 'border-border/50 bg-background/50'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <label
-                              htmlFor={`problem-spec-section-${key}`}
-                              className="block text-sm font-semibold text-foreground"
-                            >
-                              {label} (JSON)
-                            </label>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <span
-                                className={`text-[10px] font-medium ${
-                                  parseError
-                                    ? 'text-destructive'
-                                    : 'text-emerald-600 dark:text-emerald-400'
-                                }`}
-                              >
-                                {parseError ? 'Syntax error' : 'Valid JSON'}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => formatJsonField(key, label)}
-                                className="text-xs text-muted-foreground hover:text-primary transition-colors underline"
-                                title="Format and validate JSON"
-                              >
-                                Format
-                              </button>
-                            </div>
-                          </div>
-                          <p id={`problem-spec-section-${key}-help`} className="text-xs leading-relaxed text-muted-foreground">
-                            {description}
-                          </p>
-                          <textarea
-                            id={`problem-spec-section-${key}`}
-                            name={`section_${key}`}
-                            required
-                            rows={4}
-                            maxLength={32768}
-                            spellCheck={false}
-                            value={fields[key]}
-                            onChange={e => setFields(current => ({ ...current, [key]: e.target.value }))}
-                            aria-invalid={parseError ? true : undefined}
-                            aria-describedby={parseError ? `problem-spec-section-${key}-help ${errorId}` : `problem-spec-section-${key}-help`}
-                            className={`block w-full rounded-md border bg-card p-2 font-mono text-xs leading-relaxed shadow-2xs focus:ring-1 ${
-                              parseError
-                                ? 'border-destructive focus:ring-destructive focus:border-destructive'
-                                : 'border-border/60 focus:ring-primary focus:border-primary'
-                            }`}
-                          />
-                          {parseError ? (
-                            <p id={errorId} role="alert" className="text-xs text-destructive flex items-center gap-1.5">
-                              <AlertCircle size={12} aria-hidden="true" className="shrink-0" />
-                              <span>{parseError}</span>
-                            </p>
-                          ) : null}
-                        </div>
-                      );
-                    })}
+            {/* Visual Manifest Builder */}
+            <section
+              aria-label="Visual manifest builder"
+              className="border border-border/60 bg-muted/15 rounded-xl p-4 space-y-4"
+            >
+              <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border/40 pb-2">
+                <h4 className="text-xs font-semibold text-foreground">Visual manifest builder</h4>
+                <span className="text-[11px] text-muted-foreground">
+                  Two-way synced with raw JSON · artifact SHA-256 hashes remain pinned below
+                </span>
+              </div>
+
+              {/* Group 1: Primary Metric */}
+              <div className="rounded-lg border border-border/50 bg-card/70 p-3 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-foreground">Primary metric</span>
+                  {metricsParsed.ok && metricsParsed.items.length > 1 ? (
+                    <span className="text-[11px] text-muted-foreground tabular-nums">
+                      +{metricsParsed.items.length - 1} secondary metric(s) preserved
+                    </span>
+                  ) : null}
+                </div>
+                {!metricsParsed.ok ? (
+                  <output aria-live="polite" className="text-[11px] text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
+                    <AlertCircle size={12} aria-hidden="true" className="shrink-0" />
+                    <span>Metrics JSON cannot be parsed right now. Fix the raw JSON section below to edit visually.</span>
+                  </output>
+                ) : null}
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div>
+                    <label htmlFor="builder-metric-name" className="block text-xs font-medium text-foreground mb-1">
+                      Primary metric name
+                    </label>
+                    <input
+                      id="builder-metric-name"
+                      type="text"
+                      disabled={!metricsParsed.ok}
+                      value={primaryMetricName}
+                      onChange={e => updatePrimaryMetric({ name: e.target.value })}
+                      placeholder="e.g. rate_distortion_psnr"
+                      className="block w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 font-mono text-xs shadow-2xs focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="builder-metric-unit" className="block text-xs font-medium text-foreground mb-1">
+                      Metric unit
+                    </label>
+                    <input
+                      id="builder-metric-unit"
+                      type="text"
+                      disabled={!metricsParsed.ok}
+                      value={primaryMetricUnit}
+                      onChange={e => updatePrimaryMetric({ unit: e.target.value })}
+                      placeholder="e.g. dB, ms"
+                      className="block w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 font-mono text-xs shadow-2xs focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="builder-metric-direction" className="block text-xs font-medium text-foreground mb-1">
+                      Optimization direction
+                    </label>
+                    <select
+                      id="builder-metric-direction"
+                      disabled={!metricsParsed.ok}
+                      value={primaryMetricDirection}
+                      onChange={e => updatePrimaryMetric({ direction: e.target.value === 'minimize' ? 'minimize' : 'maximize' })}
+                      className="block w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 text-xs shadow-2xs focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
+                    >
+                      <option value="minimize">minimize</option>
+                      <option value="maximize">maximize</option>
+                    </select>
+                  </div>
                 </div>
               </div>
-            ))}
+
+              {/* Group 2 & 3: Primary Guardrail + Pinned Runtime */}
+              <div className="grid gap-3 md:grid-cols-12">
+                <div className="md:col-span-5 rounded-lg border border-border/50 bg-card/70 p-3 space-y-2.5">
+                  <span className="block text-xs font-semibold text-foreground">Primary guardrail</span>
+                  {!guardrailsParsed.ok ? (
+                    <output aria-live="polite" className="text-[11px] text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
+                      <AlertCircle size={12} aria-hidden="true" className="shrink-0" />
+                      <span>Quality constraints JSON cannot be parsed right now. Fix the raw JSON section below to edit visually.</span>
+                    </output>
+                  ) : null}
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <label htmlFor="builder-guardrail-relation" className="block text-xs font-medium text-foreground mb-1">
+                        Guardrail relation
+                      </label>
+                      <select
+                        id="builder-guardrail-relation"
+                        disabled={!guardrailsParsed.ok}
+                        value={guardrailRelation}
+                        onChange={e => updateGuardrailRelation(e.target.value)}
+                        className="block w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 font-mono text-xs shadow-2xs focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
+                      >
+                        <option value="none">none</option>
+                        <option value="<=">&lt;=</option>
+                        <option value=">=">&gt;=</option>
+                        {!['none', '<=', '>='].includes(guardrailRelation) ? (
+                          <option value={guardrailRelation}>{guardrailRelation}</option>
+                        ) : null}
+                      </select>
+                    </div>
+                    <div>
+                      <label htmlFor="builder-guardrail-threshold" className="block text-xs font-medium text-foreground mb-1">
+                        Guardrail threshold
+                      </label>
+                      <input
+                        id="builder-guardrail-threshold"
+                        type="number"
+                        step="any"
+                        disabled={!guardrailsParsed.ok || guardrailRelation === 'none'}
+                        value={draftValue('guardrailThreshold', fields.quality_constraints, canonicalGuardrailThreshold)}
+                        onChange={e => updateGuardrailThreshold(e.target.value)}
+                        onBlur={() => clearDraftValue('guardrailThreshold')}
+                        placeholder={guardrailRelation === 'none' ? 'Disabled' : '0.0'}
+                        className="block w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 font-mono tabular-nums text-xs shadow-2xs focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="md:col-span-7 rounded-lg border border-border/50 bg-card/70 p-3 space-y-2.5">
+                  <span className="block text-xs font-semibold text-foreground">Pinned runtime</span>
+                  {!hardwareParsed.ok || !backendParsed.ok ? (
+                    <output aria-live="polite" className="text-[11px] text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
+                      <AlertCircle size={12} aria-hidden="true" className="shrink-0" />
+                      <span>Hardware or backend JSON cannot be parsed right now. Fix the raw JSON section below to edit visually.</span>
+                    </output>
+                  ) : null}
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <div>
+                      <label htmlFor="builder-hardware-target" className="block text-xs font-medium text-foreground mb-1">
+                        Hardware target
+                      </label>
+                      <input
+                        id="builder-hardware-target"
+                        type="text"
+                        disabled={!hardwareParsed.ok}
+                        value={hardwareTarget}
+                        onChange={e => setFields(curr => {
+                          const hw = parseJsonRecord(curr.hardware);
+                          return hw.ok ? { ...curr, hardware: JSON.stringify({ ...hw.value, target: e.target.value }, null, 2) } : curr;
+                        })}
+                        placeholder="e.g. cpu"
+                        className="block w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 font-mono text-xs shadow-2xs focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="builder-backend-framework" className="block text-xs font-medium text-foreground mb-1">
+                        Backend framework
+                      </label>
+                      <input
+                        id="builder-backend-framework"
+                        type="text"
+                        disabled={!backendParsed.ok}
+                        value={backendName}
+                        onChange={e => setFields(curr => {
+                          const be = parseJsonRecord(curr.backend);
+                          return be.ok ? { ...curr, backend: JSON.stringify({ ...be.value, name: e.target.value }, null, 2) } : curr;
+                        })}
+                        placeholder="e.g. pytorch"
+                        className="block w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 font-mono text-xs shadow-2xs focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="builder-backend-version" className="block text-xs font-medium text-foreground mb-1">
+                        Backend version
+                      </label>
+                      <input
+                        id="builder-backend-version"
+                        type="text"
+                        disabled={!backendParsed.ok}
+                        value={backendVersion}
+                        onChange={e => setFields(curr => {
+                          const be = parseJsonRecord(curr.backend);
+                          return be.ok ? { ...curr, backend: JSON.stringify({ ...be.value, version: e.target.value }, null, 2) } : curr;
+                        })}
+                        placeholder="e.g. 2.4.0"
+                        className="block w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 font-mono text-xs shadow-2xs focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Group 4: Search Budget & Seeds */}
+              <div className="rounded-lg border border-border/50 bg-card/70 p-3 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-foreground">Search budget &amp; seeds</span>
+                  {computeUnit ? (
+                    <span className="text-[11px] font-mono text-muted-foreground">Unit: {computeUnit}</span>
+                  ) : null}
+                </div>
+                {!budgetParsed.ok || !seedsValid ? (
+                  <output aria-live="polite" className="text-[11px] text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
+                    <AlertCircle size={12} aria-hidden="true" className="shrink-0" />
+                    <span>Budget or seeds JSON cannot be parsed right now. Fix the raw JSON section below to edit visually.</span>
+                  </output>
+                ) : null}
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <div>
+                    <label htmlFor="builder-max-candidates" className="block text-xs font-medium text-foreground mb-1">
+                      Max candidates
+                    </label>
+                    <input
+                      id="builder-max-candidates"
+                      type="number"
+                      min={1}
+                      disabled={!budgetParsed.ok}
+                      value={draftValue('max_candidates', fields.budget, canonicalMaxCandidates)}
+                      onChange={e => updateBudgetNumber('max_candidates', e.target.value, true)}
+                      onBlur={() => clearDraftValue('max_candidates')}
+                      className="block w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 font-mono tabular-nums text-xs shadow-2xs focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="builder-max-generations" className="block text-xs font-medium text-foreground mb-1">
+                      Max generations
+                    </label>
+                    <input
+                      id="builder-max-generations"
+                      type="number"
+                      min={1}
+                      disabled={!budgetParsed.ok}
+                      value={draftValue('max_generations', fields.budget, canonicalMaxGenerations)}
+                      onChange={e => updateBudgetNumber('max_generations', e.target.value, true)}
+                      onBlur={() => clearDraftValue('max_generations')}
+                      className="block w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 font-mono tabular-nums text-xs shadow-2xs focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="builder-compute-budget" className="block text-xs font-medium text-foreground mb-1">
+                      Compute budget
+                    </label>
+                    <input
+                      id="builder-compute-budget"
+                      type="number"
+                      min={0}
+                      step="any"
+                      disabled={!budgetParsed.ok}
+                      value={draftValue('compute_budget', fields.budget, canonicalComputeBudget)}
+                      onChange={e => updateBudgetNumber('compute_budget', e.target.value, false)}
+                      onBlur={() => clearDraftValue('compute_budget')}
+                      className="block w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 font-mono tabular-nums text-xs shadow-2xs focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="builder-run-seeds" className="block text-xs font-medium text-foreground mb-1">
+                      Run seeds (comma-separated)
+                    </label>
+                    <input
+                      id="builder-run-seeds"
+                      type="text"
+                      disabled={!seedsValid}
+                      value={draftValue('seeds', fields.seeds, canonicalSeeds)}
+                      onChange={e => updateSeedsInput(e.target.value)}
+                      onBlur={() => clearDraftValue('seeds')}
+                      placeholder="42, 1337"
+                      className="block w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 font-mono tabular-nums text-xs shadow-2xs focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Group 5: Allowed DSL Transforms */}
+              <div className="rounded-lg border border-border/50 bg-card/70 p-3 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-foreground">Allowed DSL transforms</span>
+                  {customTransformsCount > 0 ? (
+                    <span className="text-[11px] text-muted-foreground tabular-nums">
+                      +{customTransformsCount} custom transform(s) preserved in raw JSON
+                    </span>
+                  ) : null}
+                </div>
+                {!transformsParsed.ok ? (
+                  <output aria-live="polite" className="text-[11px] text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
+                    <AlertCircle size={12} aria-hidden="true" className="shrink-0" />
+                    <span>Allowed transforms JSON cannot be parsed right now. Fix the raw JSON section below to edit visually.</span>
+                  </output>
+                ) : null}
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {REGISTERED_V1_TRANSFORMS.map(reg => {
+                    const checked = transformsParsed.ok && transformsParsed.items.some(
+                      item => record(item) && item.name === reg.name && item.version === reg.version,
+                    );
+                    const inputId = `builder-transform-${reg.name}`;
+                    return (
+                      <label
+                        key={`${reg.name}:${reg.version}`}
+                        htmlFor={inputId}
+                        className="flex items-center gap-2.5 rounded-md border border-border/60 bg-background px-3 py-2 text-xs cursor-pointer select-none hover:bg-muted/40 transition-colors"
+                      >
+                        <input
+                          id={inputId}
+                          type="checkbox"
+                          disabled={!transformsParsed.ok}
+                          checked={checked}
+                          onChange={e => toggleRegisteredTransform(reg.name, reg.version, e.target.checked)}
+                          className="h-3.5 w-3.5 rounded border-border text-primary focus:ring-primary disabled:opacity-50"
+                        />
+                        <span className="font-mono text-foreground">{reg.name}</span>
+                        <span className="text-[11px] text-muted-foreground">v{reg.version}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </section>
+
+            <details open className="group rounded-xl border border-border/50 bg-background/40 p-4 space-y-4">
+              <summary className="cursor-pointer select-none flex items-center justify-between text-xs font-semibold text-foreground">
+                Advanced raw JSON manifest (13 sections) <span className="text-[11px] font-normal text-muted-foreground">Synced live with visual builder above</span>
+              </summary>
+
+              {(
+                [
+                  ['Objective & Guardrails', ['metrics', 'quality_constraints', 'stop_conditions']],
+                  ['Data, Baselines & Environment', ['baselines', 'dataset', 'model', 'tokenizer', 'hardware', 'backend', 'evaluator']],
+                  ['Search Bounds & Allowed Moves', ['seeds', 'budget', 'allowed_transforms']],
+                ] as const
+              ).map(([groupTitle, groupKeys]) => (
+                <div key={groupTitle} className="space-y-3">
+                  <h4 className="text-xs font-semibold text-muted-foreground border-b border-border/30 pb-1">
+                    {groupTitle}
+                  </h4>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    {sections
+                      .filter(([key]) => (groupKeys as readonly string[]).includes(key))
+                      .map(([key, label, , description]) => {
+                        const parseError = jsonFieldError(key);
+                        const errorId = `problem-spec-section-${key}-error`;
+                        return (
+                          <div
+                            key={key}
+                            className={`p-3.5 rounded-lg border space-y-2 ${
+                              parseError
+                                ? 'border-destructive/60 bg-destructive/5'
+                                : 'border-border/50 bg-background/50'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <label
+                                htmlFor={`problem-spec-section-${key}`}
+                                className="block text-sm font-semibold text-foreground"
+                              >
+                                {label} (JSON)
+                              </label>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span
+                                  className={`text-[10px] font-medium ${
+                                    parseError
+                                      ? 'text-destructive'
+                                      : 'text-emerald-600 dark:text-emerald-400'
+                                  }`}
+                                >
+                                  {parseError ? 'Syntax error' : 'Valid JSON'}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => formatJsonField(key, label)}
+                                  className="text-xs text-muted-foreground hover:text-primary transition-colors underline"
+                                  title="Format and validate JSON"
+                                >
+                                  Format
+                                </button>
+                              </div>
+                            </div>
+                            <p id={`problem-spec-section-${key}-help`} className="text-xs leading-relaxed text-muted-foreground">
+                              {description}
+                            </p>
+                            <textarea
+                              id={`problem-spec-section-${key}`}
+                              name={`section_${key}`}
+                              required
+                              rows={4}
+                              maxLength={32768}
+                              spellCheck={false}
+                              value={fields[key]}
+                              onChange={e => setFields(current => ({ ...current, [key]: e.target.value }))}
+                              aria-invalid={parseError ? true : undefined}
+                              aria-describedby={parseError ? `problem-spec-section-${key}-help ${errorId}` : `problem-spec-section-${key}-help`}
+                              className={`block w-full rounded-md border bg-card p-2 font-mono text-xs leading-relaxed shadow-2xs focus:ring-1 ${
+                                parseError
+                                  ? 'border-destructive focus:ring-destructive focus:border-destructive'
+                                  : 'border-border/60 focus:ring-primary focus:border-primary'
+                              }`}
+                            />
+                            {parseError ? (
+                              <p id={errorId} role="alert" className="text-xs text-destructive flex items-center gap-1.5">
+                                <AlertCircle size={12} aria-hidden="true" className="shrink-0" />
+                                <span>{parseError}</span>
+                              </p>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+              ))}
+            </details>
           </div> : null}
 
           {/* Card 3: Immutability Confirmation Gate */}
@@ -929,12 +1460,12 @@ export default function ProblemSpecPanel({ showEvolution = true }: { showEvoluti
     </div>
 
     {/* Right Column: Spec Integrity & Snapshot History */}
-    <div className="lg:col-span-4 space-y-5">
+    <div className="problem-spec-side-col lg:col-span-4 space-y-5">
       <div className="rounded-xl border border-border/60 bg-card p-4 shadow-xs space-y-3">
         <div className="flex items-center gap-2 border-b border-border/40 pb-2">
           <Boxes size={15} className="text-primary" />
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-            G1 ProblemSpec Invariants
+          <h3 className="text-sm font-semibold text-foreground">
+            G1 ProblemSpec invariants
           </h3>
         </div>
         <div className="space-y-2 text-xs">
@@ -1000,7 +1531,7 @@ export default function ProblemSpecPanel({ showEvolution = true }: { showEvoluti
                 <span className="truncate max-w-[70%]">
                   {String(saved.definition.task)} · v{saved.version} · {saved.spec_id}
                 </span>
-                <span className="text-[10px] text-muted-foreground shrink-0 uppercase">
+                <span className="text-[10px] text-muted-foreground shrink-0 font-mono">
                   {saved.spec_id.slice(-8)}
                 </span>
               </button>
