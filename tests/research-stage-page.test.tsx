@@ -9,11 +9,28 @@ import ResearchStagePage from '../app/research-stage-page';
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  const values = new Map<string, string>();
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        values.set(key, value);
+      },
+      removeItem: (key: string) => {
+        values.delete(key);
+      },
+      clear: () => {
+        values.clear();
+      },
+    },
+  });
 });
 
 afterEach(() => {
   cleanup();
   document.body.innerHTML = '';
+  window.localStorage.clear();
   window.history.replaceState({}, '', '/');
   vi.unstubAllGlobals();
 });
@@ -117,4 +134,40 @@ it('shows prerequisite links on /proposals and avoids compiling copy on unavaila
   render(<ResearchStagePage user={{ displayName: 'Seedy', email: 'seedy@sites.test' }} surface="reports" />);
   expect(await screen.findByText(/Saved history is unavailable/i)).toBeTruthy();
   expect(screen.queryByText(/before compiling/i)).toBeNull();
+});
+
+it('toggles read-only Sample walkthrough previews on /proposals and /reports without mutating URL context or claiming verification', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => Response.json({ items: [], total: 0, limit: 50, offset: 0 })),
+  );
+
+  window.history.replaceState({}, '', '/proposals');
+  await act(async () => {
+    render(<ResearchStagePage user={{ displayName: 'Seedy', email: 'seedy@sites.test' }} surface="proposals" />);
+  });
+
+  expect(screen.queryByRole('region', { name: /Illustrative proposal walkthrough/i })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: /Sample walkthrough/i }));
+
+  const proposalPreview = screen.getByRole('region', { name: /Illustrative proposal walkthrough/i });
+  expect(proposalPreview.textContent).toContain('Read-only preview · not stored evidence');
+  expect(proposalPreview.textContent).not.toMatch(/\bverified\b/i);
+  expect(window.location.search).toBe('');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+  expect(screen.queryByRole('region', { name: /Illustrative proposal walkthrough/i })).toBeNull();
+  cleanup();
+
+  window.history.replaceState({}, '', '/reports');
+  await act(async () => {
+    render(<ResearchStagePage user={{ displayName: 'Seedy', email: 'seedy@sites.test' }} surface="reports" />);
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: /Sample walkthrough/i }));
+  const reportPreview = screen.getByRole('region', { name: /Illustrative report walkthrough/i });
+  expect(reportPreview.textContent).toContain('synthetic_operator_only_no_product_claim · preview only');
+  expect(reportPreview.querySelectorAll('svg')).toHaveLength(3);
+  expect(reportPreview.textContent).not.toMatch(/\bverified\b/i);
+  expect(window.location.search).toBe('');
 });

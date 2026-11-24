@@ -6247,3 +6247,1052 @@ html {
   color: color-mix(in oklab, var(--color-derivation) 80%, #6f431c);
   background: var(--surface-derivation);
 }
+
+/* ==========================================================================
+   Linear × Cursor 3-Zone Multi-Tenant SaaS Workbench (.wb-*)
+   Bound via .open-design.json (linear-app + dashboard)
+   ========================================================================== */
+
+.wb-shell,
+.app-shell.wb-shell,
+.standalone-stage-page.wb-shell {
+  display: grid;
+  grid-template-columns: 252px minmax(0, 1fr) 320px;
+  height: 100dvh;
+  min-height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+  background: var(--background);
+  color: var(--foreground);
+  padding: 0;
+  gap: 0;
+}
+
+.wb-shell.is-left-collapsed,
+.app-shell.wb-shell.is-left-collapsed,
+.standalone-stage-page.wb-shell.is-left-collapsed {
+  grid-template-columns: 0px minmax(0, 1fr) 320px;
+}
+
+.wb-shell.is-right-collapsed,
+.app-shell.wb-shell.is-right-collapsed,
+.standalone-stage-page.wb-shell.is-right-collapsed {
+  grid-template-columns: 252px minmax(0, 1fr) 0px;
+}
+
+.wb-shell.is-left-collapsed.is-right-collapsed,
+.app-shell.wb-shell.is-left-collapsed.is-right-collapsed,
+.standalone-stage-page.wb-shell.is-left-collapsed.is-right-collapsed {
+  grid-template-columns: 0px minmax(0, 1fr) 0px;
+}
+
+/* Zone 1 — Left App Spine */
+.wb-sidebar {
+  grid-column: 1;
+  background: oklch(0.968 0.012 252);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.wb-sidebar.is-collapsed {
+  width: 0;
+  border-right: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.wb-sidebar-header {
+  height: 48px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.wb-sidebar-header .brand-lockup {
+  min-width: 0;
+  gap: 8px;
+}
+
+.wb-sidebar-header .brand-suffix {
+  letter-spacing: 0.01em;
+  font-size: 10px;
+}
+
+.wb-context-card {
+  margin: 10px 10px 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  display: grid;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.wb-context-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  min-width: 0;
+}
+
+.wb-context-key {
+  color: var(--muted-foreground);
+  font-weight: 500;
+  width: 34px;
+  flex-shrink: 0;
+}
+
+.wb-context-val {
+  font-family: var(--font-geist-mono);
+  font-size: 11px;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.wb-sidebar-section {
+  padding: 6px 10px;
+  flex-shrink: 0;
+}
+
+.wb-section-heading {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+  margin: 0 0 6px 4px;
+  text-transform: none;
+  letter-spacing: -0.005em;
+}
+
+.stage-nav.stage-nav-vertical {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  width: 100%;
+}
+
+.stage-nav-vertical .stage-nav-link {
+  display: grid;
+  grid-template-columns: 6px 20px 14px minmax(0, 1fr) auto;
+  align-items: center;
+  justify-content: initial;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 550;
+  text-decoration: none;
+  color: var(--foreground);
+}
+
+.stage-nav-vertical .stage-nav-link:hover:not(.is-active) {
+  background: color-mix(in oklab, var(--foreground) 5%, transparent);
+  color: var(--foreground);
+}
+
+.stage-nav-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stage-nav-step {
+  font-family: var(--font-geist-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.72;
+}
+
+.stage-nav-verb {
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+  opacity: 0.72;
+  white-space: nowrap;
+}
+
+.stage-nav-dot,
+.wb-status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  background: oklch(0.76 0.02 252);
+}
+
+.stage-nav-link.is-ready .stage-nav-dot,
+.wb-status-dot.is-ready {
+  background: #10b981;
+}
+
+.wb-status-dot.is-evidence {
+  background: var(--color-evidence);
+}
+
+.wb-status-dot.is-citation {
+  background: var(--color-citation);
+}
+
+.wb-status-dot.is-derivation {
+  background: var(--color-derivation);
+}
+
+.wb-status-dot.is-pending {
+  background: oklch(0.76 0.02 252);
+}
+
+.stage-nav-link.is-active {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  box-shadow: 0 1px 2px color-mix(in oklab, var(--primary) 24%, transparent);
+}
+
+.stage-nav-link.is-active svg {
+  color: var(--primary-foreground);
+}
+
+.stage-nav-link.is-active .stage-nav-dot {
+  background: #ffffff;
+}
+
+.stage-nav-link.is-active .stage-nav-step,
+.stage-nav-link.is-active .stage-nav-verb {
+  color: rgba(255, 255, 255, 0.86);
+  opacity: 1;
+}
+
+.wb-walkthrough-box {
+  padding: 4px 10px 8px;
+  flex-shrink: 0;
+}
+
+.wb-walkthrough-btn {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px dashed var(--border);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 11.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: all 130ms ease;
+}
+
+.wb-walkthrough-btn:hover,
+.wb-walkthrough-btn.is-active {
+  border-style: solid;
+  border-color: var(--primary);
+  background: oklch(0.95 0.03 256);
+  color: var(--primary);
+}
+
+.wb-sidebar-scroll {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 6px 10px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.wb-sidebar-spacer {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.wb-sources-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wb-sources-drawer .paper-card {
+  padding: 10px;
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.wb-sources-drawer .version-badge {
+  top: 9px;
+  right: 9px;
+  font-size: 9.5px;
+  padding: 1px 6px;
+}
+
+.wb-sources-drawer .paper-card h3 {
+  max-width: 100%;
+  margin: 12px 0 4px;
+  font-family: var(--font-geist-sans);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.wb-sources-drawer .paper-meta {
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 8px;
+  font-size: 10.5px;
+}
+
+.wb-sources-drawer .source-section-disclosure {
+  margin: 6px 0 0;
+}
+
+.wb-sources-drawer .list-label {
+  margin: 0 0 6px 2px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.wb-sources-drawer .section-row {
+  padding: 6px 8px;
+  border-radius: 5px;
+  font-size: 11.5px;
+}
+
+.wb-sources-drawer .provenance-note {
+  margin-top: 6px;
+  padding: 6px 8px;
+  font-size: 10.5px;
+}
+
+.wb-sidebar-footer {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  background: oklch(0.958 0.014 252);
+  display: grid;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.wb-utility-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 130ms ease, color 130ms ease, background-color 130ms ease;
+}
+
+.wb-utility-btn kbd {
+  margin-left: auto;
+}
+
+.wb-utility-btn:hover,
+.wb-utility-btn.is-active {
+  color: var(--foreground);
+  border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
+  background: var(--card);
+}
+
+.wb-utility-links {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.wb-utility-links .workspace-help-link {
+  justify-content: center;
+  min-height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  font-size: 11.5px;
+  font-weight: 550;
+}
+
+.wb-utility-links .workspace-help-link:hover {
+  border-color: color-mix(in oklab, var(--foreground) 22%, var(--border));
+  background: var(--muted);
+}
+
+.wb-utility-links .workspace-help-link[aria-current='page'] {
+  border-color: color-mix(in oklab, var(--primary) 40%, var(--border));
+  background: oklch(0.95 0.03 256);
+  color: var(--primary);
+}
+
+.wb-tenant-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--foreground);
+  min-width: 0;
+}
+
+.wb-tenant-role {
+  margin-left: auto;
+  font-size: 10px;
+  font-family: var(--font-geist-mono);
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+
+/* Zone 2 — Center Column, Sticky Breadcrumb Subbar & Main Stage */
+.wb-center-column {
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--background);
+}
+
+.wb-subbar {
+  height: 42px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.wb-subbar-left,
+.wb-subbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wb-subbar-right {
+  flex-shrink: 0;
+}
+
+.wb-breadcrumb-root {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.wb-breadcrumb-current {
+  font-size: 12.5px;
+  color: var(--foreground);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wb-primary-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: opacity 130ms ease;
+}
+
+.wb-primary-cta:hover {
+  opacity: 0.92;
+}
+
+.wb-secondary-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 11.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: border-color 130ms ease, background-color 130ms ease, color 130ms ease;
+}
+
+.wb-secondary-btn:hover {
+  border-color: var(--primary);
+  background: oklch(0.95 0.03 256);
+  color: var(--primary);
+}
+
+.wb-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 130ms ease, color 130ms ease, border-color 130ms ease;
+}
+
+.wb-icon-btn:hover {
+  background: var(--muted);
+  border-color: var(--border);
+  color: var(--foreground);
+}
+
+.wb-inspector-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 130ms ease, border-color 130ms ease;
+}
+
+.wb-inspector-toggle:hover {
+  background: var(--muted);
+  border-color: color-mix(in oklab, var(--foreground) 20%, var(--border));
+}
+
+.wb-shell kbd {
+  font-family: var(--font-geist-mono);
+  font-size: 10px;
+  line-height: 1.2;
+  padding: 1px 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.wb-main-scroll {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.wb-main-scroll.is-graph-canvas {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  scrollbar-gutter: auto;
+}
+
+.wb-main-scroll.is-graph-canvas > .graph-panel {
+  flex: 1 1 0%;
+  height: auto;
+  min-height: 0;
+  padding: 10px 16px 12px;
+  border-radius: 0;
+  border: 0;
+  background: var(--background);
+}
+
+.wb-shell .wb-main-scroll:not(.is-graph-canvas) .graph-panel {
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+  padding: 16px 20px 32px;
+  border-radius: 0;
+  border: 0;
+  background: transparent;
+}
+
+.wb-shell .wb-main-scroll:not(.is-graph-canvas) .graph-panel > div {
+  overflow: visible;
+}
+
+.wb-stage-content,
+.wb-shell .standalone-stage-content,
+.wb-shell .ops-dashboard,
+.wb-shell .help-center {
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 16px 20px 40px;
+  box-sizing: border-box;
+}
+
+.wb-shell .import-strip {
+  margin: 0;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+  padding: 10px 16px;
+  min-height: 0;
+  grid-template-columns: auto minmax(220px, 1fr) auto;
+  gap: 12px;
+}
+
+.wb-shell .import-strip.is-compact {
+  min-height: 36px;
+  padding: 4px 16px;
+}
+
+.wb-import-stepper {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  list-style: none;
+  padding: 8px 0 0;
+  margin: 6px 0 0;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.wb-import-stepper li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wb-import-stepper li.is-done {
+  border-color: color-mix(in oklab, #10b981 35%, var(--border));
+  background: color-mix(in oklab, #10b981 7%, var(--card));
+  color: #047857;
+}
+
+.wb-import-stepper li.is-done .wb-status-dot {
+  background: #10b981;
+}
+
+.wb-import-stepper li.is-current,
+.wb-import-stepper li.is-active {
+  border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
+  background: oklch(0.95 0.03 256);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.wb-import-stepper li.is-current .wb-status-dot,
+.wb-import-stepper li.is-active .wb-status-dot {
+  background: var(--primary);
+  animation: wb-dot-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes wb-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.wb-walkthrough-card {
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+}
+
+.wb-walkthrough-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+}
+
+.wb-mini-tile {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
+  background: oklch(0.982 0.006 252);
+  min-width: 0;
+}
+
+.wb-mini-label {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+}
+
+.wb-inline-note {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-family: var(--font-geist-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.wb-text-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.wb-text-link:hover {
+  text-decoration: underline;
+}
+
+.wb-dense-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wb-dense-table th {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  border-left: 0;
+  border-right: 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.wb-dense-table th.text-right,
+.wb-dense-table td.text-right {
+  text-align: right;
+}
+
+.wb-dense-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 65%, transparent);
+  border-left: 0;
+  border-right: 0;
+  color: var(--foreground);
+  vertical-align: middle;
+}
+
+.wb-dense-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.wb-dense-table tbody tr.is-highlighted {
+  background: oklch(0.968 0.018 256 / 0.55);
+}
+
+/* Zone 3 — Right Contextual Inspector */
+.wb-inspector,
+.wb-shell .wb-inspector.inspector-panel {
+  grid-column: 3;
+  border-left: 1px solid var(--border);
+  border-top: 0;
+  background: var(--card);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100dvh;
+  padding: 0;
+  overflow: hidden;
+}
+
+.wb-inspector.is-collapsed,
+.wb-shell .wb-inspector.inspector-panel.is-collapsed {
+  display: flex !important;
+  width: 0;
+  border-left: 0;
+  opacity: 0;
+  pointer-events: none;
+  padding: 0;
+}
+
+.wb-inspector-header {
+  height: 42px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.wb-inspector-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wb-inspector-body {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  font-size: 12px;
+  scrollbar-gutter: stable;
+}
+
+.wb-inspector-body .wb-inspector-section,
+.wb-inspector-body .wb-inspector-card {
+  padding-bottom: 12px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+}
+
+.wb-inspector-body .wb-inspector-section:last-child,
+.wb-inspector-body .wb-inspector-card:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.wb-inspector-heading,
+.wb-card-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+  margin: 0 0 8px;
+  text-transform: none;
+  letter-spacing: -0.005em;
+}
+
+.wb-kv-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.wb-kv-list > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.wb-kv-list dt {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.wb-kv-list dd {
+  margin: 0;
+  color: var(--foreground);
+  font-family: var(--font-geist-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wb-guarantee-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wb-guarantee-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--foreground);
+}
+
+.wb-guarantee-list li .wb-status-dot {
+  margin-top: 5px;
+}
+
+.wb-guarantee-list code {
+  font-family: var(--font-geist-mono);
+  font-size: 10.5px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--muted);
+}
+
+.wb-shortcut-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 10px;
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+}
+
+.wb-shortcut-list {
+  display: grid;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+}
+
+.wb-shortcut-list > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.wb-shell .problem-spec-workbench-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.wb-shell .problem-spec-main-col,
+.wb-shell .problem-spec-side-col {
+  grid-column: 1 / -1;
+}
+
+.wb-shell .problem-spec-side-col {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.wb-shell .problem-spec-side-col > * {
+  margin-top: 0;
+}
+
+@media (max-width: 1024px) {
+  .wb-shell,
+  .app-shell.wb-shell,
+  .standalone-stage-page.wb-shell,
+  .wb-shell.is-left-collapsed,
+  .wb-shell.is-right-collapsed,
+  .wb-shell.is-left-collapsed.is-right-collapsed,
+  .app-shell.wb-shell.is-left-collapsed,
+  .app-shell.wb-shell.is-right-collapsed,
+  .app-shell.wb-shell.is-left-collapsed.is-right-collapsed,
+  .standalone-stage-page.wb-shell.is-left-collapsed,
+  .standalone-stage-page.wb-shell.is-right-collapsed,
+  .standalone-stage-page.wb-shell.is-left-collapsed.is-right-collapsed {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
+  .wb-shell > .wb-sidebar,
+  .wb-shell > .wb-center-column,
+  .wb-shell > .wb-inspector,
+  .wb-shell .wb-inspector.inspector-panel {
+    grid-column: 1 / -1;
+    height: auto;
+    overflow: visible;
+  }
+
+  .wb-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .wb-sidebar.is-collapsed,
+  .wb-inspector.is-collapsed,
+  .wb-shell .wb-inspector.inspector-panel.is-collapsed {
+    display: none !important;
+  }
+
+  .wb-sidebar-scroll,
+  .wb-main-scroll,
+  .wb-main-scroll.is-graph-canvas,
+  .wb-inspector-body {
+    height: auto;
+    overflow: visible;
+  }
+
+  .wb-main-scroll.is-graph-canvas > .graph-panel {
+    height: auto;
+    overflow: visible;
+  }
+
+  .wb-shell .wb-inspector,
+  .wb-shell .wb-inspector.inspector-panel {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .wb-import-stepper {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wb-import-stepper li.is-current .wb-status-dot,
+  .wb-import-stepper li.is-active .wb-status-dot {
+    animation: none;
+  }
+}

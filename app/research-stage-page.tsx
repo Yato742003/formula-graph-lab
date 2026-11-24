@@ -2,10 +2,13 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { ArrowRight, WandSparkles } from 'lucide-react';
 import {
   WorkspaceShell,
   syncWorkspaceQueryParam,
+  useSampleWalkthrough,
   useWorkspaceLocation,
+  withContext,
 } from '@/components/workspace-shell';
 import { TrustBadge } from '@/components/research-primitives';
 import ResearchMovePanel from './research-move-panel';
@@ -36,6 +39,133 @@ function parseSpecOptions(raw: unknown): FrozenSpecOption[] {
   });
 }
 
+function SampleWalkthroughBanner({
+  surface,
+  onClose,
+}: {
+  surface: Surface;
+  onClose: () => void;
+}) {
+  if (surface === 'proposals') {
+    return (
+      <section
+        aria-label="Illustrative proposal walkthrough"
+        className="wb-walkthrough-card mb-4"
+      >
+        <div className="wb-walkthrough-header">
+          <div className="flex items-center gap-2">
+            <span className="wb-status-dot is-derivation" aria-hidden="true" />
+            <strong className="text-xs font-semibold text-foreground">
+              Illustrative sample walkthrough · Step 04 output preview
+            </strong>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="wb-inline-note">Read-only preview · not stored evidence</span>
+            <button type="button" onClick={onClose} className="wb-text-link">
+              Dismiss
+            </button>
+          </div>
+        </div>
+        <div className="grid gap-3 md:grid-cols-3 text-xs mt-2.5">
+          <div className="wb-mini-tile">
+            <span className="wb-mini-label">Compiled expression (DSL)</span>
+            <code className="block mt-1 text-[11px] text-foreground">
+              κ_mix(q,k) = 0.50·⟨φ_exp(q),φ_exp(k)⟩ + 0.50·⟨φ_elu(q),φ_elu(k)⟩
+            </code>
+          </div>
+          <div className="wb-mini-tile">
+            <span className="wb-mini-label">Immutable parents</span>
+            <p className="mt-1 font-mono text-[11px] text-foreground m-0">
+              S3.E1 (φ_exp, rank 16) + S3.E4 (φ_elu, rank 16) → rank 32
+            </p>
+          </div>
+          <div className="wb-mini-tile">
+            <span className="wb-mini-label">Recorded proof obligation</span>
+            <p className="mt-1 text-[11px] text-muted-foreground m-0">
+              <code>nonzero_normalization_denominator</code> · remains conditional until checked
+            </p>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  const rows = [
+    { name: 'cand_mix_w050 (Sample candidate)', regret: 0.0042, ciLow: 0.0031, ciHigh: 0.0054, pct: 42, primary: true },
+    { name: 'positive-random-exp (Parent A)', regret: 0.0079, ciLow: 0.0064, ciHigh: 0.0093, pct: 79, primary: false },
+    { name: 'elu-plus-one (Parent B)', regret: 0.0094, ciLow: 0.0081, ciHigh: 0.0108, pct: 94, primary: false },
+  ];
+
+  return (
+    <section
+      aria-label="Illustrative report walkthrough"
+      className="wb-walkthrough-card mb-4"
+    >
+      <div className="wb-walkthrough-header">
+        <div className="flex items-center gap-2">
+          <span className="wb-status-dot is-evidence" aria-hidden="true" />
+          <strong className="text-xs font-semibold text-foreground">
+            Illustrative sample walkthrough · Locked-holdout comparison preview
+          </strong>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="wb-inline-note">synthetic_operator_only_no_product_claim · preview only</span>
+          <button type="button" onClick={onClose} className="wb-text-link">
+            Dismiss
+          </button>
+        </div>
+      </div>
+      <div className="mt-3 overflow-x-auto">
+        <table className="wb-dense-table">
+          <thead>
+            <tr>
+              <th>Variant</th>
+              <th>Scope</th>
+              <th>Regret vs exact softmax (lower is better)</th>
+              <th className="text-right">Holdout mean · 95% CI</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.name} className={row.primary ? 'is-highlighted' : undefined}>
+                <td className="font-mono text-[11px]">{row.name}</td>
+                <td aria-label={row.primary ? 'Sample mixture' : 'Baseline'}>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className={`wb-status-dot ${row.primary ? 'is-derivation' : 'is-evidence'}`} aria-hidden="true" />
+                    <span>{row.primary ? 'Sample mixture' : 'Baseline'}</span>
+                  </span>
+                </td>
+                <td aria-label={`Relative regret bar ${row.regret.toFixed(4)}`}>
+                  <svg
+                    width="160"
+                    height="14"
+                    viewBox="0 0 160 14"
+                    aria-hidden="true"
+                    className="block"
+                  >
+                    <rect x="0" y="4" width="160" height="6" rx="3" fill="oklch(0.93 0.015 250)" />
+                    <rect
+                      x="0"
+                      y="4"
+                      width={Math.round(row.pct * 1.5)}
+                      height="6"
+                      rx="3"
+                      fill={row.primary ? 'oklch(0.46 0.18 256)' : 'oklch(0.46 0.18 256 / 0.45)'}
+                    />
+                  </svg>
+                </td>
+                <td className="text-right font-mono tabular-nums text-[11px]">
+                  {row.regret.toFixed(4)} [{row.ciLow.toFixed(4)}, {row.ciHigh.toFixed(4)}]
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 export default function ResearchStagePage({
   user,
   surface,
@@ -47,7 +177,10 @@ export default function ResearchStagePage({
   const [state, setState] = useState<'loading' | 'loaded' | 'unavailable'>('loading');
   const [savedSpecs, setSavedSpecs] = useState<FrozenSpecOption[]>([]);
   const { params } = useWorkspaceLocation();
+  const { walkthroughEnabled, setWalkthrough } = useSampleWalkthrough();
   const specId = params.get('spec_id') ?? '';
+  const paperId = params.get('paper_id') ?? '';
+  const candidateId = params.get('candidate_id') ?? '';
   const isProposals = surface === 'proposals';
 
   useEffect(() => {
@@ -82,8 +215,104 @@ export default function ResearchStagePage({
     return () => controller.abort();
   }, [isProposals]);
 
+  const stageInspector = (
+    <div className="space-y-4 text-xs">
+      <section className="wb-inspector-card">
+        <h3 className="wb-card-title">Stage summary</h3>
+        <p className="text-muted-foreground leading-relaxed m-0">
+          {isProposals
+            ? 'Combines reviewed compatible ports under an allowlisted DSL operator without overwriting extracted paper equations.'
+            : 'Reconstructs checker verdicts, comparison tables, and offline deterministic replay bundles from immutable hashes.'}
+        </p>
+        {!walkthroughEnabled ? (
+          <button
+            type="button"
+            onClick={() => setWalkthrough(true)}
+            className="wb-secondary-btn mt-2.5 w-full justify-center"
+          >
+            <WandSparkles size={13} aria-hidden="true" />
+            <span>Preview sample output</span>
+          </button>
+        ) : null}
+      </section>
+
+      <section className="wb-inspector-card">
+        <h3 className="wb-card-title">Scoped context</h3>
+        <dl className="wb-kv-list">
+          <div>
+            <dt>Paper</dt>
+            <dd className="font-mono">{paperId || 'Not pinned'}</dd>
+          </div>
+          <div>
+            <dt>ProblemSpec</dt>
+            <dd className="font-mono">{specId ? `${specId.slice(0, 16)}…` : 'Select in Step 02'}</dd>
+          </div>
+          <div>
+            <dt>Candidate</dt>
+            <dd className="font-mono">{candidateId ? `${candidateId.slice(0, 16)}…` : 'None selected'}</dd>
+          </div>
+          <div>
+            <dt>Reviewed mappings</dt>
+            <dd className="font-mono tabular-nums">
+              {state === 'loaded'
+                ? mappings.filter((m) => m.status === 'compatible' && m.isReviewed && m.freshness === 'current').length
+                : '—'}
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="wb-inspector-card">
+        <h3 className="wb-card-title">Verification &amp; isolation</h3>
+        <ul className="wb-guarantee-list">
+          <li>
+            <span className="wb-status-dot is-ready" aria-hidden="true" />
+            <span>Exact paper formulas stay immutable (SHA-256)</span>
+          </li>
+          <li>
+            <span className="wb-status-dot is-ready" aria-hidden="true" />
+            <span>Hermetic worker (<code>sandbox-policy.v2</code>, no network)</span>
+          </li>
+          <li>
+            <span className="wb-status-dot is-ready" aria-hidden="true" />
+            <span>Holdout split locked until finalist freeze</span>
+          </li>
+          <li>
+            <span className="wb-status-dot is-ready" aria-hidden="true" />
+            <span>Tenant-scoped D1 &amp; Neo4j authorization</span>
+          </li>
+        </ul>
+      </section>
+
+      <section className="wb-inspector-card">
+        <h3 className="wb-card-title">Shortcuts</h3>
+        <div className="wb-shortcut-list">
+          <span>Jump stages <kbd>Alt 1–5</kbd></span>
+          <span>Toggle sidebar <kbd>[</kbd></span>
+          <span>Toggle inspector <kbd>]</kbd></span>
+        </div>
+      </section>
+    </div>
+  );
+
   return (
-    <WorkspaceShell user={user}>
+    <WorkspaceShell
+      user={user}
+      showWalkthroughToggle
+      inspectorTitle={isProposals ? 'Proposal inspector' : 'Report & replay inspector'}
+      inspector={stageInspector}
+      headerActions={
+        isProposals ? (
+          <Link
+            href={withContext('/reports', params)}
+            className="wb-primary-cta"
+          >
+            <span>Next: Step 5 · Reports</span>
+            <ArrowRight size={13} aria-hidden="true" />
+          </Link>
+        ) : null
+      }
+    >
       <section className="standalone-stage-content">
         <header className="standalone-stage-heading">
           <div>
@@ -99,6 +328,10 @@ export default function ResearchStagePage({
           </div>
           <TrustBadge>{isProposals ? 'AI proposal is optional' : 'Evidence is scoped'}</TrustBadge>
         </header>
+
+        {walkthroughEnabled ? (
+          <SampleWalkthroughBanner surface={surface} onClose={() => setWalkthrough(false)} />
+        ) : null}
 
         <div className="standalone-stage-panel">
           <ResearchMovePanel

@@ -4,7 +4,13 @@ import Link from 'next/link';
 import ProblemSpecPanel from './problem-spec-panel';
 import ResearchCreatePanel from './research-create-panel';
 import ResearchMovePanel from './research-move-panel';
-import StageNav, { useWorkspaceLocation, withContext } from '@/components/workspace-shell';
+import StageNav, {
+  WorkbenchLeftSpine,
+  useSampleWalkthrough,
+  useWorkbenchStageShortcuts,
+  useWorkspaceLocation,
+  withContext,
+} from '@/components/workspace-shell';
 
 import {
   type CompatibilityView,
@@ -24,7 +30,7 @@ import {
   BookOpenText,
   Braces,
   Check,
-  ChevronDown,
+  ChevronRight,
   CircleDot,
   Copy,
   FileCode2,
@@ -41,6 +47,7 @@ import {
   Search,
   ShieldCheck,
   Trash2,
+  WandSparkles,
   X,
 } from 'lucide-react';
 import {
@@ -652,10 +659,13 @@ function LineageSourceRefs({
 
 export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProps) {
   const { params: workspaceParams } = useWorkspaceLocation();
+  const { walkthroughEnabled, setWalkthrough } = useSampleWalkthrough();
+  useWorkbenchStageShortcuts(workspaceParams);
   const helpHref = withContext('/help', workspaceParams);
   const opsHref = withContext('/ops', workspaceParams);
   const [selectedId, setSelectedId] = useState<string | null>('scaled');
   const [isImporting, setIsImporting] = useState(false);
+  const [importPhaseIdx, setImportPhaseIdx] = useState(0);
   const [imported, setImported] = useState<WorkspaceImportResponse | null>(
     null,
   );
@@ -741,11 +751,25 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
       ) {
         e.preventDefault();
         toggleZenMode();
+      } else if (e.key === '[' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        setIsLeftCollapsed((prev) => !prev);
+      } else if (e.key === ']' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        setIsRightCollapsed((prev) => !prev);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [toggleZenMode, isSearchOpen, selectedId]);
+
+  useEffect(() => {
+    if (!isImporting) return;
+    const timer = window.setInterval(() => {
+      setImportPhaseIdx((idx) => (idx < 3 ? idx + 1 : idx));
+    }, 900);
+    return () => window.clearInterval(timer);
+  }, [isImporting]);
 
   useEffect(() => {
     const rafId = requestAnimationFrame(() => {
@@ -1378,6 +1402,7 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
       );
     } finally {
       setIsImporting(false);
+      setImportPhaseIdx(0);
     }
   }
 
@@ -1454,182 +1479,136 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
     setSelectedId(nodeId);
   }
 
-  return (
-    <main className={`app-shell ${stage ? `app-shell-${stage}` : ''}`} suppressHydrationWarning>
-      <output className="sr-only" aria-live="polite">
-        {researchLoadNotice}
-      </output>
-      {researchNotice ? (
-        <output className="sr-only" aria-live="polite">
-          {researchNotice}
-        </output>
-      ) : null}
-      <header className="topbar">
-        <div className="brand-lockup">
-          <div className="brand-mark" aria-hidden="true">
-            <Network size={19} strokeWidth={2.2} />
-          </div>
-          <div>
-            <div className="flex items-center gap-1.5">
-              <p className="brand-name">FormulaGraph</p>
-              <span className="pro-tier-badge">PRO BETA</span>
-            </div>
-            <p className="brand-suffix">LAB / 01</p>
-          </div>
+  const importPhases = [
+    '1. Fetching arXiv HTML',
+    '2. Extracting MathML & LaTeX',
+    '3. Checking AST & dimensions',
+    '4. Saving SHA-256 snapshot',
+  ] as const;
+
+  const searchDialogNode = isSearchOpen ? (
+    <dialog
+      className="search-command"
+      id="graph-search-panel"
+      aria-label="Search evidence graph"
+      aria-modal="true"
+      onCancel={() => setIsSearchOpen(false)}
+    >
+      <div className="search-command-heading">
+        <div className="search-command-icon" aria-hidden="true">
+          <Search size={17} />
         </div>
-
-        <div className="top-actions">
-          <a className="workspace-help-link" href={opsHref} aria-label="Open Operations dashboard">
-            <Activity size={16} aria-hidden="true" />
-            <span>Ops</span>
-          </a>
-          <a className="workspace-help-link" href={helpHref} aria-label="Open FormulaGraph help">
-            <BookOpenText size={16} aria-hidden="true" />
-            <span>Help</span>
-          </a>
-          <button
-            type="button"
-            className={`icon-button ${isSearchOpen ? 'icon-button-active' : ''}`}
-            aria-label={isSearchOpen ? 'Close graph search' : 'Search graph'}
-            title="Search graph (Ctrl+K or /)"
-            aria-expanded={isSearchOpen}
-            aria-controls="graph-search-panel"
-            onClick={() => setIsSearchOpen((open) => !open)}
-            suppressHydrationWarning
-          >
-            <Search size={18} />
-          </button>
-          <div className="workspace-pill">
-            <span className="workspace-dot" />
-            <span title={user.email}>{user.displayName}</span>
-            <ChevronDown size={14} />
-          </div>
+        <div>
+          <p className="eyebrow">Hybrid retrieval</p>
+          <h2>Find evidence across papers</h2>
         </div>
-        {stage ? <StageNav /> : null}
-      </header>
-
-      {isSearchOpen ? (
-          <dialog
-            className="search-command"
-            id="graph-search-panel"
-            aria-label="Search evidence graph"
-            aria-modal="true"
-            onCancel={() => setIsSearchOpen(false)}
-          >
-            <div className="search-command-heading">
-              <div className="search-command-icon" aria-hidden="true">
-                <Search size={17} />
-              </div>
-              <div>
-                <p className="eyebrow">Hybrid retrieval</p>
-                <h2>Find evidence across papers</h2>
-              </div>
-              <button
-                className="search-close"
-                type="button"
-                aria-label="Close graph search"
-                onClick={() => setIsSearchOpen(false)}
-              >
-                <X size={17} />
-              </button>
-            </div>
-            <div className="search-command-body">
-              <form className="search-form" onSubmit={handleSearch}>
-                <Input
-                  id="search-evidence-query"
-                  name="query"
-                  aria-label="Formula or research concept"
-                  value={searchQuery}
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  placeholder="Try d_model, scaled similarity, or convergence…"
-                  maxLength={500}
-                />
-                <Button type="submit" disabled={isSearching}>
-                  <Search size={15} />
-                  {isSearching ? 'Searching…' : 'Search evidence'}
-                </Button>
-              </form>
-              <p className="search-notice" aria-live="polite">
-                <CircleDot size={12} />
-                {searchNotice}
-              </p>
-              {searchResult ? (
-                <div
-                  className="search-results"
-                  aria-label="Evidence search results"
-                >
-                  {searchResult.hits.map((hit) => (
-                    <button
-                      className="search-result"
-                      key={hit.uuid}
-                      type="button"
-                      onClick={() => selectSearchHit(hit)}
-                    >
-                      <span className="search-result-topline">
-                        <b>{hit.kind}</b>
-                        <span>
-                          {hit.paper_id}
-                          {hit.version ? `v${hit.version}` : ''}
-                        </span>
-                      </span>
-                      <strong>{searchHitTitle(hit)}</strong>
-                      <code>{searchHitExcerpt(hit)}</code>
-                      <span className="search-result-signals">
-                        {hit.match_sources.map((source) => (
-                          <i key={source}>{source}</i>
-                        ))}
-                        <small>score {hit.score}</small>
-                      </span>
-                    </button>
-                  ))}
-                  {searchResult.hits.length === 0 ? (
-                    <div className="search-empty">
-                      <Braces size={19} />
-                      <span>No evidence matched this workspace yet.</span>
-                    </div>
-                  ) : null}
-                  {searchResult.next_cursor ? (
-                    <Button
-                      variant="outline"
-                      className="search-more"
-                      type="button"
-                      disabled={isSearching}
-                      onClick={() =>
-                        void runSearch(searchResult.next_cursor ?? undefined)
-                      }
-                    >
-                      Load more evidence
-                    </Button>
-                  ) : null}
-                </div>
-              ) : (
-                <div
-                  className="search-suggestions"
-                  aria-label="Search suggestions"
-                >
-                  {['scaled attention', 'd_model', 'convergence'].map(
-                    (suggestion) => (
-                      <button
-                        key={suggestion}
-                        type="button"
-                        onClick={() => setSearchQuery(suggestion)}
-                      >
-                        {suggestion}
-                      </button>
-                    ),
-                  )}
-                </div>
-              )}
-            </div>
-          </dialog>
-      ) : null}
-
-      {activeViewTab === 'lineage' ? (
-        <section
-          id="paper-import"
-          className={`import-strip ${hasPersistedGraph && !isImportExpanded ? 'is-compact' : ''}`}
-          aria-label="Import a paper"
+        <button
+          className="search-close"
+          type="button"
+          aria-label="Close graph search"
+          onClick={() => setIsSearchOpen(false)}
         >
+          <X size={17} />
+        </button>
+      </div>
+      <div className="search-command-body">
+        <form className="search-form" onSubmit={handleSearch}>
+          <Input
+            id="search-evidence-query"
+            name="query"
+            aria-label="Formula or research concept"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Try d_model, scaled similarity, or convergence…"
+            maxLength={500}
+          />
+          <Button type="submit" disabled={isSearching}>
+            <Search size={15} />
+            {isSearching ? 'Searching…' : 'Search evidence'}
+          </Button>
+        </form>
+        <p className="search-notice" aria-live="polite">
+          <CircleDot size={12} />
+          {searchNotice}
+        </p>
+        {searchResult ? (
+          <div
+            className="search-results"
+            aria-label="Evidence search results"
+          >
+            {searchResult.hits.map((hit) => (
+              <button
+                className="search-result"
+                key={hit.uuid}
+                type="button"
+                onClick={() => selectSearchHit(hit)}
+              >
+                <span className="search-result-topline">
+                  <b>{hit.kind}</b>
+                  <span>
+                    {hit.paper_id}
+                    {hit.version ? `v${hit.version}` : ''}
+                  </span>
+                </span>
+                <strong>{searchHitTitle(hit)}</strong>
+                <code>{searchHitExcerpt(hit)}</code>
+                <span className="search-result-signals">
+                  {hit.match_sources.map((source) => (
+                    <i key={source}>{source}</i>
+                  ))}
+                  <small>score {hit.score}</small>
+                </span>
+              </button>
+            ))}
+            {searchResult.hits.length === 0 ? (
+              <div className="search-empty">
+                <Braces size={19} />
+                <span>No evidence matched this workspace yet.</span>
+              </div>
+            ) : null}
+            {searchResult.next_cursor ? (
+              <Button
+                variant="outline"
+                className="search-more"
+                type="button"
+                disabled={isSearching}
+                onClick={() =>
+                  void runSearch(searchResult.next_cursor ?? undefined)
+                }
+              >
+                Load more evidence
+              </Button>
+            ) : null}
+          </div>
+        ) : (
+          <div
+            className="search-suggestions"
+            aria-label="Search suggestions"
+          >
+            {['scaled attention', 'd_model', 'convergence'].map(
+              (suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  onClick={() => setSearchQuery(suggestion)}
+                >
+                  {suggestion}
+                </button>
+              ),
+            )}
+          </div>
+        )}
+      </div>
+    </dialog>
+  ) : null;
+
+  const importStripNode =
+    activeViewTab === 'lineage' ? (
+      <section
+        id="paper-import"
+        className={`import-strip ${hasPersistedGraph && !isImportExpanded ? 'is-compact' : ''}`}
+        aria-label="Import a paper"
+      >
         {hasPersistedGraph && !isImportExpanded ? (
           <div className="import-compact-row">
             <div className="import-compact-info">
@@ -1700,44 +1679,37 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                 </Button>
               ) : null}
             </form>
-            <p className="import-notice" aria-live="polite">
-              <CircleDot size={13} />
-              {importNotice}
-            </p>
+            {isImporting ? (
+              <ol className="wb-import-stepper" aria-live="polite">
+                {importPhases.map((phase, idx) => (
+                  <li
+                    key={phase}
+                    className={
+                      idx < importPhaseIdx
+                        ? 'is-done'
+                        : idx === importPhaseIdx
+                          ? 'is-active'
+                          : ''
+                    }
+                  >
+                    <span className="wb-status-dot" aria-hidden="true" />
+                    <span>{phase}</span>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="import-notice" aria-live="polite">
+                <CircleDot size={13} />
+                {importNotice}
+              </p>
+            )}
           </>
         )}
-        </section>
-      ) : null}
+      </section>
+    ) : null;
 
-      <div
-        className={`research-grid ${activeViewTab === 'spec' ? 'is-spec-view' : ''} ${activeViewTab === 'compat' ? 'is-compat-view' : ''} ${isLeftCollapsed ? 'is-left-collapsed' : ''} ${isRightCollapsed ? 'is-right-collapsed' : ''}`}
-      >
-        <aside
-          className={`source-panel ${isLeftCollapsed ? 'is-collapsed' : ''}`}
-          aria-label="Paper sources"
-        >
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Evidence</p>
-              <h2>Paper sources</h2>
-            </div>
-            <div className="panel-heading-actions">
-              <Badge variant="outline" className="count-badge">
-                01
-              </Badge>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="panel-collapse-btn"
-                onClick={() => setIsLeftCollapsed(true)}
-                title="Collapse paper sources"
-                aria-label="Collapse paper sources"
-              >
-                <PanelLeftClose size={15} />
-              </Button>
-            </div>
-          </div>
+  const paperSourcesBody = (
+    <>
 
           <article className="paper-card">
             <div className="paper-index">P–01</div>
@@ -1954,15 +1926,17 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
             <ShieldCheck size={14} className="text-primary shrink-0" />
             <p>Source-bound provenance verified</p>
           </div>
-        </aside>
+    </>
+  );
 
+  const graphPanelNode = (
         <section
           className="graph-panel"
           aria-label="Formula relationship graph"
         >
           <div className="graph-header">
             <div className="graph-header-left">
-              {isLeftCollapsed && activeViewTab !== 'spec' ? (
+              {!stage && isLeftCollapsed && activeViewTab !== 'spec' ? (
                 <Button
                   type="button"
                   variant="outline"
@@ -2071,24 +2045,7 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                   </span>
                 </div>
               ) : null}
-              {stage === 'graph' ? (
-                <Link
-                  href={withContext('/spec', workspaceParams)}
-                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary/90 transition-colors shadow-xs whitespace-nowrap"
-                >
-                  <span>Next: Step 2 · Spec</span>
-                  <ArrowRight size={13} aria-hidden="true" />
-                </Link>
-              ) : stage === 'compatibility' ? (
-                <Link
-                  href={withContext('/proposals', workspaceParams)}
-                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary/90 transition-colors shadow-xs whitespace-nowrap"
-                >
-                  <span>Next: Step 4 · Proposals</span>
-                  <ArrowRight size={13} aria-hidden="true" />
-                </Link>
-              ) : null}
-              {isRightCollapsed &&
+              {!stage && isRightCollapsed &&
               activeViewTab !== 'spec' &&
               activeViewTab !== 'compat' ? (
                 <Button
@@ -2490,12 +2447,10 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
             </div>
           )}
         </section>
+  );
 
-        <aside
-          id="formula-inspector"
-          className={`inspector-panel ${isRightCollapsed ? 'is-collapsed' : ''}`}
-          aria-label="Formula inspector"
-        >
+  const formulaInspectorInner = (
+    <>
           {inspector ? (
             <>
               <div className="panel-heading inspector-heading">
@@ -2979,6 +2934,455 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
               </div>
             </section>
           ) : null}
+    </>
+  );
+
+  if (stage) {
+    const stageBreadcrumb =
+      stage === 'spec'
+        ? '02 Spec · Freeze rules'
+        : stage === 'compatibility'
+          ? '03 Compatibility · Match symbols'
+          : '01 Graph · Extract formulas';
+
+    const nextStageLink =
+      stage === 'graph' ? (
+        <Link
+          href={withContext('/spec', workspaceParams)}
+          className="wb-primary-cta"
+        >
+          <span>Next: Step 2 · Spec</span>
+          <ArrowRight size={13} aria-hidden="true" />
+        </Link>
+      ) : stage === 'spec' ? (
+        <Link
+          href={withContext('/compatibility', workspaceParams)}
+          className="wb-primary-cta"
+        >
+          <span>Next: Step 3 · Compatibility</span>
+          <ArrowRight size={13} aria-hidden="true" />
+        </Link>
+      ) : (
+        <Link
+          href={withContext('/proposals', workspaceParams)}
+          className="wb-primary-cta"
+        >
+          <span>Next: Step 4 · Proposals</span>
+          <ArrowRight size={13} aria-hidden="true" />
+        </Link>
+      );
+
+    return (
+      <main
+        className={`app-shell app-shell-${stage} wb-shell${
+          isLeftCollapsed ? ' is-left-collapsed' : ''
+        }${isRightCollapsed ? ' is-right-collapsed' : ''}${
+          isZenMode ? ' is-zen-mode' : ''
+        }`}
+        suppressHydrationWarning
+      >
+        <output className="sr-only" aria-live="polite">
+          {researchLoadNotice}
+        </output>
+
+        {searchDialogNode}
+
+        <WorkbenchLeftSpine
+          user={user}
+          collapsed={isLeftCollapsed}
+          onCollapse={() => setIsLeftCollapsed(true)}
+          activePaperLabel={
+            hasPersistedGraph
+              ? `${paperId} · v${paperVersion}`
+              : stage === 'spec'
+                ? undefined
+                : '1706.03762 · demo'
+          }
+          completedSteps={{
+            '/graph': hasPersistedGraph,
+            '/compatibility': compatMappings.some((m) => m.status === 'compatible'),
+          }}
+          onOpenSearch={() => setIsSearchOpen((open) => !open)}
+          isSearchOpen={isSearchOpen}
+          showWalkthroughToggle={stage === 'spec' || stage === 'compatibility'}
+        >
+          {stage !== 'spec' ? (
+            <section aria-label="Paper sources" className="wb-sources-drawer">
+              {paperSourcesBody}
+            </section>
+          ) : null}
+        </WorkbenchLeftSpine>
+
+        <div className="wb-center-column">
+          <header className="wb-subbar">
+            <div className="wb-subbar-left">
+              {isLeftCollapsed ? (
+                <button
+                  type="button"
+                  className="wb-icon-btn"
+                  onClick={() => setIsLeftCollapsed(false)}
+                  title="Expand sidebar ([)"
+                  aria-label="Expand paper sources"
+                >
+                  <PanelLeftOpen size={14} aria-hidden="true" />
+                </button>
+              ) : null}
+              <span className="wb-breadcrumb-root">Workspace</span>
+              <ChevronRight size={13} className="text-muted-foreground shrink-0" aria-hidden="true" />
+              <span className="wb-breadcrumb-current">{stageBreadcrumb}</span>
+            </div>
+            <div className="wb-subbar-right">
+              {nextStageLink}
+              <button
+                type="button"
+                className="wb-inspector-toggle"
+                onClick={() => setIsRightCollapsed((v) => !v)}
+                title={isRightCollapsed ? 'Expand inspector (])' : 'Collapse inspector (])'}
+                aria-label={isRightCollapsed ? 'Expand inspector' : 'Collapse inspector'}
+              >
+                {isRightCollapsed ? (
+                  <PanelRightOpen size={14} aria-hidden="true" />
+                ) : (
+                  <PanelRightClose size={14} aria-hidden="true" />
+                )}
+                <span>Inspector</span>
+                <kbd aria-hidden="true">]</kbd>
+              </button>
+            </div>
+          </header>
+
+          <div className={`wb-main-scroll${stage === 'graph' ? ' is-graph-canvas' : ''}`}>
+            {importStripNode}
+            {researchNotice ? (
+              <output
+                aria-live="polite"
+                className="mx-4 mt-2 block rounded-lg border border-border/60 bg-card px-3 py-2 text-xs text-foreground"
+              >
+                {researchNotice}
+              </output>
+            ) : null}
+
+            {walkthroughEnabled && stage === 'spec' ? (
+              <section
+                aria-label="Illustrative spec walkthrough"
+                className="wb-walkthrough-card mx-4 mt-3"
+              >
+                <div className="wb-walkthrough-header">
+                  <div className="flex items-center gap-2">
+                    <span className="wb-status-dot is-ready" aria-hidden="true" />
+                    <strong className="text-xs font-semibold text-foreground">
+                      Illustrative sample walkthrough · Step 02 frozen spec example
+                    </strong>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="wb-inline-note">Read-only preview · not stored evidence</span>
+                    <button
+                      type="button"
+                      onClick={() => setWalkthrough(false)}
+                      className="wb-text-link"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+                <div className="grid gap-3 md:grid-cols-3 text-xs mt-2.5">
+                  <div className="wb-mini-tile">
+                    <span className="wb-mini-label">Question & objective</span>
+                    <p className="mt-1 text-[11px] text-foreground m-0">
+                      Minimize <code>perplexity</code> on WikiText-103 while keeping{' '}
+                      <code>latency_ms ≤ 12.5</code>.
+                    </p>
+                  </div>
+                  <div className="wb-mini-tile">
+                    <span className="wb-mini-label">Allowed transforms</span>
+                    <p className="mt-1 font-mono text-[11px] text-foreground m-0">
+                      kernel_swap · mixture · rank_projection
+                    </p>
+                  </div>
+                  <div className="wb-mini-tile">
+                    <span className="wb-mini-label">Sealed evaluation</span>
+                    <p className="mt-1 text-[11px] text-muted-foreground m-0">
+                      Holdout locked from search · deterministic seed <code>42</code>
+                    </p>
+                  </div>
+                </div>
+              </section>
+            ) : null}
+
+            {walkthroughEnabled && stage === 'compatibility' ? (
+              <section
+                aria-label="Illustrative compatibility walkthrough"
+                className="wb-walkthrough-card mx-4 mt-3"
+              >
+                <div className="wb-walkthrough-header">
+                  <div className="flex items-center gap-2">
+                    <span className="wb-status-dot is-evidence" aria-hidden="true" />
+                    <strong className="text-xs font-semibold text-foreground">
+                      Illustrative sample walkthrough · Step 03 6-gate symbol alignment
+                    </strong>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="wb-inline-note">Read-only preview · not stored evidence</span>
+                    <button
+                      type="button"
+                      onClick={() => setWalkthrough(false)}
+                      className="wb-text-link"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+                <div className="grid gap-3 md:grid-cols-3 text-xs mt-2.5">
+                  <div className="wb-mini-tile">
+                    <span className="wb-mini-label">Aligned ports</span>
+                    <p className="mt-1 font-mono text-[11px] text-foreground m-0">
+                      S3.E1 φ_exp(q) ↔ S3.E4 φ_elu(k) · [B,H,N,r]
+                    </p>
+                  </div>
+                  <div className="wb-mini-tile">
+                    <span className="wb-mini-label">5/6 gates passed</span>
+                    <p className="mt-1 text-[11px] text-foreground m-0">
+                      Symbol, shape, unit, role, and causal regime match cleanly.
+                    </p>
+                  </div>
+                  <div className="wb-mini-tile">
+                    <span className="wb-mini-label">Conditional domain</span>
+                    <p className="mt-1 text-[11px] text-muted-foreground m-0">
+                      Requires <code>qᵀφ(k) &gt; 0</code> denominator obligation at Step 04.
+                    </p>
+                  </div>
+                </div>
+              </section>
+            ) : null}
+
+            {graphPanelNode}
+          </div>
+        </div>
+
+        <aside
+          id="formula-inspector"
+          className={`wb-inspector inspector-panel${isRightCollapsed ? ' is-collapsed' : ''}`}
+          aria-label="Formula inspector"
+        >
+          {stage === 'spec' ? (
+            <>
+              <div className="wb-inspector-header">
+                <span className="wb-inspector-title">Spec readiness & guarantees</span>
+                <button
+                  type="button"
+                  className="wb-icon-btn"
+                  onClick={() => setIsRightCollapsed(true)}
+                  title="Collapse inspector (])"
+                  aria-label="Collapse inspector"
+                >
+                  <PanelRightClose size={14} aria-hidden="true" />
+                </button>
+              </div>
+              <div className="wb-inspector-body space-y-4">
+                <section className="wb-inspector-section">
+                  <p className="wb-inspector-heading">Stage summary</p>
+                  <p className="text-xs text-muted-foreground leading-relaxed m-0">
+                    Define and freeze your research question, metric direction, and compute
+                    guardrails before compiling any candidate transformation in Step 04.
+                  </p>
+                  <button
+                    type="button"
+                    aria-pressed={walkthroughEnabled}
+                    onClick={() => setWalkthrough(!walkthroughEnabled)}
+                    className={`wb-walkthrough-btn mt-2.5${walkthroughEnabled ? ' is-active' : ''}`}
+                  >
+                    <WandSparkles size={13} aria-hidden="true" />
+                    <span>
+                      {walkthroughEnabled ? 'Hide sample walkthrough' : 'Preview sample spec'}
+                    </span>
+                  </button>
+                </section>
+                <section className="wb-inspector-section">
+                  <p className="wb-inspector-heading">G1 spec invariants</p>
+                  <ul className="wb-guarantee-list">
+                    <li>
+                      <span className="wb-status-dot is-evidence" aria-hidden="true" />
+                      <span>Frozen specs lock a canonical SHA-256 digest; edits mint a new version</span>
+                    </li>
+                    <li>
+                      <span className="wb-status-dot is-ready" aria-hidden="true" />
+                      <span>Holdout dataset split stays sealed from parent selection and search</span>
+                    </li>
+                    <li>
+                      <span className="wb-status-dot is-derivation" aria-hidden="true" />
+                      <span>Step 04 compiler rejects unfrozen or drifted spec identifiers</span>
+                    </li>
+                    <li>
+                      <span className="wb-status-dot is-citation" aria-hidden="true" />
+                      <span>Ownership is isolated per authenticated SaaS workspace tenant</span>
+                    </li>
+                  </ul>
+                </section>
+                <section className="wb-inspector-section">
+                  <p className="wb-inspector-heading">Shortcuts</p>
+                  <div className="wb-shortcut-grid">
+                    <span>Switch stages</span>
+                    <kbd>Alt + 1..5</kbd>
+                    <span>Toggle sidebar</span>
+                    <kbd>[</kbd>
+                    <span>Toggle inspector</span>
+                    <kbd>]</kbd>
+                  </div>
+                </section>
+              </div>
+            </>
+          ) : (
+            <>
+              {stage === 'compatibility' ? (
+                <section className="wb-inspector-section px-4 pt-3 pb-3 border-b border-border/60">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="wb-inspector-heading m-0">6-gate compatibility policy</p>
+                    <button
+                      type="button"
+                      aria-pressed={walkthroughEnabled}
+                      onClick={() => setWalkthrough(!walkthroughEnabled)}
+                      className="wb-text-link"
+                    >
+                      {walkthroughEnabled ? 'Hide sample' : 'Sample preview'}
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground leading-relaxed mt-1 mb-0">
+                    Mappings require symbol, shape, unit, domain, role, and regime alignment plus a
+                    written human review rationale before Step 04 compilation.
+                  </p>
+                </section>
+              ) : null}
+              <div className="wb-inspector-body">{formulaInspectorInner}</div>
+            </>
+          )}
+        </aside>
+      </main>
+    );
+  }
+
+  return (
+    <main
+      className={`app-shell${isZenMode ? ' is-zen-mode' : ''}`}
+      suppressHydrationWarning
+    >
+      <header className="topbar">
+        <div className="brand-lockup">
+          <div className="brand-mark" aria-hidden="true">
+            <Network size={18} strokeWidth={2.2} />
+          </div>
+          <div>
+            <div className="flex items-center gap-1.5">
+              <p className="brand-name">FormulaGraph</p>
+              <span className="pro-tier-badge">LAB</span>
+            </div>
+            <p className="brand-suffix">Exact Evidence &amp; Research</p>
+          </div>
+        </div>
+        <StageNav orientation="horizontal" />
+        <div className="topbar-actions">
+          <output className="sr-only" aria-live="polite">
+            {researchLoadNotice}
+          </output>
+          <button
+            className={`search-trigger ${isSearchOpen ? 'search-trigger-active' : ''}`}
+            type="button"
+            aria-label={isSearchOpen ? 'Close graph search' : 'Search graph'}
+            title="Search graph (Ctrl+K or /)"
+            aria-expanded={isSearchOpen}
+            aria-controls="graph-search-panel"
+            onClick={() => setIsSearchOpen((open) => !open)}
+          >
+            <Search size={15} />
+            <span>Search</span>
+          </button>
+          <Link
+            className="workspace-help-link"
+            href={opsHref}
+            aria-label="Open Operations dashboard"
+          >
+            <Activity size={14} aria-hidden="true" />
+            <span>Ops</span>
+          </Link>
+          <Link
+            className="workspace-help-link"
+            href={helpHref}
+            aria-label="Open FormulaGraph help"
+          >
+            <BookOpenText size={14} aria-hidden="true" />
+            <span>Help</span>
+          </Link>
+          <div className="workspace-pill" title={user.email ?? user.displayName}>
+            <span className="workspace-dot" />
+            <span>{user.displayName}</span>
+          </div>
+        </div>
+      </header>
+
+      {searchDialogNode}
+      {importStripNode}
+      {researchNotice ? (
+        <output
+          aria-live="polite"
+          className="mx-4 my-2 block rounded-lg border border-border/60 bg-card px-3 py-2 text-xs text-foreground"
+        >
+          {researchNotice}
+        </output>
+      ) : null}
+
+      <div
+        className={`research-grid ${
+          activeViewTab === 'spec'
+            ? 'is-spec-view'
+            : activeViewTab === 'compat'
+              ? 'is-compat-view'
+              : ''
+        } ${
+          isLeftCollapsed || activeViewTab === 'spec' ? 'is-left-collapsed' : ''
+        } ${
+          isRightCollapsed ||
+          activeViewTab === 'spec' ||
+          activeViewTab === 'compat'
+            ? 'is-right-collapsed'
+            : ''
+        }`}
+      >
+        <aside
+          className={`source-panel ${
+            isLeftCollapsed || activeViewTab === 'spec' ? 'is-collapsed' : ''
+          }`}
+          aria-label="Paper sources"
+        >
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Sources</p>
+              <h2>Paper corpus</h2>
+            </div>
+            <div className="panel-heading-actions">
+              <span className="count-badge">{multiPaperCoverage.length || 1}</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="panel-collapse-btn"
+                onClick={() => setIsLeftCollapsed(true)}
+                title="Collapse paper sources"
+                aria-label="Collapse paper sources"
+              >
+                <PanelLeftClose size={15} />
+              </Button>
+            </div>
+          </div>
+          {paperSourcesBody}
+        </aside>
+
+        {graphPanelNode}
+
+        <aside
+          id="formula-inspector"
+          className={`inspector-panel ${isRightCollapsed ? 'is-collapsed' : ''}`}
+          aria-label="Formula inspector"
+        >
+          {formulaInspectorInner}
         </aside>
       </div>
     </main>
