@@ -362,6 +362,26 @@ class ContractReviewCreateRequest(BaseModel):
         return self
 
 
+class BatchContractReviewItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    symbol: str = Field(min_length=1, max_length=200)
+    reviewed_contract: ReviewedFormulaContract
+
+
+class BatchContractReviewCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    workspace_id: str = Field(min_length=1, max_length=200)
+    equation_uuid: UUID
+    rationale: str = Field(min_length=3, max_length=500)
+    items: list[BatchContractReviewItem] = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_items(self):
+        if len({item.symbol for item in self.items}) != len(self.items):
+            raise ValueError("Duplicate symbol.")
+        return self
+
+
 class ContractReviewResponse(BaseModel):
     review_id: str
     workspace_id: str

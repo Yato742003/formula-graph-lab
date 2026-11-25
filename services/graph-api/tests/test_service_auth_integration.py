@@ -138,7 +138,7 @@ async def test_signed_http_import_search_spec_and_replica_replay(monkeypatch):
                 await client.post("/v1/imports", content=body, headers=signed)
             ).status_code == 200
             tex_path = "/v1/evidence/import-tex"
-            tex_body = json.dumps({"tex_source": "$$x=1$$", "workspace_id": workspaces[0]}).encode()
+            tex_body = json.dumps({"tex_source": "$$x=y$$", "workspace_id": workspaces[0]}).encode()
             for replay in (False, True):
                 imported = await client.post(
                     tex_path, content=tex_body,
@@ -148,6 +148,40 @@ async def test_signed_http_import_search_spec_and_replica_replay(monkeypatch):
                 assert imported.status_code == 200, imported.text
                 assert imported.json()["receipt"]["replayed"] is replay
                 assert imported.json()["paper"]["source_kind"] == "local_tex"
+            snapshot_path = "/v1/graphs/snapshot"
+            snap = json.dumps({"paper_id": imported.json()["paper"]["paper_id"], "version": 1,
+                               "workspace_id": workspaces[0]}).encode()
+            graph = await client.post(snapshot_path, content=snap, headers=sign_request(
+                "POST", snapshot_path, snap, actor=actors[0], role="graph_read"))
+            eq = next(n["uuid"] for n in graph.json()["nodes"] if n["kind"] == "Equation")
+            contracts = f"/v1/research/equations/{eq}/contracts"
+            assert (await client.get(contracts)).status_code == 401
+            async def read_reviews():
+                response = await client.get(contracts, headers=sign_request(
+                    "GET", contracts, actor=actors[0]))
+                assert response.status_code == 200, response.text
+                return response.json()["items"]
+            before = await read_reviews()
+            assert {row["symbol"] for row in before} == {"x", "y"}
+            assert all(row["latest_review"] is None for row in before)
+            items = [{"symbol": s, "reviewed_contract": {"name": s, "category": "scalar",
+                                                        "domain": "real"}} for s in ("x", "y")]
+            batch_path = "/v1/research/contract-reviews/batch"
+            async def submit_reviews(values):
+                batch = json.dumps({"equation_uuid": eq, "workspace_id": workspaces[0],
+                                    "rationale": "Review of source", "items": values}).encode()
+                headers = sign_request("POST", batch_path, batch, actor=actors[0],
+                                       idempotency_key="test-batch-key-001")
+                headers["Idempotency-Key"] = headers.pop("x-idempotency-key")
+                return await client.post(batch_path, content=batch, headers=headers)
+            assert (await submit_reviews([items[0], items[0]])).status_code == 422
+            for replay in (False, True):
+                saved = await submit_reviews(items)
+                assert saved.status_code == 200, saved.text
+                assert all(row["replayed"] is replay for row in saved.json()["items"])
+                assert len({r["review_id"] for r in saved.json()["items"]}) == 2
+            assert all(row["latest_review"]["decision"] == "accepted" 
+                       for row in await read_reviews())
             # Another API instance uses another driver, but the replay ledger is shared.
             monkeypatch.setattr(app.state, "evidence_store", second)
             assert (

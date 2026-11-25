@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import BatchContractReviewPanel from '@/components/batch-contract-review-panel';
 import ProblemSpecPanel from './problem-spec-panel';
 import ResearchCreatePanel from './research-create-panel';
 import ResearchMovePanel from './research-move-panel';
@@ -2650,6 +2651,8 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                 </section>
               ) : null}
 
+              {selectedEvidence?.kind === 'Equation' && <BatchContractReviewPanel
+                key={selectedEvidence.uuid} equation={selectedEvidence.uuid} />}
               <section className="inspector-section">
                 <div className="section-title">
                   <h3>Relation</h3>

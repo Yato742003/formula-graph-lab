@@ -7533,3 +7533,8 @@ html {
 .tex-import-fields textarea { resize: vertical; min-height: 4rem; }
 .import-label button { padding: .4rem; }
 .import-label button[aria-pressed="true"] { text-decoration: underline; }
+
+.inspector-contracts fieldset { min-width: 0; display: grid; gap: .4rem; padding: .5rem; }
+.inspector-contracts label { display: flex; align-items: center; gap: .5rem; }
+.inspector-contracts input, .inspector-contracts select { min-width: 0; max-width: 100%; }
+.inspector-contracts button { padding: .35rem .5rem; text-align: left; }

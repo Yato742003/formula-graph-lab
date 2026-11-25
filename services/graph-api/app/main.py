@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from functools import partial
 from typing import Annotated, Literal
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -54,6 +55,7 @@ from app.lineage import (
     PaperCoverageRecord,
 )
 from app.models import (
+    BatchContractReviewCreateRequest,
     ContractReviewCreateRequest,
     ContractReviewResponse,
     EvidenceGraphSnapshotRequest,
@@ -447,19 +449,7 @@ async def graph_snapshot(
 # ── Formula endpoints (FGL-402/403) ──────────────────────────────
 
 
-@app.post("/v1/contract-reviews", response_model=ContractReviewResponse)
-async def append_contract_review(
-    body: ContractReviewCreateRequest,
-    idempotency_key: str = Header(  # noqa: B008
-        min_length=16,
-        max_length=200,
-        alias="Idempotency-Key",
-    ),
-    actor: ServiceActor = Depends(require_human_service_actor),  # noqa: B008
-    store: Neo4jEvidenceStore = Depends(require_evidence_store),  # noqa: B008
-) -> ContractReviewResponse:
-    if not idempotency_key.isascii() or not idempotency_key.strip():
-        raise HTTPException(status_code=422, detail="Invalid idempotency key.")
+def make_contract_review(body: ContractReviewCreateRequest, actor: ServiceActor) -> ContractReview:
     reviewed_value = None
     if body.reviewed_contract is not None:
         reviewed_value = ReviewedContractValue(
@@ -479,7 +469,7 @@ async def append_contract_review(
             causal=body.reviewed_contract.causal,
             resource_class=body.reviewed_contract.resource_class,
         )
-    review = ContractReview(
+    return ContractReview(
         review_id="pending-server-identity",
         symbol_name=body.symbol_name,
         reviewer_id=actor.actor_id,
@@ -490,6 +480,22 @@ async def append_contract_review(
         evidence=body.evidence,
         reviewed_at=datetime.now(UTC),
     )
+
+
+@app.post("/v1/contract-reviews", response_model=ContractReviewResponse)
+async def append_contract_review(
+    body: ContractReviewCreateRequest,
+    idempotency_key: str = Header(  # noqa: B008
+        min_length=16,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+    actor: ServiceActor = Depends(require_human_service_actor),  # noqa: B008
+    store: Neo4jEvidenceStore = Depends(require_evidence_store),  # noqa: B008
+) -> ContractReviewResponse:
+    if not idempotency_key.isascii() or not idempotency_key.strip():
+        raise HTTPException(status_code=422, detail="Invalid idempotency key.")
+    review = make_contract_review(body, actor)
     try:
         receipt = await store.append_contract_review(
             workspace_id=body.workspace_id,
@@ -522,6 +528,62 @@ async def append_contract_review(
         reviewed_at=persisted.reviewed_at,
         replayed=receipt.replayed,
     )
+
+
+@app.get("/v1/research/equations/{equation_uuid}/contracts")
+async def read_equation_contracts(
+    equation_uuid: UUID,
+    context=Depends(require_research_service_actor),  # noqa: B008
+    store: Neo4jEvidenceStore = Depends(require_evidence_store),  # noqa: B008
+):
+    _, workspace_id = context
+    target = str(equation_uuid)
+    try:
+        source = await store.equation_source(workspace_id=workspace_id, equation_uuid=target)
+        parsed = parse_formula(source["latex"])
+        drafts = infer_contracts(parsed, section_id=source.get("section_id"),
+                                 extraction_confidence=source.get("confidence", 1))
+        reviews = await store.equation_contract_reviews(
+            workspace_id=workspace_id, equation_uuid=target)
+    except FormulaParseError as exc:
+        raise HTTPException(422, detail="Source equation could not be parsed.") from exc
+    except ValueError as exc:
+        raise HTTPException(404, detail="Equation not found.") from exc
+    except (Neo4jError, OSError) as exc:
+        raise HTTPException(503, detail="Contract storage unavailable.") from exc
+    latest = {review.symbol_name: review.model_dump(mode="json") for review in reviews}
+    return {"items": [{"symbol": item.name,
+                       "inferred": {**item.model_dump(), "status": "inferred_draft"},
+                       "latest_review": latest.get(item.name)} for item in drafts]}
+
+
+@app.post("/v1/research/contract-reviews/batch")
+async def batch_contract_reviews(
+    body: BatchContractReviewCreateRequest,
+    idempotency_key: str = Header(min_length=16, max_length=200, alias="Idempotency-Key"),
+    actor: ServiceActor = Depends(require_human_service_actor),  # noqa: B008
+    store: Neo4jEvidenceStore = Depends(require_evidence_store),  # noqa: B008
+):
+    if not idempotency_key.isascii() or not idempotency_key.strip():
+        raise HTTPException(422, detail="Invalid idempotency key.")
+    target = str(body.equation_uuid)
+    try:
+        reviews = []
+        for item in body.items:
+            individual = ContractReviewCreateRequest(
+                workspace_id=body.workspace_id, equation_uuid=target, symbol_name=item.symbol,
+                decision="accepted", reviewed_contract=item.reviewed_contract,
+                evidence=[body.rationale],
+            )
+            reviews.append((f"{idempotency_key}:{item.symbol}", make_contract_review(
+                individual, actor)))
+        receipts = await store.append_contract_reviews(body.workspace_id, target, reviews)
+    except ValueError as exc:
+        raise HTTPException(422, detail="Invalid or conflicting contract review.") from exc
+    except (Neo4jError, OSError) as exc:
+        raise HTTPException(503, detail="Contract storage unavailable.") from exc
+    return {"items": [{**r.review.model_dump(mode="json"), "replayed": r.replayed}
+                      for r in receipts]}
 
 
 @app.post("/v1/formulas/parse", response_model=FormulaParseResponse)

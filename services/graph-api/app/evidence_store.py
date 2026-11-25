@@ -232,9 +232,26 @@ class Neo4jEvidenceStore:
         review: ContractReview,
     ) -> ContractReviewReceipt:
         """Append an immutable, idempotent review to a source equation."""
+        receipts = await self.append_contract_reviews(
+            workspace_id, equation_uuid, [(idempotency_key, review)])
+        return receipts[0]
+
+    async def append_contract_reviews(self, workspace_id, equation_uuid, reviews):
+        group_id = workspace_group_id(workspace_id)
+
+        async def append_batch(tx):
+            receipts = []
+            for key, review in reviews:
+                receipts.append(await self._append_review_receipt(
+                    tx, group_id, equation_uuid, key, review))
+            return receipts
+
+        async with self.driver.session(database=self.database) as session:
+            return await session.execute_write(append_batch)
+
+    async def _append_review_receipt(self, tx, group_id, equation_uuid, idempotency_key, review):
         if review.scope != equation_uuid:
             raise ValueError("Contract review scope does not match the source equation.")
-        group_id = workspace_group_id(workspace_id)
         review_uuid = str(uuid5(
             NAMESPACE_URL,
             f"{group_id}/contract-review/{review.reviewer_id}/{idempotency_key}",
@@ -246,19 +263,11 @@ class Neo4jEvidenceStore:
             sort_keys=True,
             separators=(",", ":"),
         )
-        async with self.driver.session(database=self.database) as session:
-            replayed, effective_payload = await session.execute_write(
-                self._append_contract_review,
-                group_id,
-                equation_uuid,
-                persisted.symbol_name,
-                persisted.reviewer_id,
-                persisted.reviewer_role,
-                persisted.decision,
-                review_uuid,
-                payload,
-                persisted.reviewed_at,
-            )
+        replayed, effective_payload = await self._append_contract_review(
+            tx, group_id, equation_uuid, persisted.symbol_name, persisted.reviewer_id,
+            persisted.reviewer_role, persisted.decision, review_uuid, payload,
+            persisted.reviewed_at,
+        )
         effective_review = ContractReview.model_validate_json(
             effective_payload,
         )
