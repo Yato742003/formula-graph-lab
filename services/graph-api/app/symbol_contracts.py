@@ -403,17 +403,22 @@ def infer_contracts(
 
     Symbols classified as ``function`` or ``distribution`` are assigned
     ``shape=None`` (not applicable).  Scalars get shape ``()``, vectors get a
-    single unknown dimension, matrices two, and tensors three.
+    single unknown dimension, matrices two, and tensors three. Explicit
+    ``x \\in \\mathbb{R}^{...}`` clauses refine inferred domain and shape hints
+    without impersonating a human ``ContractReview``.
     """
+    domain_hints = _extract_domain_clause_hints(formula.root)
     contracts: list[SymbolContract] = []
     for sym in formula.symbols:
-        shape = _infer_shape(sym)
-        domain = _infer_domain(sym)
+        hint = domain_hints.get(sym.name)
+        category: InferredCategory = hint[0] if hint is not None else sym.category
+        shape = hint[1] if hint is not None else _infer_shape(sym)
+        domain = hint[2] if hint is not None else _infer_domain(sym)
         confidence = _compute_confidence(sym, extraction_confidence)
         contracts.append(
             SymbolContract(
                 name=sym.name,
-                category=sym.category,
+                category=category,
                 shape=shape,
                 domain=domain,
                 constraints=[],
@@ -423,6 +428,97 @@ def infer_contracts(
             )
         )
     return contracts
+
+
+_DOMAIN_SPACE_MAP: dict[str, SymbolDomain] = {
+    "R": "real",
+    "Z": "integer",
+    "C": "complex",
+    "N": "positive",
+}
+
+
+def _render_dim_expr(node: AstNode) -> int | str:
+    if node.kind == "number" and node.value and node.value.isdigit():
+        return int(node.value)
+    if node.kind == "symbol" and node.value:
+        return node.value
+    if node.kind == "style" and len(node.children) == 1:
+        return _render_dim_expr(node.children[0])
+    if node.kind == "subscript" and len(node.children) == 2:
+        return f"{_render_dim_expr(node.children[0])}_{_render_dim_expr(node.children[1])}"
+    if node.kind == "power" and len(node.children) == 2:
+        return f"{_render_dim_expr(node.children[0])}^{_render_dim_expr(node.children[1])}"
+    if node.kind == "add" and node.children:
+        return "+".join(str(_render_dim_expr(c)) for c in node.children)
+    if node.kind == "multiply" and node.children:
+        return "*".join(str(_render_dim_expr(c)) for c in node.children)
+    return "?"
+
+
+def _domain_space_hint(
+    rhs: AstNode,
+) -> tuple[InferredCategory, tuple[int | str, ...], SymbolDomain] | None:
+    if (
+        rhs.kind == "symbol"
+        and rhs.attribute("style") == "blackboard"
+        and rhs.value in _DOMAIN_SPACE_MAP
+    ):
+        return ("scalar", (), _DOMAIN_SPACE_MAP[rhs.value])
+    if rhs.kind == "power" and len(rhs.children) == 2:
+        base_hint = _domain_space_hint(rhs.children[0])
+        if base_hint is None:
+            return None
+        exp = rhs.children[1]
+        dims = (
+            tuple(_render_dim_expr(c) for c in exp.children)
+            if exp.kind == "multiply" and exp.value == "times" and exp.children
+            else (_render_dim_expr(exp),)
+        )
+        category: InferredCategory = (
+            "vector" if len(dims) == 1 else "matrix" if len(dims) == 2 else "tensor"
+        )
+        return (category, dims, base_hint[2])
+    if rhs.kind == "subscript" and len(rhs.children) == 2:
+        base_hint = _domain_space_hint(rhs.children[0])
+        if base_hint is not None:
+            return (base_hint[0], base_hint[1], "positive")
+    return None
+
+
+def _domain_target_name(lhs: AstNode) -> str | None:
+    if lhs.kind == "equals" and lhs.children:
+        return _domain_target_name(lhs.children[0])
+    if lhs.kind == "symbol":
+        return lhs.value
+    if lhs.kind == "style" and len(lhs.children) == 1:
+        return _domain_target_name(lhs.children[0])
+    if lhs.kind == "subscript" and lhs.children:
+        return _domain_target_name(lhs.children[0])
+    if lhs.kind == "accent" and lhs.value and len(lhs.children) == 1:
+        inner = _domain_target_name(lhs.children[0])
+        return f"{lhs.value}({inner})" if inner else None
+    return None
+
+
+def _extract_domain_clause_hints(
+    root: AstNode,
+) -> dict[str, tuple[InferredCategory, tuple[int | str, ...], SymbolDomain]]:
+    hints: dict[str, tuple[InferredCategory, tuple[int | str, ...], SymbolDomain]] = {}
+
+    def walk(node: AstNode) -> None:
+        if node.kind == "relation" and node.value == "in" and len(node.children) == 2:
+            target = _domain_target_name(node.children[0])
+            parsed = _domain_space_hint(node.children[1])
+            if target and parsed is not None and target not in hints:
+                hints[target] = parsed
+            return
+        if node.kind == "sequence":
+            for child in node.children:
+                walk(child)
+
+    walk(root)
+    return hints
 
 
 def _infer_shape(sym: ParsedSymbol) -> tuple[int | str, ...] | None:

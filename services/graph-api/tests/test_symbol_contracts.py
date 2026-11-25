@@ -745,3 +745,22 @@ class TestContractSerialization:
         assert restored.shape == c.shape
         assert restored.constraints == c.constraints
         assert restored.inference_confidence == c.inference_confidence
+
+    def test_domain_membership_clauses_refine_inferred_shape_and_domain(self):
+        flash = parse_formula(
+            r"\mathbf{S}=\mathbf{Q}\mathbf{K}^{\top}\in\mathbb{R}^{N\times N},"
+            r"\quad\mathbf{O}=\mathbf{P}\mathbf{V}\in\mathbb{R}^{N\times d}"
+        )
+        by_name = {c.name: c for c in infer_contracts(flash)}
+        assert by_name["S"].category == "matrix"
+        assert by_name["S"].shape == ("N", "N")
+        assert by_name["S"].domain == "real"
+        assert by_name["O"].shape == ("N", "d")
+        assert "R" not in by_name
+        assert "in" not in by_name
+
+        vit = parse_formula(r"\mathbf{E}\in\mathbb{R}^{(P^{2}\cdot C)\times D}")
+        vit_contracts = {c.name: c for c in infer_contracts(vit)}
+        assert vit_contracts["E"].category == "matrix"
+        assert vit_contracts["E"].shape == ("P^2*C", "D")
+        assert vit_contracts["E"].domain == "real"

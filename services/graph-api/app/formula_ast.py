@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json as _json_mod
+import re
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -20,6 +21,8 @@ NodeKind = Literal[
     "distribution",
     "subscript",
     "equals",
+    "relation",
+    "accent",
     "sum",
     "product",
     "integral",
@@ -109,12 +112,39 @@ class _Token:
     position: int
 
 
-_SPACING_COMMANDS = {",", ";", ":", "!", "quad", "qquad", "displaystyle", " "}
-_OPERATOR_COMMANDS = {"cdot": "*", "times": "*", "div": "/"}
+_SPACING_COMMANDS = {
+    ",",
+    ";",
+    ":",
+    "!",
+    "quad",
+    "qquad",
+    "displaystyle",
+    " ",
+    "left",
+    "right",
+    "big",
+    "Big",
+    "bigg",
+    "Bigg",
+    "bigl",
+    "bigr",
+    "Bigl",
+    "Bigr",
+    "biggl",
+    "biggr",
+    "Biggl",
+    "Biggr",
+}
+_OPERATOR_COMMANDS = {"cdot": "*", "times": "times", "div": "/"}
+_RELATION_COMMANDS = {"coloneqq": "coloneqq", "in": "in", "sim": "sim"}
 _FUNCTION_COMMANDS = {
     "sin",
     "cos",
     "tan",
+    "sinh",
+    "cosh",
+    "tanh",
     "exp",
     "log",
     "ln",
@@ -132,12 +162,17 @@ _STRUCTURAL_COMMANDS = {
     "int",
     "operatorname",
     "mathrm",
+    "text",
     "mathbf",
     "boldsymbol",
     "vec",
     "mathcal",
+    "mathbb",
     "widehat",
 }
+_UNSUPPORTED_ACCENTS = {"widetilde", "overline", "underline", "check", "breve"}
+_TEXT_IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}\Z")
+_DOMAIN_SPACE_NAMES = frozenset({"R", "Z", "C", "N"})
 _CONSTANTS = {"pi", "infty", "infinity"}
 
 
@@ -196,14 +231,31 @@ def _tokenize_latex(source: str) -> list[_Token]:
             else:
                 command = text[index]
                 index += 1
-            if command in _SPACING_COMMANDS or command in {"left", "right"}:
+            if command in _SPACING_COMMANDS:
+                continue
+            if command == "|":
+                tokens.append(_Token("delimiter", "\\|", start))
                 continue
             if command in _OPERATOR_COMMANDS:
                 tokens.append(_Token("operator", _OPERATOR_COMMANDS[command], start))
+            elif command in _RELATION_COMMANDS:
+                tokens.append(_Token("operator", _RELATION_COMMANDS[command], start))
             elif command in _FUNCTION_COMMANDS:
                 tokens.append(_Token("function", command, start))
             elif command in _STRUCTURAL_COMMANDS:
                 tokens.append(_Token("command", command, start))
+            elif command in _UNSUPPORTED_ACCENTS:
+                raise FormulaParseError(
+                    "UNSUPPORTED_ACCENT",
+                    f"Accented command \\{command} is outside the parser subset.",
+                    start,
+                )
+            elif command == "verb":
+                raise FormulaParseError(
+                    "UNSUPPORTED_COMMAND",
+                    "Verbatim text commands are outside the supported formula subset.",
+                    start,
+                )
             elif command in {"begin", "end"}:
                 raise FormulaParseError(
                     "UNSUPPORTED_ENVIRONMENT",
@@ -244,8 +296,8 @@ def _tokenize_latex(source: str) -> list[_Token]:
                 tokens.append(_Token("identifier", identifier, index))
             index = end
             continue
-        if character in "{}()[]_^+-*/=,":
-            kind = "operator" if character in "^_+-*/=," else "delimiter"
+        if character in "{}()[]_^+-*/=,;:|<":
+            kind = "operator" if character in "^_+-*/=,;:|<" else "delimiter"
             tokens.append(_Token(kind, character, index))
             index += 1
             continue
@@ -338,16 +390,39 @@ class _FormulaParser:
                         attributes=attributes,
                     )
                     continue
-                if self.current.value == "(" and left.kind in {"symbol", "style"}:
+                if self.current.value == "(" and left.kind in {
+                    "symbol",
+                    "style",
+                    "accent",
+                    "subscript",
+                }:
                     left = self._call(left)
                     continue
                 explicit = self.current.value
-                if explicit in {"=", "+", "-", "*", "/"}:
+                if explicit in {
+                    "=",
+                    "coloneqq",
+                    "in",
+                    "sim",
+                    "|",
+                    ":",
+                    "+",
+                    "-",
+                    "*",
+                    "times",
+                    "/",
+                }:
                     left_binding, right_binding = {
+                        "in": (2, 3),
+                        "sim": (2, 3),
                         "=": (3, 4),
+                        "coloneqq": (3, 4),
+                        "|": (4, 5),
                         "+": (10, 11),
                         "-": (10, 11),
+                        ":": (15, 16),
                         "*": (20, 21),
+                        "times": (20, 21),
                         "/": (20, 21),
                     }[explicit]
                     if left_binding < minimum_binding:
@@ -375,8 +450,22 @@ class _FormulaParser:
             return self._node("symbol", token.value, attributes=(("role", token.kind),))
         if token.value == "-":
             return self._node("negate", children=(self._expression(25, frozenset()),))
-        if token.value in {"(", "{"}:
+        if token.value == "<":
+            return self._node(
+                "relation", value="lt", children=(self._expression(25, frozenset()),),
+            )
+        if token.value in {"(", "{", "["}:
             return self._group(token.value)
+        if token.value == "\\|":
+            inner = self._expression(0, frozenset({"\\|"}))
+            self._expect("\\|")
+            fn = self._node("symbol", "norm", attributes=(("role", "function"),))
+            return self._node("call", children=(fn, inner))
+        if token.value == "|":
+            inner = self._expression(0, frozenset({"|"}))
+            self._expect("|")
+            fn = self._node("symbol", "abs", attributes=(("role", "function"),))
+            return self._node("call", children=(fn, inner))
         if token.kind == "command":
             return self._command(token)
         raise FormulaParseError(
@@ -403,21 +492,21 @@ class _FormulaParser:
                 else "identifier"
             )
             return self._node("symbol", name, attributes=(("role", role),))
+        if command == "text":
+            name = self._required_group_identifier(token.position)
+            role = "function" if name in _FUNCTION_COMMANDS else "identifier"
+            return self._node("symbol", name, attributes=(("role", role),))
         if command == "widehat":
-            # ponytail: reject unsupported accents instead of inventing a symbol,
-            # ceiling: widehat expressions remain unparsed,
-            # upgrade: an attention corpus case requires accent-preserving AST nodes.
-            raise FormulaParseError(
-                "UNSUPPORTED_ACCENT", "Accented formula symbols are outside the parser subset.",
-                token.position,
-            )
-        if command in {"mathbf", "boldsymbol", "vec", "mathcal"}:
+            child = self._required_group()
+            return self._node("accent", value="widehat", children=(child,))
+        if command in {"mathbf", "boldsymbol", "vec", "mathcal", "mathbb"}:
             child = self._required_group()
             style = {
                 "mathbf": "bold",
                 "boldsymbol": "bold",
                 "vec": "vector",
                 "mathcal": "calligraphy",
+                "mathbb": "blackboard",
             }[command]
             if child.kind == "symbol":
                 return replace(child, attributes=((*child.attributes, ("style", style))))
@@ -454,8 +543,8 @@ class _FormulaParser:
         arguments: list[AstNode] = []
         if self.current.value != ")":
             while True:
-                arguments.append(self._expression(0, frozenset({",", ")"})))
-                if self.current.value != ",":
+                arguments.append(self._expression(0, frozenset({",", ";", ")"})))
+                if self.current.value not in {",", ";"}:
                     break
                 self._advance()
         self._expect(")")
@@ -475,13 +564,13 @@ class _FormulaParser:
         return self._node(kind, children=(function, *arguments))
 
     def _group(self, opening: str) -> AstNode:
-        closing = {"(": ")", "{": "}"}[opening]
+        closing = {"(": ")", "{": "}", "[": "]"}[opening]
         if self.current.value == closing:
             raise FormulaParseError("EMPTY_GROUP", "Empty formula groups are not supported.")
-        values = [self._expression(0, frozenset({",", closing}))]
-        while self.current.value == ",":
+        values = [self._expression(0, frozenset({",", ";", closing}))]
+        while self.current.value in {",", ";"}:
             self._advance()
-            values.append(self._expression(0, frozenset({",", closing})))
+            values.append(self._expression(0, frozenset({",", ";", closing})))
         self._expect(closing)
         return values[0] if len(values) == 1 else self._node("sequence", children=tuple(values))
 
@@ -520,6 +609,38 @@ class _FormulaParser:
             raise FormulaParseError("EMPTY_NAME", "A non-empty operator name is required.")
         return name
 
+    def _required_group_identifier(self, position: int) -> str:
+        if self.current.value != "{":
+            raise FormulaParseError(
+                "EXPECTED_GROUP",
+                "This LaTeX command requires a braced name.",
+                self.current.position,
+            )
+        self._advance()
+        parts: list[_Token] = []
+        depth = 1
+        while depth:
+            tok = self._advance()
+            if tok.kind == "eof":
+                raise FormulaParseError("UNCLOSED_GROUP", "A formula group was not closed.")
+            if tok.value == "{":
+                depth += 1
+            elif tok.value == "}":
+                depth -= 1
+            else:
+                parts.append(tok)
+        if (
+            len(parts) != 1
+            or parts[0].kind not in {"identifier", "function"}
+            or not _TEXT_IDENTIFIER_RE.fullmatch(parts[0].value)
+        ):
+            raise FormulaParseError(
+                "UNSUPPORTED_TEXT",
+                "Multi-word or formatted text inside \\text{...} is outside the parser subset.",
+                position,
+            )
+        return parts[0].value
+
     def _script_argument(self) -> AstNode:
         if self.current.value == "{":
             self._advance()
@@ -533,8 +654,23 @@ class _FormulaParser:
             return self._associative("add", left, self._node("negate", children=(right,)))
         if operator == "*":
             return self._associative("multiply", left, right)
+        if operator == "times":
+            children: list[AstNode] = []
+            children.extend(
+                left.children if left.kind == "multiply" and left.value == "times" else (left,)
+            )
+            children.extend(
+                right.children if right.kind == "multiply" and right.value == "times" else (right,)
+            )
+            return self._node("multiply", value="times", children=tuple(children))
         if operator == "/":
             return self._node("divide", children=(left, right))
+        if operator in {"coloneqq", "in", "sim"}:
+            return self._node("relation", value=operator, children=(left, right))
+        if operator == "|":
+            return self._node("relation", value="conditional", children=(left, right))
+        if operator == ":":
+            return self._node("relation", value="slice", children=(left, right))
         return self._node("equals", children=(left, right))
 
     def _associative(
@@ -566,13 +702,21 @@ class _FormulaParser:
         return token.kind in {"number", "identifier", "function", "command"} or token.value in {
             "(",
             "{",
+            "[",
+            "\\|",
         }
 
 
 def _bound_name(lower: AstNode | None) -> str | None:
     if lower is None:
         return None
-    candidate = lower.children[0] if lower.kind == "equals" else lower
+    if lower.children and (
+        lower.kind == "equals"
+        or (lower.kind == "relation" and lower.value in {"in", "sim"})
+    ):
+        candidate = lower.children[0]
+    else:
+        candidate = lower
     while candidate.kind == "subscript" and candidate.children:
         candidate = candidate.children[0]
     return candidate.value if candidate.kind == "symbol" else None
@@ -629,6 +773,30 @@ def _analyze_symbols(
             if body is not None:
                 visit(body, local_scope)
             return
+        if node.kind == "accent" and node.value and len(node.children) == 1:
+            inner = node.children[0]
+            inner_name = _accented_base_name(inner)
+            if inner_name:
+                accented = f"{node.value}({inner_name})"
+                if context == "function":
+                    collect(ParsedSymbol(accented, "function", style=inner.attribute("style")))
+                    return
+                category = "index" if context in {"index", "bound"} else _accented_category(inner)
+                collect(ParsedSymbol(accented, category, style=inner.attribute("style")))
+                if accented not in scope:
+                    free.add(accented)
+                return
+            visit(inner, scope, context)
+            return
+        if node.kind == "relation" and node.value == "in" and len(node.children) == 2:
+            lhs, rhs = node.children
+            visit(lhs, scope, context)
+            if _is_domain_space_expr(rhs):
+                if rhs.kind in {"power", "subscript"} and len(rhs.children) == 2:
+                    visit(rhs.children[1], scope, "index")
+                return
+            visit(rhs, scope, context)
+            return
         if node.kind in {"call", "distribution"} and node.children:
             function = node.children[0]
             if function.kind == "symbol" and function.value:
@@ -640,6 +808,15 @@ def _analyze_symbols(
                         style=function.attribute("style"),
                     )
                 )
+            elif function.kind == "subscript" and len(function.children) == 2:
+                base, idx = function.children
+                base_name = _symbol_name(base)
+                if base_name:
+                    category = "distribution" if node.kind == "distribution" else "function"
+                    collect(ParsedSymbol(base_name, category, style=base.attribute("style")))
+                else:
+                    visit(base, scope, "function")
+                visit(idx, scope, "index")
             else:
                 visit(function, scope, "function")
             for argument in node.children[1:]:
@@ -693,7 +870,49 @@ def _symbol_name(node: AstNode) -> str | None:
         return node.value
     if node.kind == "style" and len(node.children) == 1:
         return _symbol_name(node.children[0])
+    if node.kind == "accent" and node.value and len(node.children) == 1:
+        inner = _accented_base_name(node.children[0])
+        return f"{node.value}({inner})" if inner else None
     return None
+
+
+def _accented_base_name(node: AstNode) -> str | None:
+    if node.kind == "symbol":
+        return node.value
+    if node.kind == "style" and len(node.children) == 1:
+        return _accented_base_name(node.children[0])
+    if node.kind == "subscript" and node.children:
+        return _accented_base_name(node.children[0])
+    return None
+
+
+def _accented_category(
+    node: AstNode,
+) -> Literal["scalar", "vector", "matrix", "tensor", "unknown"]:
+    if node.kind == "symbol":
+        return _plain_category(node)
+    if node.kind == "style" and len(node.children) == 1:
+        return _accented_category(node.children[0])
+    if node.kind == "subscript" and len(node.children) == 2:
+        base, idx = node.children
+        return _indexed_category(base, len(_symbol_names(idx)))
+    return "unknown"
+
+
+def _is_domain_space_symbol(node: AstNode) -> bool:
+    return (
+        node.kind == "symbol"
+        and node.attribute("style") == "blackboard"
+        and node.value in _DOMAIN_SPACE_NAMES
+    )
+
+
+def _is_domain_space_expr(node: AstNode) -> bool:
+    if _is_domain_space_symbol(node):
+        return True
+    if node.kind in {"power", "subscript"} and len(node.children) == 2:
+        return _is_domain_space_expr(node.children[0])
+    return False
 
 
 def _symbol_names(node: AstNode) -> set[str]:

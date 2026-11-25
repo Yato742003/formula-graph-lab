@@ -588,9 +588,72 @@ class TestCanonicalHashFunction:
         assert {symbol.name for symbol in reverse_order.symbols} == {"Q'", "i"}
 
     def test_unsupported_accent_is_not_invented_as_a_free_symbol(self):
+        for source in (r"\widetilde{x}", r"\overline{x}"):
+            with pytest.raises(FormulaParseError) as error:
+                parse_formula(source)
+            assert error.value.code == "UNSUPPORTED_ACCENT"
+
+    def test_widehat_preserves_distinct_accented_identity_and_blocks_sympy_collapse(self):
+        hat_d = parse_formula(r"\widehat{\mathbf{D}}")
+        plain_d = parse_formula(r"\mathbf{D}")
+        assert hat_d.root.kind == "accent"
+        assert hat_d.root.value == "widehat"
+        assert hat_d.free_variables == ("widehat(D)",)
+        assert "D" not in hat_d.free_variables
+        assert "widehat" not in hat_d.free_variables
+        assert hat_d.syntax_hash != plain_d.syntax_hash
         with pytest.raises(FormulaParseError) as error:
-            parse_formula(r"\widehat{x}")
-        assert error.value.code == "UNSUPPORTED_ACCENT"
+            ast_to_sympy(hat_d.root)
+        assert error.value.code == "SYMPY_UNSUPPORTED"
+
+    def test_coloneqq_and_domain_membership_relations_parse_fail_closed_for_sympy(self):
+        defn = parse_formula(
+            r"p_{\theta}(\mathbf{x}_{0:T}) \coloneqq "
+            r"p(\mathbf{x}_{T})\prod_{t=1}^{T}p_{\theta}(\mathbf{x}_{t-1}|\mathbf{x}_{t})"
+        )
+        assert defn.root.kind == "relation"
+        assert defn.root.value == "coloneqq"
+        assert "coloneqq" not in defn.free_variables
+        with pytest.raises(FormulaParseError) as error:
+            ast_to_sympy(defn.root)
+        assert error.value.code == "SYMPY_UNSUPPORTED"
+
+        membership = parse_formula(r"\mathbf{E} \in \mathbb{R}^{(P^{2}\cdot C)\times D}")
+        assert membership.root.kind == "relation"
+        assert membership.root.value == "in"
+        assert {"in", "mathbb", "R"}.isdisjoint(membership.free_variables)
+        assert "E" in membership.free_variables
+
+    def test_text_rejects_prose_and_verb_stays_rejected(self):
+        assert parse_formula(r"\text{log}(x)").root.kind == "call"
+        with pytest.raises(FormulaParseError) as text_err:
+            parse_formula(r"\text{hello world}")
+        assert text_err.value.code == "UNSUPPORTED_TEXT"
+        with pytest.raises(FormulaParseError) as verb_err:
+            parse_formula(r"\verb|np.random.pareto|(\alpha)")
+        assert verb_err.value.code == "UNSUPPORTED_COMMAND"
+
+    def test_landmark_ml_equations_with_norms_brackets_and_expectations_parse(self):
+        performer_e4 = parse_formula(
+            r"\widehat{\mathrm{Att}_{\leftrightarrow}}(\mathbf{Q},\mathbf{K},\mathbf{V})"
+            r"=\widehat{\mathbf{D}}^{-1}(\mathbf{Q}^{\prime}((\mathbf{K}^{\prime})^{\top}\mathbf{V})),"
+            r"\quad\widehat{\mathbf{D}}=\mathrm{diag}(\mathbf{Q}^{\prime}((\mathbf{K}^{\prime})^{\top}\mathbf{1}_{L}))."
+        )
+        assert performer_e4.root.kind == "sequence"
+        assert "widehat(D)" in performer_e4.free_variables
+        assert "D" not in performer_e4.free_variables
+
+        performer_e7 = parse_formula(
+            r"\mathrm{SM}(\mathbf{x},\mathbf{y})=\mathbb{E}_{\omega\sim\mathcal{N}(0,\mathbf{I}_{d})}"
+            r"\!\Big[\mathrm{exp}\!\Big(\omega^{\top}\mathbf{x}-\frac{\|\mathbf{x}\|^{2}}{2}\Big)\Big],"
+        )
+        assert performer_e7.root.kind == "equals"
+
+        lora_e1 = parse_formula(
+            r"\displaystyle\max_{\Phi}\sum_{(x,y)\in\mathcal{Z}}\sum_{t=1}^{|y|}"
+            r"\text{log}\left(P_{\Phi}(y_{t}|x,y_{<t})\right)"
+        )
+        assert lora_e1.root.kind == "multiply"
 
     def test_terminal_decimal_and_other_punctuation_are_not_stripped(self):
         assert parse_formula("1.").root.value == "1."

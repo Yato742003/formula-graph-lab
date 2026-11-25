@@ -1641,8 +1641,11 @@ async def test_r1_attention_lineage_and_synthetic_pipeline_replay(monkeypatch):
             if item["equation_uuid"] == performer_eq4["uuid"]
         )
         performer_eq4_payload = json.loads(performer_eq4_analysis["payload"])
-        assert performer_eq4_payload["status"] == "unsupported"
-        assert performer_eq4_payload["error"]["code"] == "UNSUPPORTED_ACCENT"
+        assert performer_eq4_payload["status"] != "unsupported"
+        assert performer_eq4_payload["ast"]["kind"] == "sequence"
+        performer_eq4_symbols = {item["name"] for item in performer_eq4_payload["symbols"]}
+        assert "widehat(D)" in performer_eq4_symbols
+        assert "D" not in performer_eq4_symbols
 
         claims = (
             (

@@ -31,8 +31,8 @@ Tested offline against **14 frozen arXiv HTML structure excerpts** (`1706.03762`
 
 | Stage | Result | Latency (Median / p95) | Fail-Closed Behavior |
 | :--- | :---: | :---: | :--- |
-| **Source HTML / MathML Anchor Extraction** | **`24 / 24` (`100.0%`)** | `0.59 ms` / `1.15 ms` | Preserves `S*.E*` anchors, SHA-256 source digest & `non_mathml_content_requires_review` warnings |
-| **Typed Formula AST Parsing** | **`14 / 24` (`58.3%`)** | `0.18 ms` / `0.40 ms` | Intentionally rejects `10 / 24` blocks rather than hallucinating structure (`4` BERT text-as-math blocks, `4` unsupported macros like `\verb` / `\coloneqq` / `\mathbb{R}`, `1` `\widehat` accent, `1` trailing multi-part expression) |
+| **Source HTML / MathML Anchor Extraction** | **`24 / 24` (`100.0%`)** | `0.60 ms` / `1.66 ms` | Preserves `S*.E*` anchors, SHA-256 source digest & `non_mathml_content_requires_review` warnings |
+| **Typed Formula AST Parsing** | **`19 / 24` (`79.2%`)** (`19/19` genuine math) | `0.28 ms` / `0.70 ms` | Supports `\coloneqq`, accent-preserving `\widehat`, `\in \mathbb{R}^{...}` domain/shape clauses, norms (`‖·‖`) & conditional/slice notation; intentionally rejects `5 / 24` non-math blocks (`4` BERT text-as-math blocks + `1` GPT-3 `\verb` code block) |
 
 > *Scope note:* This corpus exercises repeatable offline regression on 14 frozen arXiv HTML excerpts (including 2 zero-equation papers), not full-paper arXiv-wide precision/recall.
 
@@ -42,17 +42,17 @@ Measured on a pinned `Dockerfile.sandbox` image (`--network=none --read-only --c
 
 | Formula Pair (`LaTeX`) | Contract State | Outcome | Verification Vector / Witness | Wall Time |
 | :--- | :--- | :---: | :--- | :---: |
-| `(a + b) - b` vs `a` | Unreviewed symbols | `unknown` | `UNRESOLVED_SHAPE` (preflight blocks before spawning Docker) | `0.2 ms` |
-| `(a + b) - b` vs `a` | Reviewed scalar reals (`a, b`) | **`supported`** | `domain: discharged`, `sympy_simplify (difference = 0)` | `1023.9 ms` |
-| `(a + 1) + 2` vs `a + 4` | Reviewed scalar real (`a`) | **`refuted`** | `domain: discharged`, `exact_constant_difference = -1` | `930.1 ms` |
-| `\frac{1}{x}` vs `x^{-1}` | Reviewed real (`x`, no `x ≠ 0`) | `unknown` | `UNRESOLVED_DOMAIN` (denominator obligation blocks false proof) | `0.5 ms` |
+| `(a + b) - b` vs `a` | Unreviewed symbols | `unknown` | `UNRESOLVED_SHAPE` (preflight blocks before spawning Docker) | `0.5 ms` |
+| `(a + b) - b` vs `a` | Reviewed scalar reals (`a, b`) | **`supported`** | `domain: discharged`, `sympy_simplify (difference = 0)` | `1280.0 ms` |
+| `(a + 1) + 2` vs `a + 4` | Reviewed scalar real (`a`) | **`refuted`** | `domain: discharged`, `exact_constant_difference = -1` | `1142.9 ms` |
+| `\frac{1}{x}` vs `x^{-1}` | Reviewed real (`x`, no `x ≠ 0`) | `unknown` | `UNRESOLVED_DOMAIN` (denominator obligation blocks false proof) | `1.2 ms` |
 
 **Ephemeral Container Lifecycle Latency (`docker run` → execute → verify → `docker rm -f`):**
 
 | Worker Kind | Runs | Min | Median | p95 |
 | :--- | :---: | :---: | :---: | :---: |
-| **Symbolic SymPy Worker (`app.symbolic_worker`)** | 5 | `780.7 ms` | **`828.5 ms`** | `896.4 ms` |
-| **Numerical Feature-Map Suite (`app.numerical_worker`)** | 3 | `399.8 ms` | **`401.5 ms`** | `420.7 ms` |
+| **Symbolic SymPy Worker (`app.symbolic_worker`)** | 5 | `836.9 ms` | **`1060.5 ms`** | `1122.7 ms` |
+| **Numerical Feature-Map Suite (`app.numerical_worker`)** | 3 | `399.9 ms` | **`407.8 ms`** | `416.3 ms` |
 
 ### 3. Offline Retrieval A/B (`reports/phase5-retrieval-ab.json`)
 
@@ -69,7 +69,7 @@ Four fixed anchor-finding queries × 3 alternating repeats on isolated Neo4j (`k
 
 ### 4. Automated Test & Release-Gate Coverage
 
-- **Offline regression (`make verify` / `scripts/verify-research.ps1`):** `700` Pytest tests + `208` Vitest tests (`28` files) + Ruff (`0` errors) + Oxlint (`0` errors) + `tsc --noEmit` (`0` errors).
+- **Offline regression (`make verify` / `scripts/verify-research.ps1`):** `705` Pytest tests + `208` Vitest tests (`28` files) + Ruff (`0` errors) + Oxlint (`0` errors) + `tsc --noEmit` (`0` errors).
 - **Live isolated Neo4j integration (`make test-integration` / `scripts/test-integration.ps1`):** `35` integration tests on ephemeral tmpfs `neo4j:5.26-community` (including signed `fgl1` auth replay rejection, double-delivery quarantine, and dead-letter reconciliation).
 - **Adversarial Docker sandbox & clean-container replay (`make test-sandbox` / `scripts/test-sandbox.ps1`):** `7` container boundary tests (controls, OOM kill, wall-clock kill, stdout flood cap, read-only rootfs, network lockdown) + `1` zero-network replay test.
 - **Production HTTP/CSP smoke (`tests/production-security-smoke.mjs`):** Verifies per-request SSR CSP script nonces, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and fail-closed anonymous BFF denial.
@@ -203,7 +203,7 @@ Copy [`.env.example`](.env.example) to `.env`:
 
 | Check | macOS / Linux (`Makefile`) | Windows (`PowerShell`) |
 | :--- | :--- | :--- |
-| **Offline Gate** (Ruff + 700 Pytest + Oxlint + `tsc` + 208 Vitest) | `make verify` | `powershell -NoProfile -File .\scripts\verify-research.ps1` |
+| **Offline Gate** (Ruff + 705 Pytest + Oxlint + `tsc` + 208 Vitest) | `make verify` | `powershell -NoProfile -File .\scripts\verify-research.ps1` |
 | **Live Neo4j Integration** (isolated tmpfs Neo4j, 35 tests) | `make test-integration` | `powershell -NoProfile -File .\scripts\test-integration.ps1` |
 | **Docker Sandbox & Clean Replay** (7 isolation + 1 replay) | `make test-sandbox` | `powershell -NoProfile -File .\scripts\test-sandbox.ps1` |
 | **Empirical Corpus + Sandbox Benchmark** | `make benchmark` | `python scripts/benchmark_evidence.py --sandbox-image <sha256>` |
