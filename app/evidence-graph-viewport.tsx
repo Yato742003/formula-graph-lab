@@ -16,9 +16,9 @@ import {
   type Node,
   type NodeProps,
 } from '@xyflow/react';
-import katex from 'katex';
 import {
   Compass,
+  Cpu,
   Eye,
   LayoutGrid,
   Maximize2,
@@ -31,44 +31,55 @@ import {
 import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import {
+  cleanFormula,
+  renderFormulaHtml,
+  type GraphViewportEdge,
+  type GraphViewportNode,
+  type InCardSymbol,
+} from '@/lib/graph-formula-render';
+import {
+  computeLayout2DAsync,
+  computeLayout2DFallback,
+  type Layout2DInput,
+  type Layout2DResult,
+  type LayoutEngineKind,
+} from '@/lib/graph-layout-wasm';
 import type {
   EvidenceEntityType,
   EvidenceRelationType,
 } from '@/lib/import-types';
 
+export {
+  cleanFormula,
+  renderFormulaHtml,
+  type GraphViewportEdge,
+  type GraphViewportNode,
+  type InCardSymbol,
+};
+
+const prefetch3DViewport = () => {
+  void import('@/app/graph-3d-viewport');
+};
+
 const Graph3DViewport = lazy(() => import('@/app/graph-3d-viewport'));
 
-export type GraphViewportNode = {
-  id: string;
-  kind: EvidenceEntityType;
-  label: string;
-  expression: string;
-  meta: string;
-};
-
-export type GraphViewportEdge = {
-  id: string;
-  source: string;
-  target: string;
-  relation: EvidenceRelationType;
-};
-
-export type InCardSymbol = {
-  id: string;
-  label: string;
-  expression: string;
-};
+type LaneTone = 'paper' | 'section' | 'equation' | 'concept' | 'hypothesis';
 
 type EvidenceNodeData = GraphViewportNode & {
   symbols?: InCardSymbol[];
   onSelectSymbol?: (id: string) => void;
   isCompact?: boolean;
   isDimmed?: boolean;
+  sectionId?: string;
 } & Record<string, unknown>;
 export type EvidenceFlowNode = Node<EvidenceNodeData, 'evidence'>;
 
 export type SectionGroupData = {
   title: string;
+  pill: string;
+  unitLabel: string;
+  tone: LaneTone;
   count: number;
   sectionId?: string;
 };
@@ -86,18 +97,18 @@ type EvidenceGraphViewportProps = {
   onToggleZen?: () => void;
 };
 
-const kindColumns: Record<EvidenceEntityType, number> = {
+const kindRankOrder: Record<EvidenceEntityType, number> = {
   Paper: 0,
   PaperVersion: 1,
   Section: 2,
   Equation: 3,
-  Symbol: 4,
-  Assumption: 4,
-  Claim: 4,
-  Concept: 4,
-  Method: 3,
-  Experiment: 4,
-  Hypothesis: 5,
+  Method: 4,
+  Concept: 5,
+  Assumption: 6,
+  Experiment: 7,
+  Symbol: 8,
+  Claim: 9,
+  Hypothesis: 10,
 };
 
 const kindTone: Record<EvidenceEntityType, string> = {
@@ -132,52 +143,451 @@ const edgeColors: Record<EvidenceRelationType, string> = {
 };
 
 const minimapNodeColors: Record<EvidenceEntityType, string> = {
-  Paper: '#38bdf8',
-  PaperVersion: '#67e8f9',
-  Section: '#64748b',
-  Equation: '#10b981',
-  Symbol: '#a855f7',
-  Assumption: '#f43f5e',
-  Claim: '#c084fc',
-  Concept: '#34d399',
-  Method: '#0ea5e9',
-  Experiment: '#06b6d4',
-  Hypothesis: '#f59e0b',
+  Paper: '#3b82f6',
+  PaperVersion: '#0ea5e9',
+  Section: '#0f9d8a',
+  Equation: '#4f46e5',
+  Symbol: '#9333ea',
+  Assumption: '#d97706',
+  Claim: '#c026d3',
+  Concept: '#10b981',
+  Method: '#0284c7',
+  Experiment: '#0891b2',
+  Hypothesis: '#d97706',
 };
 
-export function cleanFormula(expr: string): string {
-  if (!expr) return expr;
-  return expr
-    .replace(/\\mathrm\{([^}]+)\}/g, '$1')
-    .replace(/\\text\{([^}]+)\}/g, '$1')
-    .replace(/\\displaystyle\s*/g, '')
-    .replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, '($1 / $2)')
-    .replace(/\\sqrt\{([^}]+)\}/g, '√($1)')
-    .replace(/\\,/g, ' ')
-    .replace(/~/g, ' ')
-    .replace(/\\cdot/g, '·')
-    .replace(/\\times/g, '×')
-    .replace(/\\left|\\right/g, '')
-    .trim();
+function estimateCardWidth(kind: EvidenceEntityType, isCompact: boolean): number {
+  if (isCompact) return 220;
+  if (kind === 'Paper' || kind === 'PaperVersion') return 280;
+  return 320;
 }
 
-export function renderFormulaHtml(rawExpr: string): string | null {
-  if (!rawExpr || typeof rawExpr !== 'string') return null;
-  const trimmed = rawExpr.trim();
-  const clean = trimmed
-    .replace(/^\${1,2}/, '')
-    .replace(/\${1,2}$/, '')
-    .trim();
-  if (!clean) return null;
-  try {
-    return katex.renderToString(clean, {
-      throwOnError: false,
-      displayMode: false,
-      strict: false,
-    });
-  } catch {
-    return null;
+function estimateCardHeight(
+  node: GraphViewportNode,
+  symbols: InCardSymbol[],
+  isCompact: boolean,
+): number {
+  if (isCompact) return 48;
+
+  // Base vertical budget: padding + kind eyebrow + title + meta row.
+  let height = 108;
+  const labelLines = Math.max(1, Math.min(3, Math.ceil(node.label.length / 30)));
+  height += (labelLines - 1) * 21;
+
+  if (node.kind === 'Equation') {
+    const expr = node.expression ?? '';
+    const hasTallMath = /\\(frac|dfrac|sum|int|prod|begin|sqrt|lim|binom|matrix)/.test(expr);
+    const hasVeryLongMath = expr.length > 85;
+    height += hasTallMath ? 68 : hasVeryLongMath ? 50 : 38;
+  } else {
+    const exprLen = (node.expression ?? '').length;
+    const exprLines = Math.max(1, Math.min(4, Math.ceil(exprLen / 36)));
+    height += exprLines * 21 + 8;
   }
+
+  if (symbols.length > 0) {
+    const shown = symbols.slice(0, 4);
+    let rowW = 0;
+    let chipRows = 1;
+    const maxRowW = 264;
+    for (const sym of shown) {
+      const defWidth = sym.expression ? Math.min(114, sym.expression.length * 6.2) : 0;
+      const chipW = Math.min(maxRowW, 24 + sym.label.length * 7.2 + defWidth);
+      if (rowW > 0 && rowW + 5 + chipW > maxRowW) {
+        chipRows++;
+        rowW = chipW;
+      } else {
+        rowW += (rowW > 0 ? 5 : 0) + chipW;
+      }
+    }
+    if (symbols.length > 4 && rowW + 32 > maxRowW) {
+      chipRows++;
+    }
+    height += 36 + chipRows * 29;
+  }
+
+  return Math.max(130, height);
+}
+
+type LaneSpec = {
+  key: string;
+  title: string;
+  pill: string;
+  unitLabel: string;
+  tone: LaneTone;
+  sectionId?: string;
+  maxCols: number;
+  allowBarycenter: boolean;
+  members: Array<{
+    node: GraphViewportNode;
+    symbols: InCardSymbol[];
+    forceCompact?: boolean;
+  }>;
+};
+
+type Prepared2DModel = {
+  lanes: LaneSpec[];
+  flatItems: Array<{
+    node: GraphViewportNode;
+    symbols: InCardSymbol[];
+    forceCompact: boolean;
+    laneIndex: number;
+    sectionId?: string;
+  }>;
+  input: Layout2DInput;
+};
+
+function prepareUnified2DModel(
+  nodes: GraphViewportNode[],
+  edges: GraphViewportEdge[],
+  isCompact: boolean,
+): Prepared2DModel {
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+  const hasEquations = nodes.some((n) => n.kind === 'Equation');
+
+  // Map equations to parent section via `contains` edges or `#S\d+` anchor metadata.
+  const eqParentSection = new Map<string, string>();
+  for (const edge of edges) {
+    if (edge.relation === 'contains') {
+      const src = nodeMap.get(edge.source);
+      const tgt = nodeMap.get(edge.target);
+      if (src?.kind === 'Section' && tgt?.kind === 'Equation') {
+        eqParentSection.set(tgt.id, src.id);
+      }
+    }
+  }
+
+  // Map symbols defined by equations so they embed as clean in-card chips.
+  const eqDefinedSymbols = new Map<string, GraphViewportNode[]>();
+  for (const edge of edges) {
+    if (edge.relation === 'defines') {
+      const src = nodeMap.get(edge.source);
+      const tgt = nodeMap.get(edge.target);
+      if (src?.kind === 'Equation' && tgt?.kind === 'Symbol') {
+        const list = eqDefinedSymbols.get(src.id) ?? [];
+        if (!list.some((existing) => existing.id === tgt.id)) {
+          list.push(tgt);
+        }
+        eqDefinedSymbols.set(src.id, list);
+      }
+    }
+  }
+
+  const lanes: LaneSpec[] = [];
+  const assignedIds = new Set<string>();
+
+  // Lane 0 (always index 0): Source Paper anchor lane.
+  const rootNodes = nodes.filter(
+    (n) => n.kind === 'Paper' || n.kind === 'PaperVersion',
+  );
+  rootNodes.forEach((n) => assignedIds.add(n.id));
+  lanes.push({
+    key: 'paper-root',
+    title: rootNodes.length === 1 ? rootNodes[0].label : 'Source Paper',
+    pill: 'SOURCE',
+    unitLabel: rootNodes.length === 1 ? 'paper' : 'papers',
+    tone: 'paper',
+    sectionId: rootNodes[0]?.id ?? 'paper-root',
+    maxCols: 1,
+    allowBarycenter: false,
+    members: rootNodes.map((node) => ({
+      node,
+      symbols: [],
+      forceCompact: rootNodes.length > 2,
+    })),
+  });
+
+  if (hasEquations) {
+    // Group equations into their parent sections (or Core Derivations if unattached).
+    const sectionEquations = new Map<string, GraphViewportNode[]>();
+    for (const node of nodes) {
+      if (node.kind !== 'Equation') continue;
+      let secId = eqParentSection.get(node.id);
+      if (!secId && node.meta) {
+        const secMatch = node.meta.match(/#?(S\d+)/i);
+        if (secMatch) {
+          const matchedSec = nodes.find(
+            (n) =>
+              n.kind === 'Section' &&
+              (n.id.includes(secMatch[1]) || n.label.includes(secMatch[1])),
+          );
+          if (matchedSec) secId = matchedSec.id;
+        }
+      }
+      secId = secId ?? 'core-derivations';
+      const list = sectionEquations.get(secId) ?? [];
+      list.push(node);
+      sectionEquations.set(secId, list);
+    }
+
+    const orderedSectionIds = [...sectionEquations.keys()].sort((a, b) => {
+      if (a === 'core-derivations') return 1;
+      if (b === 'core-derivations') return -1;
+      return (
+        nodes.findIndex((n) => n.id === a) - nodes.findIndex((n) => n.id === b)
+      );
+    });
+
+    for (const secId of orderedSectionIds) {
+      const eqs = sectionEquations.get(secId) ?? [];
+      if (eqs.length === 0) continue;
+      const secNode = nodeMap.get(secId);
+      if (secNode) assignedIds.add(secNode.id);
+
+      const members = eqs.map((eq) => {
+        assignedIds.add(eq.id);
+        const syms = (eqDefinedSymbols.get(eq.id) ?? []).filter((s) =>
+          nodeMap.has(s.id),
+        );
+        syms.forEach((s) => assignedIds.add(s.id));
+        return {
+          node: eq,
+          symbols: syms.map((s) => ({
+            id: s.id,
+            label: s.label,
+            expression: s.expression,
+          })),
+        };
+      });
+
+      const title = secNode
+        ? secNode.label || secNode.expression || 'Section'
+        : 'Core Derivations';
+      const maxCols = eqs.length > 12 ? 3 : eqs.length > 6 ? 2 : 1;
+
+      lanes.push({
+        key: secId,
+        title,
+        pill: secNode ? 'SECTION' : 'DERIVATIONS',
+        unitLabel: eqs.length === 1 ? 'formula' : 'formulas',
+        tone: secNode ? 'section' : 'equation',
+        sectionId: secId,
+        maxCols,
+        allowBarycenter: false,
+        members,
+      });
+    }
+
+    // Empty section nodes stay accessible in the left structure outline, not as empty canvas boxes.
+    for (const node of nodes) {
+      if (node.kind === 'Section') assignedIds.add(node.id);
+    }
+  } else {
+    // No equations present: keep Section nodes visible in a unified Document Sections lane
+    // folded cleanly across up to 3 sub-columns so large section outlines stay compact.
+    const sectionNodes = nodes.filter(
+      (n) => n.kind === 'Section' && !assignedIds.has(n.id),
+    );
+    if (sectionNodes.length > 0) {
+      sectionNodes.forEach((n) => assignedIds.add(n.id));
+      lanes.push({
+        key: 'document-sections',
+        title: 'Document Sections',
+        pill: 'OUTLINE',
+        unitLabel: sectionNodes.length === 1 ? 'section' : 'sections',
+        tone: 'section',
+        sectionId: 'document-sections',
+        maxCols: sectionNodes.length > 6 ? 3 : sectionNodes.length > 3 ? 2 : 1,
+        allowBarycenter: false,
+        members: sectionNodes.map((node) => ({
+          node,
+          symbols: [],
+          forceCompact: sectionNodes.length > 10,
+        })),
+      });
+    }
+  }
+
+  // Group remaining non-equation entities into two clean epistemic lanes:
+  // 1) Concepts, Methods, Assumptions, Experiments & standalone Symbols
+  // 2) Claims & AI Hypotheses (explicitly separated from immutable evidence!)
+  const remaining = nodes.filter((n) => !assignedIds.has(n.id));
+  const contextEntities = remaining.filter(
+    (n) => n.kind !== 'Claim' && n.kind !== 'Hypothesis',
+  );
+  const epistemicEntities = remaining.filter(
+    (n) => n.kind === 'Claim' || n.kind === 'Hypothesis',
+  );
+
+  if (contextEntities.length > 0) {
+    lanes.push({
+      key: 'context-entities',
+      title: 'Concepts & Assumptions',
+      pill: 'CONTEXT',
+      unitLabel: contextEntities.length === 1 ? 'entity' : 'entities',
+      tone: 'concept',
+      sectionId: 'context-entities',
+      maxCols: contextEntities.length > 8 ? 2 : 1,
+      allowBarycenter: true,
+      members: contextEntities.map((node) => ({ node, symbols: [] })),
+    });
+  }
+
+  if (epistemicEntities.length > 0) {
+    lanes.push({
+      key: 'epistemic-hypotheses',
+      title: 'Claims & Hypotheses',
+      pill: 'HYPOTHESIS',
+      unitLabel: epistemicEntities.length === 1 ? 'item' : 'items',
+      tone: 'hypothesis',
+      sectionId: 'epistemic-hypotheses',
+      maxCols: epistemicEntities.length > 8 ? 2 : 1,
+      allowBarycenter: true,
+      members: epistemicEntities.map((node) => ({ node, symbols: [] })),
+    });
+  }
+
+  // Flatten items and pack typed arrays for Rust WASM layout engine.
+  const flatItems: Prepared2DModel['flatItems'] = [];
+  const nodeIndexById = new Map<string, number>();
+
+  lanes.forEach((lane, laneIndex) => {
+    lane.members.forEach((member) => {
+      const idx = flatItems.length;
+      nodeIndexById.set(member.node.id, idx);
+      flatItems.push({
+        node: member.node,
+        symbols: member.symbols,
+        forceCompact: Boolean(member.forceCompact),
+        laneIndex,
+        sectionId: lane.sectionId,
+      });
+    });
+  });
+
+  const n = flatItems.length;
+  const g = lanes.length;
+  const nodeGroupIds = new Uint32Array(n);
+  const nodeKindRanks = new Uint32Array(n);
+  const nodeWidths = new Float32Array(n);
+  const nodeHeights = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const item = flatItems[i];
+    const effectiveCompact = isCompact || item.forceCompact;
+    nodeGroupIds[i] = item.laneIndex;
+    nodeKindRanks[i] = kindRankOrder[item.node.kind] ?? 5;
+    nodeWidths[i] = estimateCardWidth(item.node.kind, effectiveCompact);
+    nodeHeights[i] = estimateCardHeight(
+      item.node,
+      item.symbols,
+      effectiveCompact,
+    );
+  }
+
+  const edgeSrcList: number[] = [];
+  const edgeDstList: number[] = [];
+  const edgeWeightList: number[] = [];
+  for (const edge of edges) {
+    const u = nodeIndexById.get(edge.source);
+    const v = nodeIndexById.get(edge.target);
+    if (u !== undefined && v !== undefined && u !== v) {
+      edgeSrcList.push(u);
+      edgeDstList.push(v);
+      edgeWeightList.push(
+        edge.relation === 'derived_from' || edge.relation === 'uses' ? 2.5 : 1.0,
+      );
+    }
+  }
+
+  const groupMaxCols = new Uint32Array(g);
+  const groupBaryFlags = new Uint32Array(g);
+  for (let laneIdx = 0; laneIdx < g; laneIdx++) {
+    groupMaxCols[laneIdx] = lanes[laneIdx].maxCols;
+    groupBaryFlags[laneIdx] = lanes[laneIdx].allowBarycenter ? 1 : 0;
+  }
+
+  const nonEmptyContentLanes = lanes
+    .slice(1)
+    .filter((lane) => lane.members.length > 0).length;
+
+  const input: Layout2DInput = {
+    nodeGroupIds,
+    nodeKindRanks,
+    nodeWidths,
+    nodeHeights,
+    edgeSrcs: new Uint32Array(edgeSrcList),
+    edgeDsts: new Uint32Array(edgeDstList),
+    edgeWeights: new Float32Array(edgeWeightList),
+    groupCount: g,
+    groupMaxCols,
+    groupBaryFlags,
+    params: {
+      lanePadX: isCompact ? 18 : 22,
+      lanePadTop: 74,
+      lanePadBottom: 22,
+      cardGapX: isCompact ? 16 : 22,
+      cardGapY: isCompact ? 14 : 24,
+      laneGapX: isCompact ? 38 : 48,
+      laneGapY: isCompact ? 34 : 40,
+      maxLanesPerRow: nonEmptyContentLanes <= 4 ? 2 : nonEmptyContentLanes <= 9 ? 3 : 4,
+    },
+  };
+
+  return { lanes, flatItems, input };
+}
+
+function materializeFlowNodes(
+  model: Prepared2DModel,
+  layout: Layout2DResult,
+  isCompact: boolean,
+): AnyFlowNode[] {
+  const originX = 36;
+  const originY = 36;
+  const groupNodes: AnyFlowNode[] = [];
+  const cardNodes: AnyFlowNode[] = [];
+
+  model.lanes.forEach((lane, g) => {
+    if (lane.members.length === 0) return;
+    const gx = layout.groupRects[g * 4] + originX;
+    const gy = layout.groupRects[g * 4 + 1] + originY;
+    const gw = layout.groupRects[g * 4 + 2];
+    const gh = layout.groupRects[g * 4 + 3];
+
+    groupNodes.push({
+      id: `swimlane-${lane.key}`,
+      type: 'sectionGroup',
+      position: { x: gx, y: gy },
+      style: { width: gw, height: gh },
+      data: {
+        title: lane.title,
+        pill: lane.pill,
+        unitLabel: lane.unitLabel,
+        tone: lane.tone,
+        count: lane.members.length,
+        sectionId: lane.sectionId,
+      },
+      draggable: false,
+      selectable: false,
+      focusable: false,
+      zIndex: -1,
+    } as AnyFlowNode);
+  });
+
+  model.flatItems.forEach((item, idx) => {
+    const x = layout.nodeXY[idx * 2] + originX;
+    const y = layout.nodeXY[idx * 2 + 1] + originY;
+    const effectiveCompact = isCompact || item.forceCompact;
+
+    cardNodes.push({
+      id: item.node.id,
+      type: 'evidence',
+      position: { x, y },
+      data: {
+        ...item.node,
+        isCompact: effectiveCompact,
+        symbols: item.symbols,
+        sectionId: item.sectionId,
+      },
+      draggable: false,
+      selectable: true,
+      focusable: true,
+      ariaRole: 'button',
+      ariaLabel: `${item.node.kind}: ${item.node.label}. ${item.node.expression}`,
+    });
+  });
+
+  return [...groupNodes, ...cardNodes];
 }
 
 function EvidenceNodeCard({ data, selected }: NodeProps<EvidenceFlowNode>) {
@@ -270,17 +680,20 @@ function EvidenceNodeCard({ data, selected }: NodeProps<EvidenceFlowNode>) {
   );
 }
 
-function SectionGroupCard({
-  data,
-}: NodeProps<SectionGroupFlowNode>) {
+function SectionGroupCard({ data }: NodeProps<SectionGroupFlowNode>) {
   return (
-    <div className="section-swimlane-card" aria-hidden="true">
+    <div
+      className={`section-swimlane-card is-tone-${data.tone}`}
+      aria-hidden="true"
+    >
       <div className="section-swimlane-header">
         <div className="section-swimlane-meta-row">
-          <span className="section-swimlane-pill">SECTION</span>
+          <span className={`section-swimlane-pill is-tone-${data.tone}`}>
+            {data.pill}
+          </span>
           {data.count > 0 ? (
             <span className="section-swimlane-badge">
-              {data.count} {data.count === 1 ? 'formula' : 'formulas'}
+              {data.count} {data.unitLabel}
             </span>
           ) : null}
         </div>
@@ -304,382 +717,6 @@ function relationLabel(relation: EvidenceRelationType): string {
   return relation.replaceAll('_', ' ');
 }
 
-// Fallback multi-column wrapping grid for papers without equations or section-only test suites
-function layoutGridFallback(
-  nodes: GraphViewportNode[],
-  edges: GraphViewportEdge[] = [],
-  isCompact = false,
-): AnyFlowNode[] {
-  const parentMap = new Map<string, string>();
-  for (const edge of edges) {
-    if (
-      edge.relation === 'has_version' ||
-      edge.relation === 'contains' ||
-      edge.relation === 'defines' ||
-      edge.relation === 'uses'
-    ) {
-      parentMap.set(edge.target, edge.source);
-    }
-  }
-
-  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
-  const findPaperRoot = (nodeId: string, depth = 0): string => {
-    if (depth > 8) return 'standalone';
-    const n = nodeMap.get(nodeId);
-    if (!n) return 'standalone';
-    if (n.kind === 'Paper' || n.kind === 'PaperVersion') return n.id;
-    const parentId = parentMap.get(nodeId);
-    if (parentId) return findPaperRoot(parentId, depth + 1);
-    return 'standalone';
-  };
-
-  const clusters = new Map<string, GraphViewportNode[]>();
-  for (const node of nodes) {
-    const root = findPaperRoot(node.id);
-    const list = clusters.get(root) ?? [];
-    list.push(node);
-    clusters.set(root, list);
-  }
-
-  const clusterEntries = [...clusters.entries()].sort(([aKey], [bKey]) => {
-    if (aKey === 'standalone') return 1;
-    if (bKey === 'standalone') return -1;
-    return aKey.localeCompare(bKey);
-  });
-
-  let currentY = 36;
-  const flowNodes: AnyFlowNode[] = [];
-  const MAX_ROWS_PER_COL = isCompact ? 10 : 8;
-
-  for (const [, clusterNodes] of clusterEntries) {
-    const activeKindsInCluster = [...new Set(clusterNodes.map((node) => node.kind))].sort(
-      (left, right) => (kindColumns[left] ?? 0) - (kindColumns[right] ?? 0),
-    );
-
-    const kindBaseCol = new Map<EvidenceEntityType, number>();
-    let totalClusterCols = 0;
-    for (const kind of activeKindsInCluster) {
-      kindBaseCol.set(kind, totalClusterCols);
-      const count = clusterNodes.filter((node) => node.kind === kind).length;
-      totalClusterCols += Math.max(1, Math.ceil(count / MAX_ROWS_PER_COL));
-    }
-
-    const kindItemCounters = new Map<EvidenceEntityType, number>();
-    let maxRowInCluster = 1;
-
-    const sortedNodes = [...clusterNodes].sort((left, right) => {
-      const colDiff = (kindColumns[left.kind] ?? 0) - (kindColumns[right.kind] ?? 0);
-      return (
-        colDiff ||
-        left.label.localeCompare(right.label) ||
-        left.id.localeCompare(right.id)
-      );
-    });
-
-    const colWidth = isCompact ? (totalClusterCols <= 2 ? 205 : 225) : (totalClusterCols <= 2 ? 340 : 380);
-    const rowHeight = isCompact ? 58 : 150;
-    const clusterGap = isCompact ? 28 : 48;
-
-    for (const node of sortedNodes) {
-      const baseCol = kindBaseCol.get(node.kind) ?? 0;
-      const itemIdx = kindItemCounters.get(node.kind) ?? 0;
-      kindItemCounters.set(node.kind, itemIdx + 1);
-
-      const subCol = Math.floor(itemIdx / MAX_ROWS_PER_COL);
-      const row = itemIdx % MAX_ROWS_PER_COL;
-      const colIndex = baseCol + subCol;
-
-      if (row + 1 > maxRowInCluster) maxRowInCluster = row + 1;
-
-      flowNodes.push({
-        id: node.id,
-        type: 'evidence',
-        position: { x: 36 + colIndex * colWidth, y: currentY + row * rowHeight },
-        data: { ...node, isCompact },
-        draggable: false,
-        selectable: true,
-        focusable: true,
-        ariaRole: 'button',
-        ariaLabel: `${node.kind}: ${node.label}. ${node.expression}`,
-      });
-    }
-
-    currentY += maxRowInCluster * rowHeight + clusterGap;
-  }
-
-  return flowNodes;
-}
-
-// Option 3: Section Swimlanes / Sub-flow Groups (Obsidian Canvas / Open Design)
-function layoutNodes(
-  nodes: GraphViewportNode[],
-  edges: GraphViewportEdge[] = [],
-  isCompact = false,
-): AnyFlowNode[] {
-  const hasEquations = nodes.some((n) => n.kind === 'Equation');
-  if (!hasEquations) {
-    return layoutGridFallback(nodes, edges, isCompact);
-  }
-
-  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
-
-  // 1. Map equations to parent section
-  const eqParentSection = new Map<string, string>();
-  for (const edge of edges) {
-    if (edge.relation === 'contains') {
-      const src = nodeMap.get(edge.source);
-      const tgt = nodeMap.get(edge.target);
-      if (src?.kind === 'Section' && tgt?.kind === 'Equation') {
-        eqParentSection.set(tgt.id, src.id);
-      }
-    }
-  }
-
-  // 2. Map symbols defined by equations
-  const eqDefinedSymbols = new Map<string, GraphViewportNode[]>();
-  for (const edge of edges) {
-    if (edge.relation === 'defines') {
-      const src = nodeMap.get(edge.source);
-      const tgt = nodeMap.get(edge.target);
-      if (src?.kind === 'Equation' && tgt?.kind === 'Symbol') {
-        const list = eqDefinedSymbols.get(src.id) ?? [];
-        list.push(tgt);
-        eqDefinedSymbols.set(src.id, list);
-      }
-    }
-  }
-
-  // 3. Group equations by Section
-  const sectionEquations = new Map<string, GraphViewportNode[]>();
-  for (const node of nodes) {
-    if (node.kind === 'Equation') {
-      let secId = eqParentSection.get(node.id);
-      if (!secId && node.meta) {
-        const secMatch = node.meta.match(/#?(S\d+)/i);
-        if (secMatch) {
-          const matchedSec = nodes.find(
-            (n) => n.kind === 'Section' && (n.id.includes(secMatch[1]) || n.label.includes(secMatch[1]))
-          );
-          if (matchedSec) secId = matchedSec.id;
-        }
-      }
-      secId = secId ?? 'core-derivations';
-      const list = sectionEquations.get(secId) ?? [];
-      list.push(node);
-      sectionEquations.set(secId, list);
-    }
-  }
-
-  // Order sections by natural appearance in nodes
-  const orderedSections = [...sectionEquations.keys()].sort((a, b) => {
-    if (a === 'core-derivations') return 1;
-    if (b === 'core-derivations') return -1;
-    const idxA = nodes.findIndex((n) => n.id === a);
-    const idxB = nodes.findIndex((n) => n.id === b);
-    return idxA - idxB;
-  });
-
-  const flowNodes: AnyFlowNode[] = [];
-  const swimlaneGroupNodes: AnyFlowNode[] = [];
-  const assignedNodeIds = new Set<string>();
-
-  const cardWidth = isCompact ? 220 : 320;
-  const cardHeight = isCompact ? 58 : 155;
-  const cardGap = isCompact ? 14 : 20;
-  const swimlanePadX = 20;
-  const swimlanePadTop = 82;
-  const swimlanePadBottom = 24;
-  const swimlaneGap = isCompact ? 36 : 48;
-
-  const rootNodes = nodes.filter((n) => n.kind === 'Paper' || n.kind === 'PaperVersion');
-  const hasPaperRoot = rootNodes.length > 0;
-  const laneInnerWidth = cardWidth;
-  const laneTotalWidth = laneInnerWidth + swimlanePadX * 2;
-  const paperColWidth = laneTotalWidth;
-
-  // Maximum columns per row to maintain a balanced 16:9 ratio and prevent canvas stretching
-  const MAX_LANES_PER_ROW = 4;
-  const row0Lanes = hasPaperRoot ? 3 : MAX_LANES_PER_ROW;
-
-  const getSectionGridPos = (idx: number) => {
-    if (hasPaperRoot) {
-      if (idx < row0Lanes) {
-        return { row: 0, col: idx };
-      }
-      const adj = idx - row0Lanes;
-      return {
-        row: 1 + Math.floor(adj / MAX_LANES_PER_ROW),
-        col: adj % MAX_LANES_PER_ROW,
-      };
-    }
-    return {
-      row: Math.floor(idx / MAX_LANES_PER_ROW),
-      col: idx % MAX_LANES_PER_ROW,
-    };
-  };
-
-  // Precalculate height for each row
-  const rowMaxHeights = new Map<number, number>();
-  orderedSections.forEach((secId, idx) => {
-    const eqs = sectionEquations.get(secId) ?? [];
-    const laneTotalHeight = swimlanePadTop + eqs.length * (cardHeight + cardGap) + swimlanePadBottom;
-    const { row } = getSectionGridPos(idx);
-    const currMax = rowMaxHeights.get(row) ?? 0;
-    if (laneTotalHeight > currMax) {
-      rowMaxHeights.set(row, laneTotalHeight);
-    }
-  });
-
-  // Calculate rowStartY for each row
-  const totalRows = orderedSections.length > 0 ? getSectionGridPos(orderedSections.length - 1).row + 1 : 0;
-  const rowStartY = new Map<number, number>();
-  let cumY = 40;
-  for (let r = 0; r < Math.max(1, totalRows); r++) {
-    rowStartY.set(r, cumY);
-    cumY += (rowMaxHeights.get(r) ?? 380) + swimlaneGap;
-  }
-
-  // 4. Preceding Column: Source Paper swimlane (anchor at left of Row 0)
-  if (hasPaperRoot) {
-    const paperStartY = rowStartY.get(0) ?? 40;
-    const paperHeight = swimlanePadTop + rootNodes.length * (cardHeight + cardGap) + swimlanePadBottom;
-    swimlaneGroupNodes.push({
-      id: 'swimlane-paper-root',
-      type: 'sectionGroup',
-      position: { x: 36, y: paperStartY },
-      style: { width: paperColWidth, height: paperHeight },
-      data: {
-        title: 'Source Paper',
-        count: rootNodes.length,
-        sectionId: 'paper-root',
-      },
-      draggable: false,
-      selectable: false,
-      focusable: false,
-      zIndex: -1,
-    } as AnyFlowNode);
-
-    rootNodes.forEach((node, idx) => {
-      assignedNodeIds.add(node.id);
-      flowNodes.push({
-        id: node.id,
-        type: 'evidence',
-        position: { x: 36 + swimlanePadX, y: paperStartY + swimlanePadTop + idx * (cardHeight + cardGap) },
-        data: { ...node, isCompact: true },
-        draggable: false,
-        selectable: true,
-        focusable: true,
-        ariaRole: 'button',
-        ariaLabel: `${node.kind}: ${node.label}. ${node.expression}`,
-      });
-    });
-  }
-
-  // 5. Section Swimlanes for Equations & Embedded Symbol Chips
-  orderedSections.forEach((secId, idx) => {
-    const eqs = sectionEquations.get(secId) ?? [];
-    const secNode = nodeMap.get(secId);
-    let title = 'Core Derivations';
-    if (secNode) {
-      title = secNode.label || secNode.expression || 'Section';
-      assignedNodeIds.add(secNode.id);
-    }
-
-    const { row, col } = getSectionGridPos(idx);
-    const startY = rowStartY.get(row) ?? 40;
-    const xBase = 36 + (row === 0 && hasPaperRoot ? paperColWidth + swimlaneGap : 0);
-    const startX = xBase + col * (laneTotalWidth + swimlaneGap);
-
-    eqs.forEach((eq, curRow) => {
-      assignedNodeIds.add(eq.id);
-      const syms = (eqDefinedSymbols.get(eq.id) ?? []).filter((s) => nodeMap.has(s.id));
-      syms.forEach((s) => assignedNodeIds.add(s.id));
-
-      const inCardSymbols: InCardSymbol[] = syms.map((s) => ({
-        id: s.id,
-        label: s.label,
-        expression: s.expression,
-      }));
-
-      const eqY = startY + swimlanePadTop + curRow * (cardHeight + cardGap);
-      flowNodes.push({
-        id: eq.id,
-        type: 'evidence',
-        position: {
-          x: startX + swimlanePadX,
-          y: eqY,
-        },
-        data: {
-          ...eq,
-          isCompact,
-          symbols: inCardSymbols,
-          sectionId: secId,
-        },
-        draggable: false,
-        selectable: true,
-        focusable: true,
-        ariaRole: 'button',
-        ariaLabel: `${eq.kind}: ${eq.label}. ${eq.expression}`,
-      });
-    });
-
-    const laneTotalHeight = swimlanePadTop + eqs.length * (cardHeight + cardGap) + swimlanePadBottom;
-
-    swimlaneGroupNodes.push({
-      id: `swimlane-${secId}`,
-      type: 'sectionGroup',
-      position: { x: startX, y: startY },
-      style: { width: laneTotalWidth, height: laneTotalHeight },
-      data: {
-        title,
-        count: eqs.length,
-        sectionId: secId,
-      },
-      draggable: false,
-      selectable: false,
-      focusable: false,
-      zIndex: -1,
-    } as AnyFlowNode);
-  });
-
-  // Rule 11 (ui-craft): Empty sections earn no canvas space.
-  // They are fully browsable in the Left Sidebar ("Extracted Structure").
-  for (const node of nodes) {
-    if (node.kind === 'Section') {
-      assignedNodeIds.add(node.id);
-    }
-  }
-
-  // 6. Remaining unassigned nodes (Assumptions, Claims, Hypotheses, etc.)
-  const remainingNodes = nodes.filter((n) => !assignedNodeIds.has(n.id));
-  if (remainingNodes.length > 0) {
-    let maxX = 36;
-    for (const fn of flowNodes) {
-      const w = fn.type === 'sectionGroup' ? ((fn.style?.width as number) || laneTotalWidth) : cardWidth;
-      if (fn.position.x + w > maxX) {
-        maxX = fn.position.x + w;
-      }
-    }
-    const rightClusterX = maxX + swimlaneGap;
-    remainingNodes.forEach((node, idx) => {
-      const y = 40 + idx * (cardHeight + cardGap);
-      flowNodes.push({
-        id: node.id,
-        type: 'evidence',
-        position: { x: rightClusterX, y },
-        data: { ...node, isCompact },
-        draggable: false,
-        selectable: true,
-        focusable: true,
-        ariaRole: 'button',
-        ariaLabel: `${node.kind}: ${node.label}. ${node.expression}`,
-      });
-    });
-  }
-
-  return [...swimlaneGroupNodes, ...flowNodes];
-}
-
 function FitViewWatcher({
   nodeCount,
   filterKey,
@@ -692,20 +729,23 @@ function FitViewWatcher({
   const hasFittedRef = useRef(false);
 
   useEffect(() => {
-    if (!nodesInitialized || nodeCount === 0) return;
+    if (nodeCount === 0) return;
 
     const timer = setTimeout(() => {
-      const stage = typeof document !== 'undefined' ? document.querySelector('.react-flow-stage') : null;
+      const stage =
+        typeof document !== 'undefined'
+          ? document.querySelector('.react-flow-stage')
+          : null;
       if (stage && (stage.clientWidth === 0 || stage.clientHeight === 0)) return;
 
       void fitView({
         padding: 0.12,
-        maxZoom: 1.05,
-        minZoom: 0.25,
-        duration: hasFittedRef.current ? 300 : 0,
+        maxZoom: 1.0,
+        minZoom: 0.22,
+        duration: hasFittedRef.current ? 240 : 0,
       });
       hasFittedRef.current = true;
-    }, 200);
+    }, 120);
 
     return () => clearTimeout(timer);
   }, [nodesInitialized, nodeCount, filterKey, fitView]);
@@ -715,14 +755,17 @@ function FitViewWatcher({
     const handleResize = () => {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
-        const stage = typeof document !== 'undefined' ? document.querySelector('.react-flow-stage') : null;
+        const stage =
+          typeof document !== 'undefined'
+            ? document.querySelector('.react-flow-stage')
+            : null;
         if (stage && (stage.clientWidth === 0 || stage.clientHeight === 0)) return;
 
         void fitView({
-          padding: 0.12,
-          maxZoom: 1.05,
-          minZoom: 0.25,
-          duration: 250,
+          padding: 0.14,
+          maxZoom: 1.0,
+          minZoom: 0.22,
+          duration: 240,
         });
       }, 150);
     };
@@ -767,6 +810,7 @@ export default function EvidenceGraphViewport({
     });
     return () => cancelAnimationFrame(rafId);
   }, [isFullscreen]);
+
   const relations = useMemo(
     () => [...new Set(edges.map((edge) => edge.relation))].sort(),
     [edges],
@@ -847,9 +891,41 @@ export default function EvidenceGraphViewport({
     [edges, disabledRelations, visibleNodeIds],
   );
 
-  const baseLayoutNodes = useMemo(
-    () => layoutNodes(visibleNodes, edges, isCompactMode),
+  // Unified 2D model + instant synchronous first-paint layout + async Rust/WASM Worker execution.
+  const preparedModel = useMemo(
+    () => prepareUnified2DModel(visibleNodes, edges, isCompactMode),
     [visibleNodes, edges, isCompactMode],
+  );
+
+  const syncLayout = useMemo(
+    () => computeLayout2DFallback(preparedModel.input),
+    [preparedModel],
+  );
+
+  const [wasmLayoutState, setWasmLayoutState] = useState<{
+    model: Prepared2DModel;
+    result: Layout2DResult;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void computeLayout2DAsync(preparedModel.input).then((result) => {
+      if (!cancelled) {
+        setWasmLayoutState({ model: preparedModel, result });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [preparedModel]);
+
+  const activeLayout =
+    wasmLayoutState?.model === preparedModel ? wasmLayoutState.result : syncLayout;
+  const layoutEngine: LayoutEngineKind = activeLayout.engine;
+
+  const baseLayoutNodes = useMemo(
+    () => materializeFlowNodes(preparedModel, activeLayout, isCompactMode),
+    [preparedModel, activeLayout, isCompactMode],
   );
 
   const flowNodes = useMemo(
@@ -881,8 +957,8 @@ export default function EvidenceGraphViewport({
       }),
     [baseLayoutNodes, selectedId, activeNeighborNodeIds, onSelect],
   );
+
   const flowEdges = useMemo<Edge[]>(() => {
-    const isSwimlaneLayout = baseLayoutNodes.some((n) => n.type === 'sectionGroup');
     const nodePosMap = new Map<string, { x: number; y: number }>();
     const nodeKindMap = new Map<string, EvidenceEntityType>();
 
@@ -896,60 +972,44 @@ export default function EvidenceGraphViewport({
     const resultEdges: Edge[] = [];
     const connectedPairs = new Set<string>();
 
+    // 1. Authoritative real graph edges (semantic relations from Neo4j / snapshot).
     for (const edge of visibleEdges) {
       const srcPos = nodePosMap.get(edge.source);
       const tgtPos = nodePosMap.get(edge.target);
+      if (!srcPos || !tgtPos) continue;
 
-      // If either node is not rendered on canvas (e.g. empty section or in-card symbol),
-      // omit canvas edge to prevent dangling lines or React Flow warnings.
-      if (!srcPos || !tgtPos) {
-        continue;
-      }
+      const isContainment =
+        edge.relation === 'contains' || edge.relation === 'has_version';
+      // Structural containment is visually encoded by the frosted lane containers.
+      if (isContainment) continue;
 
-      const isContainment = edge.relation === 'contains' || edge.relation === 'has_version';
       const isHighlighted = activeEdgeIds !== null && activeEdgeIds.has(edge.id);
       const isDimmed = activeEdgeIds !== null && !isHighlighted;
-
-      // In Section Swimlanes view, structural containment edges (paper->section, section->eq)
-      // are represented by the physical swimlane containers.
-      // Always omit containment edges in swimlane view to eliminate self-loops and crossing clutter.
-      if (isSwimlaneLayout && isContainment) {
-        continue;
-      }
-
       connectedPairs.add(`${edge.source}->${edge.target}`);
 
-      const stroke = edgeColors[edge.relation] ?? '#94a3b8';
-      let sourceHandle: string | undefined = undefined;
-      let targetHandle: string | undefined = undefined;
-      let edgeType: string = 'default';
+      const stroke = edgeColors[edge.relation] ?? '#64748b';
+      const dx = tgtPos.x - srcPos.x;
+      const dy = tgtPos.y - srcPos.y;
+      let sourceHandle: string;
+      let targetHandle: string;
+      let edgeType: string;
 
-      if (srcPos && tgtPos) {
-        const dx = tgtPos.x - srcPos.x;
-        const dy = tgtPos.y - srcPos.y;
-
-        if (edge.relation === 'defines' || nodeKindMap.get(edge.target) === 'Symbol') {
-          sourceHandle = 'right';
-          targetHandle = 'left';
-          edgeType = 'smoothstep';
-        } else if (Math.abs(dx) < 60) {
-          if (dy >= 0) {
-            sourceHandle = 'bottom';
-            targetHandle = 'top';
-          } else {
-            sourceHandle = 'top';
-            targetHandle = 'bottom';
-          }
-          edgeType = 'smoothstep';
-        } else if (dx > 0) {
-          sourceHandle = 'right';
-          targetHandle = 'left';
-          edgeType = 'default';
-        } else {
-          sourceHandle = 'left';
-          targetHandle = 'right';
-          edgeType = 'default';
-        }
+      if (edge.relation === 'defines' || nodeKindMap.get(edge.target) === 'Symbol') {
+        sourceHandle = 'right';
+        targetHandle = 'left';
+        edgeType = 'smoothstep';
+      } else if (Math.abs(dx) < 80) {
+        sourceHandle = dy >= 0 ? 'bottom' : 'top';
+        targetHandle = dy >= 0 ? 'top' : 'bottom';
+        edgeType = 'smoothstep';
+      } else if (dx > 0) {
+        sourceHandle = 'right';
+        targetHandle = 'left';
+        edgeType = 'default';
+      } else {
+        sourceHandle = 'left';
+        targetHandle = 'right';
+        edgeType = 'default';
       }
 
       resultEdges.push({
@@ -960,24 +1020,21 @@ export default function EvidenceGraphViewport({
         targetHandle,
         type: edgeType,
         label: isHighlighted ? relationLabel(edge.relation) : undefined,
-        markerEnd: isContainment
-          ? undefined
-          : {
-              type: MarkerType.ArrowClosed,
-              color: stroke,
-              width: 14,
-              height: 14,
-            },
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          color: stroke,
+          width: 14,
+          height: 14,
+        },
         selectable: true,
         focusable: true,
-        animated: edge.relation === 'supersedes' || (isHighlighted && !isContainment),
-        zIndex: isHighlighted ? 20 : isDimmed ? 1 : 10,
+        animated: edge.relation === 'supersedes' || isHighlighted,
+        zIndex: isHighlighted ? 20 : isDimmed ? 1 : 12,
         style: {
           stroke,
-          strokeWidth: isHighlighted ? 2.5 : isDimmed ? 1.1 : 1.8,
-          strokeDasharray: isContainment ? '4 4' : undefined,
-          opacity: isDimmed ? 0.34 : isContainment ? 0.55 : 1.0,
-          transition: 'opacity 0.2s ease, stroke-width 0.2s ease',
+          strokeWidth: isHighlighted ? 2.5 : isDimmed ? 1.15 : 1.9,
+          opacity: isDimmed ? 0.25 : 0.94,
+          transition: 'opacity 0.18s ease, stroke-width 0.18s ease',
         },
         labelStyle: {
           fill: '#0f172a',
@@ -988,7 +1045,7 @@ export default function EvidenceGraphViewport({
           fill: '#ffffff',
           fillOpacity: 1.0,
           stroke,
-          strokeWidth: 1.5,
+          strokeWidth: 1.4,
         },
         labelBgPadding: [3, 7] as [number, number],
         labelBgBorderRadius: 6,
@@ -996,125 +1053,128 @@ export default function EvidenceGraphViewport({
       });
     }
 
-    // In Section Swimlanes view: Synthesize the clean intra-section and cross-section
-    // derivation flow matching Option Section Swimlanes
-    if (isSwimlaneLayout) {
-      const secEqMap = new Map<string, string[]>();
-      for (const fn of baseLayoutNodes) {
-        if (fn.type === 'sectionGroup') {
-          const secId = (fn.data as SectionGroupData).sectionId;
-          if (secId) secEqMap.set(secId, []);
+    // 2. Subtle dashed reading-order guides (visually distinct from real mathematical derivations!).
+    const secEqMap = new Map<string, string[]>();
+    for (const fn of baseLayoutNodes) {
+      if (fn.type === 'sectionGroup') {
+        const secId = (fn.data as SectionGroupData).sectionId;
+        if (secId) secEqMap.set(secId, []);
+      }
+    }
+    for (const fn of baseLayoutNodes) {
+      if (
+        fn.type === 'evidence' &&
+        (fn.data as EvidenceNodeData).kind === 'Equation'
+      ) {
+        const secId = (fn.data as EvidenceNodeData).sectionId;
+        if (secId && secEqMap.has(secId)) {
+          secEqMap.get(secId)!.push(fn.id);
         }
       }
-      for (const fn of baseLayoutNodes) {
-        if (fn.type === 'evidence' && (fn.data as EvidenceNodeData).kind === 'Equation') {
-          const secId = (fn.data as EvidenceNodeData & { sectionId?: string }).sectionId;
-          if (secId && secEqMap.has(secId)) {
-            secEqMap.get(secId)!.push(fn.id);
-          }
+    }
+
+    const activeSectionIds = [...secEqMap.keys()].filter(
+      (sid) => (secEqMap.get(sid)?.length ?? 0) > 0,
+    );
+    const guideStroke = '#94a3b8';
+
+    if (showIntraSectionDerivations) {
+      activeSectionIds.forEach((secId) => {
+        const eqIds = secEqMap.get(secId) ?? [];
+        for (let i = 0; i < eqIds.length - 1; i++) {
+          const srcId = eqIds[i];
+          const tgtId = eqIds[i + 1];
+          const pairKey = `${srcId}->${tgtId}`;
+          const revKey = `${tgtId}->${srcId}`;
+          if (connectedPairs.has(pairKey) || connectedPairs.has(revKey)) continue;
+
+          const srcPos = nodePosMap.get(srcId);
+          const tgtPos = nodePosMap.get(tgtId);
+          // Skip vertical connector across folded sub-columns inside the same lane.
+          if (srcPos && tgtPos && Math.abs(tgtPos.x - srcPos.x) > 80) continue;
+
+          connectedPairs.add(pairKey);
+          const isHighlighted =
+            activeFocusId !== null &&
+            (activeFocusId === srcId || activeFocusId === tgtId);
+          const isDimmed = activeFocusId !== null && !isHighlighted;
+
+          resultEdges.push({
+            id: `reading-seq-${srcId}-${tgtId}`,
+            source: srcId,
+            target: tgtId,
+            sourceHandle: 'bottom',
+            targetHandle: 'top',
+            type: 'smoothstep',
+            markerEnd: {
+              type: MarkerType.Arrow,
+              color: isHighlighted ? '#475569' : guideStroke,
+              width: 13,
+              height: 13,
+            },
+            selectable: false,
+            focusable: false,
+            zIndex: isHighlighted ? 14 : 2,
+            style: {
+              stroke: isHighlighted ? '#475569' : guideStroke,
+              strokeWidth: isHighlighted ? 1.8 : 1.35,
+              strokeDasharray: '4 4',
+              opacity: isDimmed ? 0.12 : isHighlighted ? 0.85 : 0.45,
+              transition: 'opacity 0.18s ease',
+            },
+            ariaLabel: 'document reading sequence',
+          });
         }
-      }
+      });
+    }
 
-      const activeSectionIds = [...secEqMap.keys()].filter(
-        (sid) => (secEqMap.get(sid)?.length ?? 0) > 0,
-      );
-      const derivationColor = '#059669'; // Emerald derivation line
+    if (showCrossSectionDerivations) {
+      for (let s = 0; s < activeSectionIds.length - 1; s++) {
+        const currEqs = secEqMap.get(activeSectionIds[s]) ?? [];
+        const nextEqs = secEqMap.get(activeSectionIds[s + 1]) ?? [];
+        if (currEqs.length === 0 || nextEqs.length === 0) continue;
 
-      // Intra-swimlane sequential derivation: Eq 0 -> Eq 1 -> Eq 2 (vertical straight down)
-      if (showIntraSectionDerivations) {
-        activeSectionIds.forEach((secId) => {
-          const eqIds = secEqMap.get(secId) ?? [];
-          for (let i = 0; i < eqIds.length - 1; i++) {
-            const srcId = eqIds[i];
-            const tgtId = eqIds[i + 1];
-            const pairKey = `${srcId}->${tgtId}`;
-            const revKey = `${tgtId}->${srcId}`;
-            if (!connectedPairs.has(pairKey) && !connectedPairs.has(revKey)) {
-              connectedPairs.add(pairKey);
-              const edgeId = `swimlane-seq-${srcId}-${tgtId}`;
-              const isHighlighted =
-                activeFocusId !== null &&
-                (activeFocusId === srcId || activeFocusId === tgtId);
-              const isDimmed = activeFocusId !== null && !isHighlighted;
+        const lastEqId = currEqs[currEqs.length - 1];
+        const firstNextEqId = nextEqs[0];
+        const bridgeKey = `${lastEqId}->${firstNextEqId}`;
+        if (connectedPairs.has(bridgeKey)) continue;
 
-              resultEdges.push({
-                id: edgeId,
-                source: srcId,
-                target: tgtId,
-                sourceHandle: 'bottom',
-                targetHandle: 'top',
-                type: 'smoothstep',
-                markerEnd: {
-                  type: MarkerType.ArrowClosed,
-                  color: derivationColor,
-                  width: 14,
-                  height: 14,
-                },
-                selectable: true,
-                focusable: true,
-                zIndex: isHighlighted ? 20 : isDimmed ? 1 : 10,
-                style: {
-                  stroke: derivationColor,
-                  strokeWidth: isHighlighted ? 2.5 : isDimmed ? 0.9 : 2.0,
-                  opacity: isDimmed ? 0.08 : 0.95,
-                  transition: 'opacity 0.2s ease, stroke-width 0.2s ease',
-                },
-                ariaLabel: 'intra-section derivation',
-              });
-            }
-          }
+        const lastPos = nodePosMap.get(lastEqId);
+        const nextPos = nodePosMap.get(firstNextEqId);
+        // Never slash diagonally backward across row bands.
+        if (!lastPos || !nextPos || nextPos.x <= lastPos.x) continue;
+
+        connectedPairs.add(bridgeKey);
+        const isHighlighted =
+          activeFocusId !== null &&
+          (activeFocusId === lastEqId || activeFocusId === firstNextEqId);
+        const isDimmed = activeFocusId !== null && !isHighlighted;
+
+        resultEdges.push({
+          id: `reading-bridge-${lastEqId}-${firstNextEqId}`,
+          source: lastEqId,
+          target: firstNextEqId,
+          sourceHandle: 'right',
+          targetHandle: 'left',
+          type: 'default',
+          markerEnd: {
+            type: MarkerType.Arrow,
+            color: isHighlighted ? '#0f766e' : '#64748b',
+            width: 13,
+            height: 13,
+          },
+          selectable: false,
+          focusable: false,
+          zIndex: isHighlighted ? 14 : 2,
+          style: {
+            stroke: isHighlighted ? '#0f766e' : '#64748b',
+            strokeWidth: isHighlighted ? 1.8 : 1.3,
+            strokeDasharray: '6 5',
+            opacity: isDimmed ? 0.1 : isHighlighted ? 0.85 : 0.36,
+            transition: 'opacity 0.18s ease',
+          },
+          ariaLabel: 'section reading transition',
         });
-      }
-
-      // Cross-swimlane pipeline bridge: last Eq of Section K -> first Eq of Section K+1 (smooth horizontal bezier)
-      if (showCrossSectionDerivations) {
-        for (let s = 0; s < activeSectionIds.length - 1; s++) {
-          const currEqs = secEqMap.get(activeSectionIds[s]) ?? [];
-          const nextEqs = secEqMap.get(activeSectionIds[s + 1]) ?? [];
-          if (currEqs.length > 0 && nextEqs.length > 0) {
-            const lastEqId = currEqs[currEqs.length - 1];
-            const firstNextEqId = nextEqs[0];
-            const bridgeKey = `${lastEqId}->${firstNextEqId}`;
-            if (!connectedPairs.has(bridgeKey)) {
-              connectedPairs.add(bridgeKey);
-              const edgeId = `swimlane-bridge-${lastEqId}-${firstNextEqId}`;
-              const bridgeColor = '#0d9488'; // Teal
-              const isHighlighted =
-                activeFocusId !== null &&
-                (activeFocusId === lastEqId || activeFocusId === firstNextEqId);
-              const isDimmed = activeFocusId !== null && !isHighlighted;
-
-              const lastPos = nodePosMap.get(lastEqId);
-              const nextPos = nodePosMap.get(firstNextEqId);
-              const isRowWrap = Boolean(lastPos && nextPos && nextPos.x < lastPos.x);
-
-              resultEdges.push({
-                id: edgeId,
-                source: lastEqId,
-                target: firstNextEqId,
-                sourceHandle: isRowWrap ? 'bottom' : 'right',
-                targetHandle: isRowWrap ? 'top' : 'left',
-                type: isRowWrap ? 'smoothstep' : 'default',
-                markerEnd: {
-                  type: MarkerType.ArrowClosed,
-                  color: bridgeColor,
-                  width: 15,
-                  height: 15,
-                },
-                selectable: true,
-                focusable: true,
-                zIndex: isHighlighted ? 20 : isDimmed ? 1 : 12,
-                style: {
-                  stroke: bridgeColor,
-                  strokeWidth: isHighlighted ? 2.8 : isDimmed ? 0.9 : 2.2,
-                  opacity: isDimmed ? 0.08 : 0.95,
-                  transition: 'opacity 0.2s ease, stroke-width 0.2s ease',
-                },
-                ariaLabel: 'cross-section derivation bridge',
-              });
-            }
-          }
-        }
       }
     }
 
@@ -1148,7 +1208,7 @@ export default function EvidenceGraphViewport({
       if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
       hoverTimerRef.current = setTimeout(() => {
         setHoveredNodeId(node.id);
-      }, 50);
+      }, 45);
     },
     [],
   );
@@ -1156,7 +1216,7 @@ export default function EvidenceGraphViewport({
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
     hoverTimerRef.current = setTimeout(() => {
       setHoveredNodeId(null);
-    }, 50);
+    }, 45);
   }, []);
 
   useEffect(() => {
@@ -1164,6 +1224,7 @@ export default function EvidenceGraphViewport({
       if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
     };
   }, []);
+
   const toggleRelation = useCallback(
     (relation: EvidenceRelationType, checked: boolean) => {
       setDisabledRelations((current) => {
@@ -1175,6 +1236,7 @@ export default function EvidenceGraphViewport({
     },
     [],
   );
+
   const handleGraphKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(event.key)) {
@@ -1205,9 +1267,11 @@ export default function EvidenceGraphViewport({
     return (
       <div className="persisted-graph-empty">
         <strong>{hasSnapshot ? 'No equation evidence in this snapshot' : 'No persisted graph yet'}</strong>
-        <span>{hasSnapshot
-          ? 'This paper has no extracted equations. Its source and lineage records remain available.'
-          : 'Import an arXiv HTML paper to create the first evidence snapshot.'}</span>
+        <span>
+          {hasSnapshot
+            ? 'This paper has no extracted equations. Its source and lineage records remain available.'
+            : 'Import an arXiv HTML paper to create the first evidence snapshot.'}
+        </span>
       </div>
     );
   }
@@ -1236,6 +1300,8 @@ export default function EvidenceGraphViewport({
             size="sm"
             className={`view-mode-btn ${viewMode === '3d' ? 'is-active-3d' : ''}`}
             onClick={() => setViewMode('3d')}
+            onMouseEnter={prefetch3DViewport}
+            onFocus={prefetch3DViewport}
             aria-pressed={viewMode === '3d'}
           >
             <Orbit size={14} aria-hidden="true" />
@@ -1300,7 +1366,7 @@ export default function EvidenceGraphViewport({
               </div>
             </fieldset>
             <fieldset>
-              <legend>Derivation Flow</legend>
+              <legend>Reading Guides</legend>
               <div className="graph-filter-options">
                 <label htmlFor="filter-flow-intra">
                   <Checkbox
@@ -1311,7 +1377,7 @@ export default function EvidenceGraphViewport({
                       setShowIntraSectionDerivations(checked === true)
                     }
                   />
-                  Intra-section derivations
+                  Intra-section sequence
                 </label>
                 <label htmlFor="filter-flow-cross">
                   <Checkbox
@@ -1322,7 +1388,7 @@ export default function EvidenceGraphViewport({
                       setShowCrossSectionDerivations(checked === true)
                     }
                   />
-                  Cross-section bridges
+                  Cross-section reading guides
                 </label>
               </div>
             </fieldset>
@@ -1348,18 +1414,24 @@ export default function EvidenceGraphViewport({
             </div>
           </div>
         </details>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className={`density-toggle-btn ${isCompactMode ? 'is-active' : ''}`}
-          onClick={() => setIsCompactMode((prev) => !prev)}
-          title={isCompactMode ? 'Switch to Detailed Formula Cards' : 'Switch to Compact Nodes (Fits 72 nodes in view)'}
-          aria-label={isCompactMode ? 'Detailed Cards' : 'Compact Nodes'}
-        >
-          <LayoutGrid size={13} className="mr-1 text-indigo-500" />
-          <span>{isCompactMode ? 'Compact' : 'Detailed'}</span>
-        </Button>
+        {viewMode === '2d' ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className={`density-toggle-btn ${isCompactMode ? 'is-active' : ''}`}
+            onClick={() => setIsCompactMode((prev) => !prev)}
+            title={
+              isCompactMode
+                ? 'Switch to Detailed Formula Cards'
+                : 'Switch to Compact Nodes (Fits large graphs in view)'
+            }
+            aria-label={isCompactMode ? 'Detailed Cards' : 'Compact Nodes'}
+          >
+            <LayoutGrid size={13} className="mr-1 text-indigo-500" />
+            <span>{isCompactMode ? 'Compact' : 'Detailed'}</span>
+          </Button>
+        ) : null}
         {onToggleZen ? (
           <Button
             type="button"
@@ -1367,7 +1439,11 @@ export default function EvidenceGraphViewport({
             size="sm"
             className={`zen-toggle-btn ${isZenMode ? 'is-active' : ''}`}
             onClick={onToggleZen}
-            title={isZenMode ? 'Exit Zen Mode (Press Z)' : 'Zen Focus Mode: Hide Sidebars (Press Z)'}
+            title={
+              isZenMode
+                ? 'Exit Zen Mode (Press Z)'
+                : 'Zen Focus Mode: Hide Sidebars (Press Z)'
+            }
             aria-label={isZenMode ? 'Exit Zen Mode' : 'Zen Focus Mode'}
           >
             <Eye size={13} className="mr-1 text-sky-500" />
@@ -1399,8 +1475,8 @@ export default function EvidenceGraphViewport({
         {viewMode === '3d' ? (
           <Suspense
             fallback={
-              <div className="flex items-center justify-center w-full h-full min-h-0 text-slate-400 bg-[#020617]">
-                Loading 3D Galaxy…
+              <div className="flex items-center justify-center w-full h-full min-h-0 text-slate-300 bg-[#060b16] text-xs font-mono tracking-wide">
+                Loading 3D Scientific Observatory…
               </div>
             }
           >
@@ -1432,10 +1508,10 @@ export default function EvidenceGraphViewport({
               edgesFocusable
               elementsSelectable
               deleteKeyCode={null}
-              minZoom={0.25}
+              minZoom={0.22}
               maxZoom={2}
-              defaultViewport={{ x: 0, y: 0, zoom: 1 }}
-              fitViewOptions={{ padding: 0.12, maxZoom: 1.05 }}
+              fitView
+              fitViewOptions={{ padding: 0.12, maxZoom: 1.0 }}
               autoPanOnNodeFocus
               aria-describedby="graph-keyboard-help"
               onKeyDown={handleGraphKeyDown}
@@ -1452,21 +1528,38 @@ export default function EvidenceGraphViewport({
             >
               <FitViewWatcher
                 nodeCount={flowNodes.length}
-                filterKey={`${disabledKinds.size}-${disabledRelations.size}-${flowNodes.length}-${isCompactMode ? 'c' : 'd'}-${isZenMode ? 'z' : 'n'}`}
+                filterKey={`${disabledKinds.size}-${disabledRelations.size}-${flowNodes.length}-${isCompactMode ? 'c' : 'd'}-${isZenMode ? 'z' : 'n'}-${layoutEngine}`}
               />
               <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} />
               <Panel position="bottom-right" className="minimap-panel">
-                <button
-                  type="button"
-                  className="minimap-toggle-btn"
-                  onClick={() => setIsMinimapOpen((prev) => !prev)}
-                  aria-expanded={isMinimapOpen}
-                  title={isMinimapOpen ? 'Collapse Overview MiniMap' : 'Expand Overview MiniMap'}
-                >
-                  <Compass size={13} className="shrink-0 text-cyan-500" />
-                  <span>Overview</span>
-                  <span className="minimap-toggle-arrow">{isMinimapOpen ? '▼' : '▲'}</span>
-                </button>
+                <div className="minimap-panel-actions">
+                  {layoutEngine === 'rust-wasm' ? (
+                    <span
+                      className="layout-engine-badge"
+                      title={`Rust WebAssembly Worker layout (${activeLayout.durationMs.toFixed(1)} ms)`}
+                    >
+                      <Cpu size={11} aria-hidden="true" />
+                      WASM
+                    </span>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="minimap-toggle-btn"
+                    onClick={() => setIsMinimapOpen((prev) => !prev)}
+                    aria-expanded={isMinimapOpen}
+                    title={
+                      isMinimapOpen
+                        ? 'Collapse Overview MiniMap'
+                        : 'Expand Overview MiniMap'
+                    }
+                  >
+                    <Compass size={13} className="shrink-0 text-cyan-500" />
+                    <span>Overview</span>
+                    <span className="minimap-toggle-arrow">
+                      {isMinimapOpen ? '▼' : '▲'}
+                    </span>
+                  </button>
+                </div>
                 {isMinimapOpen ? (
                   <div className="minimap-container">
                     <MiniMap
@@ -1479,6 +1572,7 @@ export default function EvidenceGraphViewport({
                       maskStrokeWidth={2}
                       nodeBorderRadius={3}
                       nodeColor={(node) => {
+                        if (node.type === 'sectionGroup') return 'rgba(148, 163, 184, 0.25)';
                         const kind = (node.data as EvidenceNodeData).kind;
                         return minimapNodeColors[kind] ?? '#64748b';
                       }}
@@ -1492,7 +1586,11 @@ export default function EvidenceGraphViewport({
         )}
       </section>
 
-      {selectedId ? <a className="mobile-inspector-link" href="#formula-inspector">View selected evidence</a> : null}
+      {selectedId ? (
+        <a className="mobile-inspector-link" href="#formula-inspector">
+          View selected evidence
+        </a>
+      ) : null}
       <ol
         className={`mobile-graph-list ${viewMode === '3d' ? 'is-hidden' : ''}`}
         aria-label="Evidence nodes"

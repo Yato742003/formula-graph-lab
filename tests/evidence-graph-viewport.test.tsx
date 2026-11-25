@@ -252,10 +252,11 @@ describe('EvidenceGraphViewport', () => {
       />,
     );
 
-    // Bounded row height: With 24 sections wrapped at MAX_ROWS_PER_COL=8,
-    // rows are 0..7 instead of 0..23, keeping layout compact and wide
+    // Bounded row height: With 24 sections wrapped across sub-columns inside the
+    // unified Document Sections lane, all 25 evidence nodes render consistently.
     const renderedNodes = container.querySelectorAll('.flow-evidence-node');
     expect(renderedNodes.length).toBe(25);
+    expect(container.querySelectorAll('.section-swimlane-card').length).toBeGreaterThanOrEqual(2);
   });
 
   it('does not log unknown edge type warnings to console', () => {

@@ -2,6 +2,7 @@
 
 import * as THREE from 'three';
 import {
+  Cpu,
   Focus,
   Pause,
   Play,
@@ -13,33 +14,18 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
-import { renderFormulaHtml } from '@/app/evidence-graph-viewport';
-import type {
-  EvidenceEntityType,
-} from '@/lib/import-types';
-import type {
-  GraphViewportEdge,
-  GraphViewportNode,
-} from '@/app/evidence-graph-viewport';
-
-const geomCache = new Map<string, THREE.BufferGeometry>();
-function getMeshGeometry(kind: EvidenceEntityType, r: number): THREE.BufferGeometry {
-  const key = `${kind}-${r}`;
-  if (!geomCache.has(key)) {
-    let geom: THREE.BufferGeometry;
-    if (kind === 'Equation') {
-      geom = new THREE.OctahedronGeometry(r, 0);
-    } else if (kind === 'Symbol') {
-      geom = new THREE.TetrahedronGeometry(r, 0);
-    } else if (kind === 'Hypothesis') {
-      geom = new THREE.DodecahedronGeometry(r, 0);
-    } else {
-      geom = new THREE.SphereGeometry(r, 20, 20);
-    }
-    geomCache.set(key, geom);
-  }
-  return geomCache.get(key)!;
-}
+import {
+  renderFormulaHtml,
+  type GraphViewportEdge,
+  type GraphViewportNode,
+} from '@/lib/graph-formula-render';
+import {
+  computeLayout3DAsync,
+  computeLayout3DFallback,
+  type Layout3DInput,
+  type LayoutEngineKind,
+} from '@/lib/graph-layout-wasm';
+import type { EvidenceEntityType, EvidenceRelationType } from '@/lib/import-types';
 
 type Graph3DViewportProps = {
   nodes: GraphViewportNode[];
@@ -49,57 +35,197 @@ type Graph3DViewportProps = {
   isFullscreen?: boolean;
 };
 
-// Loki "God of Stories" Sacred Timeline & Lightning Palette
+type CameraPreset = 'overview' | 'roots' | 'canopy';
+type MeshFamily = 'sphere' | 'octahedron' | 'tetrahedron' | 'dodecahedron';
+
+// Scientific Observatory semantic palette aligned with DESIGN.md tokens on #060b16 slate.
 const kindColors: Record<EvidenceEntityType, number> = {
-  Paper: 0xffffff,        // Radiant white stellar nexus
-  PaperVersion: 0x67e8f9, // Electric cyan nexus
-  Section: 0x38bdf8,      // Neon sky blue
-  Equation: 0x22d3ee,     // Bright electric cyan plasma
-  Symbol: 0xa855f7,       // Cosmic violet spark
-  Assumption: 0xf43f5e,   // Rose-magenta rune
-  Claim: 0xc084fc,        // Ethereal purple
-  Concept: 0x34d399,      // Emerald lightning
-  Method: 0x38bdf8,       // Sky blue
-  Experiment: 0x67e8f9,   // Frost cyan
-  Hypothesis: 0xfbbf24,   // Golden lightning nexus
+  Paper: 0xf8fafc,        // Crisp observatory white
+  PaperVersion: 0x38bdf8, // Sky cyan
+  Section: 0x2dd4bf,      // Structural teal
+  Equation: 0x60a5fa,     // Evidence cobalt blue
+  Symbol: 0xa78bfa,       // Soft violet satellite
+  Assumption: 0xfb7185,   // Rose boundary
+  Claim: 0xe879f9,        // Review orchid
+  Concept: 0x34d399,      // Citation emerald
+  Method: 0x38bdf8,       // Method sky
+  Experiment: 0x22d3ee,   // Experiment cyan
+  Hypothesis: 0xf59e0b,   // Derivation / hypothesis amber
 };
 
 const kindRadius: Record<EvidenceEntityType, number> = {
-  Paper: 15,
-  PaperVersion: 12,
-  Section: 7.5,
-  Equation: 9,
-  Symbol: 5,
-  Assumption: 6,
-  Claim: 6.5,
-  Concept: 6.5,
-  Method: 7,
-  Experiment: 7,
-  Hypothesis: 12,
+  Paper: 1.72,
+  PaperVersion: 1.38,
+  Section: 0.78,
+  Equation: 1.24,
+  Symbol: 0.48,
+  Assumption: 0.74,
+  Claim: 0.86,
+  Concept: 0.82,
+  Method: 0.84,
+  Experiment: 0.82,
+  Hypothesis: 1.26,
 };
 
-type CameraPreset = 'overview' | 'roots' | 'canopy';
+const edgeHexColors: Record<EvidenceRelationType, number> = {
+  has_version: 0x38bdf8,
+  contains: 0x334155,
+  defines: 0x2dd4bf,
+  uses: 0x38bdf8,
+  assumes: 0xf59e0b,
+  cites: 0x64748b,
+  makes_claim: 0xc084fc,
+  about: 0xa78bfa,
+  derived_from: 0x60a5fa,
+  approximates: 0xf59e0b,
+  generalizes: 0x14b8a6,
+  equivalent_under: 0x22d3ee,
+  disagrees_with: 0xf87171,
+  supersedes: 0xf472b6,
+};
 
-// Deterministic pseudo-random generator
-function prng(seed: number) {
-  const x = Math.sin(seed) * 10000;
-  return x - Math.floor(x);
+function kindToLayoutCode(kind: EvidenceEntityType): number {
+  if (kind === 'Paper' || kind === 'PaperVersion') return 0;
+  if (kind === 'Section') return 1;
+  if (kind === 'Equation') return 2;
+  if (kind === 'Symbol') return 3;
+  if (kind === 'Claim' || kind === 'Hypothesis') return 5;
+  return 4;
 }
 
-// ponytail: cylindrical camera distance calculation, ceiling: clamped between [45, 520], upgrade: dynamic FOV scaling if multi-paper corpus spans >100 nodes
-function computeFramingDistance(
-  sizeX: number,
-  radiusYZ: number,
-  aspect: number,
-  fov: number,
-  padding = 1.08,
-): number {
-  const vFovRad = (fov * Math.PI) / 360;
-  const distY = radiusYZ / Math.tan(vFovRad);
-  const distX = (sizeX / 2) / (aspect * Math.tan(vFovRad));
-  const dist = Math.max(distX, distY) * padding;
-  return Math.min(520, Math.max(45, dist));
+function relationToLayoutCode(rel: EvidenceRelationType): number {
+  if (rel === 'contains' || rel === 'has_version') return 0;
+  if (rel === 'derived_from' || rel === 'generalizes' || rel === 'approximates') return 1;
+  if (rel === 'defines') return 2;
+  if (rel === 'uses') return 3;
+  if (rel === 'cites' || rel === 'disagrees_with' || rel === 'supersedes') return 4;
+  return 5;
 }
+
+function kindToMeshFamily(kind: EvidenceEntityType): MeshFamily {
+  if (kind === 'Equation') return 'octahedron';
+  if (kind === 'Symbol') return 'tetrahedron';
+  if (kind === 'Hypothesis' || kind === 'Claim' || kind === 'Assumption') {
+    return 'dodecahedron';
+  }
+  return 'sphere';
+}
+
+function buildLayout3DInput(
+  nodes: GraphViewportNode[],
+  edges: GraphViewportEdge[],
+): Layout3DInput {
+  const n = nodes.length;
+  const indexById = new Map<string, number>();
+  nodes.forEach((node, idx) => indexById.set(node.id, idx));
+
+  const nodeKinds = new Uint32Array(n);
+  const nodeParents = new Int32Array(n).fill(-1);
+  const nodeRootPapers = new Int32Array(n).fill(0);
+
+  const paperSlots = new Map<number, number>();
+  let slotCounter = 0;
+  for (let i = 0; i < n; i++) {
+    const code = kindToLayoutCode(nodes[i].kind);
+    nodeKinds[i] = code;
+    if (code === 0) {
+      paperSlots.set(i, slotCounter++);
+    }
+  }
+
+  // Build hierarchical parent links: Section->Paper, Equation->Section, Symbol->Equation.
+  const parentEdgePriority = (rel: EvidenceRelationType): number => {
+    if (rel === 'contains') return 3;
+    if (rel === 'defines') return 3;
+    if (rel === 'has_version') return 2;
+    if (rel === 'uses' || rel === 'makes_claim' || rel === 'about') return 1;
+    return 0;
+  };
+  const bestPriority = new Int8Array(n);
+
+  const edgeSrcList: number[] = [];
+  const edgeDstList: number[] = [];
+  const edgeCodeList: number[] = [];
+
+  for (const edge of edges) {
+    const u = indexById.get(edge.source);
+    const v = indexById.get(edge.target);
+    if (u === undefined || v === undefined || u === v) continue;
+    edgeSrcList.push(u);
+    edgeDstList.push(v);
+    edgeCodeList.push(relationToLayoutCode(edge.relation));
+
+    const prio = parentEdgePriority(edge.relation);
+    if (prio > bestPriority[v]) {
+      bestPriority[v] = prio;
+      nodeParents[v] = u;
+    }
+  }
+
+  // Fallback section matching via `#S\d+` anchor metadata if no explicit `contains` edge exists.
+  for (let i = 0; i < n; i++) {
+    if (nodeKinds[i] === 2 && nodeParents[i] === -1 && nodes[i].meta) {
+      const m = nodes[i].meta.match(/#?(S\d+)/i);
+      if (m) {
+        const secIdx = nodes.findIndex(
+          (candidate) =>
+            candidate.kind === 'Section' &&
+            (candidate.id.includes(m[1]) || candidate.label.includes(m[1])),
+        );
+        if (secIdx >= 0) nodeParents[i] = secIdx;
+      }
+    }
+  }
+
+  // Resolve owning paper slot for every node.
+  for (let i = 0; i < n; i++) {
+    let cur = i;
+    let depth = 0;
+    let slot = 0;
+    while (cur >= 0 && depth < 8) {
+      const found = paperSlots.get(cur);
+      if (found !== undefined) {
+        slot = found;
+        break;
+      }
+      cur = nodeParents[cur];
+      depth++;
+    }
+    nodeRootPapers[i] = slot;
+  }
+
+  return {
+    nodeKinds,
+    nodeParents,
+    nodeRootPapers,
+    edgeSrcs: new Uint32Array(edgeSrcList),
+    edgeDsts: new Uint32Array(edgeDstList),
+    edgeKindCodes: new Uint32Array(edgeCodeList),
+  };
+}
+
+type OrbitState = {
+  target: THREE.Vector3;
+  desiredTarget: THREE.Vector3;
+  theta: number;
+  desiredTheta: number;
+  phi: number;
+  desiredPhi: number;
+  radius: number;
+  desiredRadius: number;
+};
+
+type EdgeSegmentMeta = {
+  sourceIdx: number;
+  targetIdx: number;
+  sourceId: string;
+  targetId: string;
+  relation: EvidenceRelationType;
+  baseColor: THREE.Color;
+  baseIntensity: number;
+};
+
+const CURVE_SEGMENTS = 12;
 
 export default function Graph3DViewport({
   nodes,
@@ -109,29 +235,41 @@ export default function Graph3DViewport({
   isFullscreen = false,
 }: Graph3DViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const labelsLayerRef = useRef<HTMLDivElement>(null);
   const [hoveredNode, setHoveredNode] = useState<GraphViewportNode | null>(null);
   const [autoRotate, setAutoRotate] = useState(true);
-  const [timelineProgress, setTimelineProgress] = useState(100); // 0% to 100%
+  const [timelineProgress, setTimelineProgress] = useState(100);
   const [focusActive, setFocusActive] = useState(false);
+  const [layoutEngine, setLayoutEngine] = useState<LayoutEngineKind>('ts-fallback');
 
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const targetCamPosRef = useRef<THREE.Vector3 | null>(null);
-  const resetRotationRef = useRef<() => void>(() => {});
-  const framingRef = useRef({
-    overview: new THREE.Vector3(0, 0, 340),
-    roots: new THREE.Vector3(-100, 0, 240),
-    canopy: new THREE.Vector3(100, 0, 240),
+  const orbitRef = useRef<OrbitState>({
+    target: new THREE.Vector3(0, 0, 0),
+    desiredTarget: new THREE.Vector3(0, 0, 0),
+    theta: 0.62,
+    desiredTheta: 0.62,
+    phi: 1.18,
+    desiredPhi: 1.18,
+    radius: 56,
+    desiredRadius: 56,
   });
 
-  // Compute Ancestors & Descendants for Branch Focus Mode
+  const framingPresetsRef = useRef<{
+    overview: { target: THREE.Vector3; theta: number; phi: number; radius: number };
+    roots: { target: THREE.Vector3; theta: number; phi: number; radius: number };
+    canopy: { target: THREE.Vector3; theta: number; phi: number; radius: number };
+  }>({
+    overview: { target: new THREE.Vector3(0, 0, 0), theta: 0.62, phi: 1.18, radius: 56 },
+    roots: { target: new THREE.Vector3(-12, 0, 0), theta: -0.35, phi: 1.24, radius: 34 },
+    canopy: { target: new THREE.Vector3(10, 4, 0), theta: 1.15, phi: 0.92, radius: 38 },
+  });
+
+  // Compute lineage neighborhood for branch isolation.
   const { forwardAdj, backwardAdj } = useMemo(() => {
     const forward = new Map<string, Set<string>>();
     const backward = new Map<string, Set<string>>();
-
     for (const edge of edges) {
       if (!forward.has(edge.source)) forward.set(edge.source, new Set());
       forward.get(edge.source)!.add(edge.target);
-
       if (!backward.has(edge.target)) backward.set(edge.target, new Set());
       backward.get(edge.target)!.add(edge.source);
     }
@@ -140,72 +278,56 @@ export default function Graph3DViewport({
 
   const focusedLineage = useMemo<Set<string> | null>(() => {
     if (!selectedId || !focusActive) return null;
-
     const result = new Set<string>([selectedId]);
-
-    // Gather ancestors
     const queueUp = [selectedId];
     while (queueUp.length > 0) {
       const cur = queueUp.shift()!;
-      const parents = backwardAdj.get(cur);
-      if (parents) {
-        for (const p of parents) {
-          if (!result.has(p)) {
-            result.add(p);
-            queueUp.push(p);
-          }
+      for (const p of backwardAdj.get(cur) ?? []) {
+        if (!result.has(p)) {
+          result.add(p);
+          queueUp.push(p);
         }
       }
     }
-
-    // Gather descendants
     const queueDown = [selectedId];
     while (queueDown.length > 0) {
       const cur = queueDown.shift()!;
-      const children = forwardAdj.get(cur);
-      if (children) {
-        for (const c of children) {
-          if (!result.has(c)) {
-            result.add(c);
-            queueDown.push(c);
-          }
+      for (const c of forwardAdj.get(cur) ?? []) {
+        if (!result.has(c)) {
+          result.add(c);
+          queueDown.push(c);
         }
       }
     }
-
     return result;
   }, [selectedId, focusActive, forwardAdj, backwardAdj]);
 
-  const nodeMeshMapRef = useRef<
-    Map<
-      string,
-      {
-        mesh: THREE.Mesh;
-        halo?: THREE.Mesh;
-        mat: THREE.MeshStandardMaterial;
-        baseColor: number;
-        node: GraphViewportNode;
-      }
-    >
-  >(new Map());
-  const edgeVisualsRef = useRef<
-    Array<{
-      lineMat: THREE.LineBasicMaterial;
-      source: string;
-      target: string;
-      relation: string;
-    }>
-  >([]);
-  const nodeNormalizedProgressRef = useRef<Map<string, number>>(new Map());
+  // Refs synced into the live WebGL animation & state updater without rebuilding the renderer.
   const onSelectRef = useRef(onSelect);
   const autoRotateRef = useRef(autoRotate);
   const reducedMotionRef = useRef(false);
+  const selectedIdRef = useRef<string | null>(selectedId);
+  const hoveredIdRef = useRef<string | null>(null);
+  const timelineRef = useRef<number>(timelineProgress);
+  const focusedLineageRef = useRef<Set<string> | null>(focusedLineage);
+  const syncVisualsRef = useRef<() => void>(() => {});
+
   useEffect(() => {
     onSelectRef.current = onSelect;
   }, [onSelect]);
   useEffect(() => {
     autoRotateRef.current = autoRotate;
   }, [autoRotate]);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+  useEffect(() => {
+    timelineRef.current = timelineProgress;
+  }, [timelineProgress]);
+  useEffect(() => {
+    focusedLineageRef.current = focusedLineage;
+  }, [focusedLineage]);
+
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
     const preference = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -222,512 +344,623 @@ export default function Graph3DViewport({
     const container = containerRef.current;
     if (!container) return;
 
-    // Scene
+    const layoutInput = buildLayout3DInput(nodes, edges);
+    const initialLayout = computeLayout3DFallback(layoutInput);
+    const nodePositions: THREE.Vector3[] = [];
+    const nodeProgress: number[] = [];
+
+    for (let i = 0; i < nodes.length; i++) {
+      nodePositions.push(
+        new THREE.Vector3(
+          initialLayout.nodeXYZP[i * 4] ?? 0,
+          initialLayout.nodeXYZP[i * 4 + 1] ?? 0,
+          initialLayout.nodeXYZP[i * 4 + 2] ?? 0,
+        ),
+      );
+      nodeProgress.push(initialLayout.nodeXYZP[i * 4 + 3] ?? 0.5);
+    }
+
+    const indexById = new Map<string, number>();
+    nodes.forEach((node, idx) => indexById.set(node.id, idx));
+
+    // Track sections that own at least one equation so empty text subsections stay visually quiet.
+    const equationSectionIds = new Set<string>();
+    for (let i = 0; i < nodes.length; i++) {
+      if (nodes[i].kind === 'Equation') {
+        const pIdx = layoutInput.nodeParents[i];
+        if (pIdx >= 0 && pIdx < nodes.length && nodes[pIdx].kind === 'Section') {
+          equationSectionIds.add(nodes[pIdx].id);
+        }
+      }
+    }
+    const effectiveRadius = (node: GraphViewportNode): number => {
+      if (node.kind === 'Section' && equationSectionIds.size > 0 && !equationSectionIds.has(node.id)) {
+        return 0.36;
+      }
+      return kindRadius[node.kind] ?? 0.85;
+    };
+
+    // Scene & lighting: calm deep observatory slate (#060b16), crisp hemisphere + key/rim lighting.
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x020617); // Deep cosmic void
-    scene.fog = new THREE.FogExp2(0x030712, 0.0008);
+    scene.background = new THREE.Color(0x060b16);
+    scene.fog = new THREE.FogExp2(0x060b16, 0.0042);
 
-    // Root Group for the Entire Horizontal Timeline Tree (Rotates exclusively around X-axis)
-    const treeGroup = new THREE.Group();
-    scene.add(treeGroup);
-
-    // Camera: fixed looking horizontally at the Sacred Timeline
     const width = container.clientWidth || 800;
     const height = container.clientHeight || 420;
-    const camera = new THREE.PerspectiveCamera(46, width / height, 1, 4000);
-    camera.position.set(0, 0, 420);
-    cameraRef.current = camera;
+    const camera = new THREE.PerspectiveCamera(44, width / height, 0.5, 1200);
 
-    // Renderer
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    } catch {
+      const fallback = document.createElement('output');
+      fallback.className = 'spatial-webgl-fallback';
+      const heading = document.createElement('strong');
+      heading.textContent = '3D WebGL context unavailable';
+      const note = document.createElement('span');
+      note.textContent =
+        'Switch back to 2D Map or enable hardware acceleration to explore the 3D observatory.';
+      fallback.appendChild(heading);
+      fallback.appendChild(note);
+      container.replaceChildren(fallback);
+      return;
+    }
     renderer.setSize(width, height);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     container.replaceChildren(renderer.domElement);
 
-    // Lighting (Electric cyan, white, and violet ambient & directional lights)
-    const ambientLight = new THREE.AmbientLight(0x0e7490, 0.7);
-    scene.add(ambientLight);
+    const hemiLight = new THREE.HemisphereLight(0xdbeafe, 0x0f172a, 0.95);
+    scene.add(hemiLight);
 
-    const dirLight1 = new THREE.DirectionalLight(0x38bdf8, 1.4);
-    dirLight1.position.set(200, 300, 400);
-    scene.add(dirLight1);
+    const keyLight = new THREE.DirectionalLight(0xf8fafc, 1.25);
+    keyLight.position.set(40, 65, 50);
+    scene.add(keyLight);
 
-    const dirLight2 = new THREE.DirectionalLight(0xa855f7, 0.9);
-    dirLight2.position.set(-200, -200, -300);
-    scene.add(dirLight2);
+    const rimLight = new THREE.DirectionalLight(0x38bdf8, 0.65);
+    rimLight.position.set(-45, -25, -40);
+    scene.add(rimLight);
 
-    // 1. Cosmic Stardust Field (Electric Cyan & Violet Starlight)
-    const starCount = 850;
-    const starGeom = new THREE.BufferGeometry();
-    const starPositions = new Float32Array(starCount * 3);
-    const starColors = new Float32Array(starCount * 3);
-
-    for (let i = 0; i < starCount * 3; i += 3) {
-      starPositions[i] = (Math.random() - 0.5) * 2600;
-      starPositions[i + 1] = (Math.random() - 0.5) * 2200;
-      starPositions[i + 2] = (Math.random() - 0.5) * 2400;
-
-      if (Math.random() > 0.45) {
-        starColors[i] = 0.35;
-        starColors[i + 1] = 0.85;
-        starColors[i + 2] = 0.98; // Cyan
-      } else {
-        starColors[i] = 0.75;
-        starColors[i + 1] = 0.45;
-        starColors[i + 2] = 0.98; // Violet
+    // 1. Subtle Observatory Coordinate Rings & Spine Reference (Y = 0 plane)
+    const refGroup = new THREE.Group();
+    scene.add(refGroup);
+    const ringRadii = [12, 22, 32];
+    for (const r of ringRadii) {
+      const segs = 96;
+      const pts: THREE.Vector3[] = [];
+      for (let s = 0; s <= segs; s++) {
+        const a = (s / segs) * Math.PI * 2;
+        pts.push(new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r));
       }
+      const rGeom = new THREE.BufferGeometry().setFromPoints(pts);
+      const rMat = new THREE.LineBasicMaterial({
+        color: 0x334155,
+        transparent: true,
+        opacity: r === 12 ? 0.24 : 0.14,
+      });
+      refGroup.add(new THREE.Line(rGeom, rMat));
     }
-    starGeom.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
-    starGeom.setAttribute('color', new THREE.BufferAttribute(starColors, 3));
-    const starMat = new THREE.PointsMaterial({
-      size: 2.2,
+
+    // Subtle cross-axis tick lines for spatial orientation.
+    const axisGeom = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-36, 0, 0),
+      new THREE.Vector3(36, 0, 0),
+      new THREE.Vector3(0, 0, -36),
+      new THREE.Vector3(0, 0, 36),
+    ]);
+    const axisMat = new THREE.LineBasicMaterial({
+      color: 0x1e293b,
+      transparent: true,
+      opacity: 0.45,
+    });
+    refGroup.add(new THREE.LineSegments(axisGeom, axisMat));
+
+    // Restrained distant ambient dust (200 muted points — never distracts from nodes).
+    const dustCount = 200;
+    const dustPos = new Float32Array(dustCount * 3);
+    for (let i = 0; i < dustCount; i++) {
+      // Deterministic spherical Fibonacci shell outside graph bounds.
+      const y = 1 - (i / (dustCount - 1)) * 2;
+      const r = Math.sqrt(Math.max(0, 1 - y * y));
+      const theta = i * 2.3999632;
+      const dist = 110 + ((i * 29) % 70);
+      dustPos[i * 3] = Math.cos(theta) * r * dist;
+      dustPos[i * 3 + 1] = y * dist * 0.72;
+      dustPos[i * 3 + 2] = Math.sin(theta) * r * dist;
+    }
+    const dustGeom = new THREE.BufferGeometry();
+    dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+    const dustMat = new THREE.PointsMaterial({
+      color: 0x94a3b8,
+      size: 0.55,
+      transparent: true,
+      opacity: 0.26,
+    });
+    scene.add(new THREE.Points(dustGeom, dustMat));
+
+    // 2. GPU InstancedMesh Pools (at most 4 draw calls for all nodes!)
+    const familyMembers: Record<MeshFamily, number[]> = {
+      sphere: [],
+      octahedron: [],
+      tetrahedron: [],
+      dodecahedron: [],
+    };
+    const nodeFamilySlot: Array<{ family: MeshFamily; slot: number }> = [];
+
+    nodes.forEach((node, idx) => {
+      const fam = kindToMeshFamily(node.kind);
+      const slot = familyMembers[fam].length;
+      familyMembers[fam].push(idx);
+      nodeFamilySlot.push({ family: fam, slot });
+    });
+
+    const familyGeometries: Record<MeshFamily, THREE.BufferGeometry> = {
+      sphere: new THREE.IcosahedronGeometry(1, 3),
+      octahedron: new THREE.OctahedronGeometry(1, 0),
+      tetrahedron: new THREE.TetrahedronGeometry(1, 0),
+      dodecahedron: new THREE.DodecahedronGeometry(1, 0),
+    };
+
+    const instancedMeshes: Partial<Record<MeshFamily, THREE.InstancedMesh>> = {};
+    const raycastTargets: THREE.InstancedMesh[] = [];
+
+    (Object.keys(familyMembers) as MeshFamily[]).forEach((fam) => {
+      const members = familyMembers[fam];
+      if (members.length === 0) return;
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        roughness: fam === 'octahedron' ? 0.22 : 0.32,
+        metalness: fam === 'octahedron' ? 0.28 : 0.16,
+      });
+      const mesh = new THREE.InstancedMesh(familyGeometries[fam], mat, members.length);
+      mesh.userData = { family: fam };
+      scene.add(mesh);
+      instancedMeshes[fam] = mesh;
+      raycastTargets.push(mesh);
+    });
+
+    // Crisp selection beacon ring that glides onto whichever node is selected.
+    const selectRingGeom = new THREE.RingGeometry(1.45, 1.72, 48);
+    const selectRingMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.9,
+    });
+    const selectRing = new THREE.Mesh(selectRingGeom, selectRingMat);
+    selectRing.visible = false;
+    scene.add(selectRing);
+
+    // 3. Single Merged Semantic Edge Buffer (THREE.LineSegments — 1 draw call!)
+    const validEdges: EdgeSegmentMeta[] = [];
+    for (const edge of edges) {
+      const u = indexById.get(edge.source);
+      const v = indexById.get(edge.target);
+      if (u === undefined || v === undefined || u === v) continue;
+      const isContainment =
+        edge.relation === 'contains' || edge.relation === 'has_version';
+      validEdges.push({
+        sourceIdx: u,
+        targetIdx: v,
+        sourceId: edge.source,
+        targetId: edge.target,
+        relation: edge.relation,
+        baseColor: new THREE.Color(edgeHexColors[edge.relation] ?? 0x64748b),
+        baseIntensity: isContainment ? 0.34 : 0.85,
+      });
+    }
+
+    const totalSegVerts = validEdges.length * CURVE_SEGMENTS * 2;
+    const edgePosBuf = new Float32Array(Math.max(3, totalSegVerts * 3));
+    const edgeColBuf = new Float32Array(Math.max(3, totalSegVerts * 3));
+    const edgeGeom = new THREE.BufferGeometry();
+    const edgePosAttr = new THREE.BufferAttribute(edgePosBuf, 3);
+    const edgeColAttr = new THREE.BufferAttribute(edgeColBuf, 3);
+    edgeGeom.setAttribute('position', edgePosAttr);
+    edgeGeom.setAttribute('color', edgeColAttr);
+    edgeGeom.setDrawRange(0, totalSegVerts);
+
+    const edgeMat = new THREE.LineBasicMaterial({
       vertexColors: true,
       transparent: true,
-      opacity: 0.7,
-      blending: THREE.AdditiveBlending,
+      opacity: 0.82,
     });
-    const starField = new THREE.Points(starGeom, starMat);
-    scene.add(starField);
+    const edgeLines = new THREE.LineSegments(edgeGeom, edgeMat);
+    scene.add(edgeLines);
 
-    // 2. Timeline Span & Paper Coordinates (Adaptive based on paper count)
-    const paperNodes = nodes.filter((n) => n.kind === 'Paper' || n.kind === 'PaperVersion');
-    const paperCount = Math.max(1, paperNodes.length);
-    const totalSpanX = paperCount === 1 ? 0 : Math.min(340, Math.max(140, (paperCount - 1) * 90));
-    const halfSpanX = totalSpanX / 2;
-    const trunkMinX = paperCount === 1 ? -80 : -halfSpanX - 25;
-    const trunkMaxX = paperCount === 1 ? 80 : halfSpanX + 25;
+    const dummyObj = new THREE.Object3D();
+    const tmpColor = new THREE.Color();
+    const tmpMid = new THREE.Vector3();
+    const tmpPrev = new THREE.Vector3();
+    const tmpCurr = new THREE.Vector3();
+    const bgSlate = new THREE.Color(0x060b16);
 
-    // Horizontal Anamorphic Light Streak (Loki Timeline River Plane)
-    const flareGeom = new THREE.PlaneGeometry(Math.max(160, (trunkMaxX - trunkMinX) + 50), 14);
-    const flareMat = new THREE.MeshBasicMaterial({
-      color: 0x0284c7,
-      transparent: true,
-      opacity: 0.15,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-    });
-    const flareMesh = new THREE.Mesh(flareGeom, flareMat);
-    flareMesh.position.set(0, 0, 0);
-    treeGroup.add(flareMesh);
-
-    // 3. Node Coordinates Calculation (Chronological X-Axis Flow)
-    const nodeCoords = new Map<string, THREE.Vector3>();
-    const nodeNormalizedProgress = new Map<string, number>(); // 0 (past/left) to 1 (future/right)
-
-    // Position Paper Hubs along the Horizontal Sacred Timeline (Left: past -> Right: present)
-    paperNodes.forEach((p, idx) => {
-      const t = paperCount === 1 ? 0.5 : idx / (paperCount - 1);
-      const x = paperCount === 1 ? 0 : -halfSpanX + t * totalSpanX;
-      const y = Math.sin(t * Math.PI * 2) * 12;
-      const z = Math.cos(t * Math.PI * 2) * 10;
-      const pos = new THREE.Vector3(x, y, z);
-      nodeCoords.set(p.id, pos);
-      nodeNormalizedProgress.set(p.id, t);
-    });
-
-    // Trace child containment
-    const childToParent = new Map<string, string>();
-    edges.forEach((edge) => {
-      if (
-        edge.relation === 'contains' ||
-        edge.relation === 'defines' ||
-        edge.relation === 'has_version'
-      ) {
-        childToParent.set(edge.target, edge.source);
-      }
-    });
-
-    const getRootPaperPos = (nodeId: string, depth = 0): THREE.Vector3 => {
-      if (depth > 6) return new THREE.Vector3(0, 0, 0);
-      if (nodeCoords.has(nodeId)) return nodeCoords.get(nodeId)!;
-      const parentId = childToParent.get(nodeId);
-      if (parentId) return getRootPaperPos(parentId, depth + 1);
-      return new THREE.Vector3(0, 0, 0);
-    };
-
-    // Distribute Equations, Sections, Symbols branching outward (upward Y>0, downward Y<0, and in Z)
-    const nonPaperNodes = nodes.filter((n) => n.kind !== 'Paper' && n.kind !== 'PaperVersion');
-    const nonPapersByKind = new Map<EvidenceEntityType, GraphViewportNode[]>();
-    nonPaperNodes.forEach((n) => {
-      const list = nonPapersByKind.get(n.kind) ?? [];
-      list.push(n);
-      nonPapersByKind.set(n.kind, list);
-    });
-
-    const GOLDEN_ANGLE = 2.399963; // ~137.5 degrees
-
-    const kindBranchConfig: Record<string, { rSpread: number; xForward: number }> = {
-      Section: { rSpread: 36, xForward: 14 },
-      Equation: { rSpread: 58, xForward: 24 },
-      Symbol: { rSpread: 80, xForward: 34 },
-      Assumption: { rSpread: 28, xForward: -10 },
-      Claim: { rSpread: 64, xForward: 20 },
-      Hypothesis: { rSpread: 92, xForward: 38 },
-    };
-
-    nonPapersByKind.forEach((kindList, kind) => {
-      const config = kindBranchConfig[kind] ?? { rSpread: 50, xForward: 16 };
-      const count = kindList.length;
-
-      kindList.forEach((node, kIdx) => {
-        const parentPos = getRootPaperPos(node.id);
-
-        // ponytail: deterministic golden angle spiral layout, ceiling: max 240-unit timeline span, upgrade: 3D force simulation if papers interlock densely
-        const phi = kIdx * GOLDEN_ANGLE;
-        const radialVar = 0.82 + 0.36 * (kIdx % 4);
-        const r = config.rSpread * radialVar;
-
-        const ySpread = Math.sin(phi) * r;
-        const zSpread = Math.cos(phi) * r;
-
-        // Spread longitudinally along timeline X relative to parent paper
-        const maxSpan = Math.min(240, Math.max(90, count * 8.5));
-        const xOffset = count > 1
-          ? ((kIdx / (count - 1)) - 0.5) * maxSpan
-          : 0;
-        const xSpread = parentPos.x + config.xForward + xOffset;
-
-        const pos = new THREE.Vector3(xSpread, parentPos.y + ySpread, parentPos.z + zSpread);
-        nodeCoords.set(node.id, pos);
-
-        const normProg = THREE.MathUtils.clamp(
-          (xSpread - trunkMinX) / Math.max(1, trunkMaxX - trunkMinX),
-          0,
-          1,
-        );
-        nodeNormalizedProgress.set(node.id, normProg);
-      });
-    });
-
-    // 4. Braided Sacred Timeline Trunk (Horizontal Glowing River)
-    const trunkGroup = new THREE.Group();
-    treeGroup.add(trunkGroup);
-
-    const trunkStrandCount = 5;
-    const trunkSteps = 50;
-    const minX = trunkMinX;
-    const maxX = trunkMaxX;
-
-    for (let s = 0; s < trunkStrandCount; s++) {
-      const phase = (s / trunkStrandCount) * Math.PI * 2;
-      const strandPoints: THREE.Vector3[] = [];
-      const strandColors: number[] = [];
-
-      for (let step = 0; step <= trunkSteps; step++) {
-        const u = step / trunkSteps;
-        const x = minX + u * (maxX - minX);
-        const wave = Math.sin(u * Math.PI * 4 + phase);
-        const cosWave = Math.cos(u * Math.PI * 4 + phase);
-        const y = wave * (7 + Math.sin(u * Math.PI) * 11);
-        const z = cosWave * (7 + Math.sin(u * Math.PI) * 11);
-        strandPoints.push(new THREE.Vector3(x, y, z));
-
-        const color = new THREE.Color(s === 0 ? 0xffffff : 0x67e8f9);
-        strandColors.push(color.r, color.g, color.b);
-      }
-
-      const geom = new THREE.BufferGeometry().setFromPoints(strandPoints);
-      geom.setAttribute('color', new THREE.Float32BufferAttribute(strandColors, 3));
-      const mat = new THREE.LineBasicMaterial({
-        vertexColors: true,
-        transparent: true,
-        opacity: 0.85,
-        blending: THREE.AdditiveBlending,
-      });
-      trunkGroup.add(new THREE.Line(geom, mat));
-    }
-
-    // 5. Branching Lightning Curves with Jitter & Capillary Tendrils
-    const vineGroup = new THREE.Group();
-    treeGroup.add(vineGroup);
-    const pulseCurves: THREE.Curve<THREE.Vector3>[] = [];
-
-    edges.forEach((edge, eIdx) => {
-      const srcPos = nodeCoords.get(edge.source);
-      const tgtPos = nodeCoords.get(edge.target);
-      if (!srcPos || !tgtPos) return;
-
-      const opacity = edge.relation === 'derived_from' || edge.relation === 'cites' ? 0.85 : 0.55;
-
-      // Arc with natural organic curve
-      const dist = srcPos.distanceTo(tgtPos);
-      const mid = new THREE.Vector3().addVectors(srcPos, tgtPos).multiplyScalar(0.5);
-      const dir = new THREE.Vector3().subVectors(tgtPos, srcPos).normalize();
-      const perp = new THREE.Vector3(-dir.y, dir.x, dir.z * 0.5).normalize();
-      mid.addScaledVector(perp, Math.min(42, dist * 0.22));
-
-      const curve = new THREE.QuadraticBezierCurve3(srcPos, mid, tgtPos);
-      pulseCurves.push(curve);
-
-      // Create lightning points with electric jitter
-      const numSegments = 16;
-      const points: THREE.Vector3[] = [];
-      const colors: number[] = [];
-
-      for (let i = 0; i <= numSegments; i++) {
-        const u = i / numSegments;
-        const pt = curve.getPoint(u);
-
-        // Electric jitter: zero at endpoints, max at middle
-        const jitterWeight = Math.sin(u * Math.PI) * Math.min(11, dist * 0.09);
-        const jX = (prng(eIdx * 100 + i) - 0.5) * jitterWeight;
-        const jY = (prng(eIdx * 100 + i + 1) - 0.5) * jitterWeight;
-        const jZ = (prng(eIdx * 100 + i + 2) - 0.5) * jitterWeight;
-        points.push(new THREE.Vector3(pt.x + jX, pt.y + jY, pt.z + jZ));
-
-        // Color Gradient: White at root -> Cyan at mid -> Violet at tips
-        const col = new THREE.Color();
-        if (u < 0.4) {
-          col.setHex(0xffffff).lerp(new THREE.Color(0x67e8f9), u / 0.4);
+    const rebuildEdgePositions = () => {
+      let ptr = 0;
+      for (const meta of validEdges) {
+        const p0 = nodePositions[meta.sourceIdx];
+        const p2 = nodePositions[meta.targetIdx];
+        // Clean gentle quadratic arc bowing slightly outward from origin for readability.
+        tmpMid.addVectors(p0, p2).multiplyScalar(0.5);
+        const dist = p0.distanceTo(p2);
+        const bow = Math.min(3.8, dist * 0.14);
+        const len = tmpMid.length();
+        if (len > 0.01) {
+          tmpMid.addScaledVector(tmpMid, bow / len);
         } else {
-          col.setHex(0x38bdf8).lerp(new THREE.Color(0xa855f7), (u - 0.4) / 0.6);
+          tmpMid.y += bow;
         }
-        colors.push(col.r, col.g, col.b);
+
+        for (let s = 0; s < CURVE_SEGMENTS; s++) {
+          const t0 = s / CURVE_SEGMENTS;
+          const t1 = (s + 1) / CURVE_SEGMENTS;
+
+          const omt0 = 1 - t0;
+          tmpPrev.set(
+            omt0 * omt0 * p0.x + 2 * omt0 * t0 * tmpMid.x + t0 * t0 * p2.x,
+            omt0 * omt0 * p0.y + 2 * omt0 * t0 * tmpMid.y + t0 * t0 * p2.y,
+            omt0 * omt0 * p0.z + 2 * omt0 * t0 * tmpMid.z + t0 * t0 * p2.z,
+          );
+          const omt1 = 1 - t1;
+          tmpCurr.set(
+            omt1 * omt1 * p0.x + 2 * omt1 * t1 * tmpMid.x + t1 * t1 * p2.x,
+            omt1 * omt1 * p0.y + 2 * omt1 * t1 * tmpMid.y + t1 * t1 * p2.y,
+            omt1 * omt1 * p0.z + 2 * omt1 * t1 * tmpMid.z + t1 * t1 * p2.z,
+          );
+
+          edgePosBuf[ptr] = tmpPrev.x;
+          edgePosBuf[ptr + 1] = tmpPrev.y;
+          edgePosBuf[ptr + 2] = tmpPrev.z;
+          edgePosBuf[ptr + 3] = tmpCurr.x;
+          edgePosBuf[ptr + 4] = tmpCurr.y;
+          edgePosBuf[ptr + 5] = tmpCurr.z;
+          ptr += 6;
+        }
       }
+      edgePosAttr.needsUpdate = true;
+      edgeGeom.computeBoundingSphere();
+    };
 
-      const geom = new THREE.BufferGeometry().setFromPoints(points);
-      geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-      const lineMat = new THREE.LineBasicMaterial({
-        vertexColors: true,
-        transparent: true,
-        opacity,
-        blending: THREE.AdditiveBlending,
-      });
-      const lineMesh = new THREE.Line(geom, lineMat);
-      vineGroup.add(lineMesh);
-      edgeVisualsRef.current.push({
-        lineMat,
-        source: edge.source,
-        target: edge.target,
-        relation: edge.relation,
-      });
+    const syncVisuals = () => {
+      const selId = selectedIdRef.current;
+      const hovId = hoveredIdRef.current;
+      const lineage = focusedLineageRef.current;
+      const progressGate = timelineRef.current / 100;
 
-      // Fine Capillary Tendrils (small branching sparks off the main limb)
-      if (dist > 35) {
-        const forkU = 0.55 + prng(eIdx * 37) * 0.3;
-        const forkRoot = curve.getPoint(forkU);
-        const forkDir = new THREE.Vector3(
-          (prng(eIdx * 41) - 0.5) * 22,
-          (prng(eIdx * 43) - 0.2) * 26,
-          (prng(eIdx * 47) - 0.5) * 22,
+      let selectedPos: THREE.Vector3 | null = null;
+      let selectedScale = 1;
+
+      for (let i = 0; i < nodes.length; i++) {
+        const node = nodes[i];
+        const { family, slot } = nodeFamilySlot[i];
+        const mesh = instancedMeshes[family];
+        if (!mesh) continue;
+
+        const pos = nodePositions[i];
+        const isSelected = selId === node.id;
+        const isHovered = hovId === node.id;
+        const inLineage = lineage ? lineage.has(node.id) : true;
+        const isScrubVisible = nodeProgress[i] <= progressGate;
+
+        const baseR = effectiveRadius(node);
+        const scale = !isScrubVisible
+          ? 0.001
+          : isSelected
+            ? baseR * 1.38
+            : isHovered
+              ? baseR * 1.2
+              : lineage && !inLineage
+                ? baseR * 0.65
+                : baseR;
+
+        dummyObj.position.copy(pos);
+        dummyObj.scale.setScalar(scale);
+        dummyObj.rotation.set(
+          family === 'octahedron' ? 0.35 : 0,
+          i * 0.4,
+          0,
         );
-        const tendrilPoints = [
-          forkRoot,
-          new THREE.Vector3()
-            .addVectors(forkRoot, forkDir.clone().multiplyScalar(0.5))
-            .add(new THREE.Vector3((prng(eIdx) - 0.5) * 4, 3, (prng(eIdx + 1) - 0.5) * 4)),
-          new THREE.Vector3().addVectors(forkRoot, forkDir),
-        ];
-        const tendrilGeom = new THREE.BufferGeometry().setFromPoints(tendrilPoints);
-        const tendrilMat = new THREE.LineBasicMaterial({
-          color: 0xc084fc,
-          transparent: true,
-          opacity: opacity * 0.65,
-          blending: THREE.AdditiveBlending,
-        });
-        vineGroup.add(new THREE.Line(tendrilGeom, tendrilMat));
+        dummyObj.updateMatrix();
+        mesh.setMatrixAt(slot, dummyObj.matrix);
+
+        tmpColor.setHex(kindColors[node.kind] ?? 0x60a5fa);
+        const isQuietOutlineSection =
+          node.kind === 'Section' && equationSectionIds.size > 0 && !equationSectionIds.has(node.id);
+        if (isSelected) {
+          tmpColor.lerp(new THREE.Color(0xffffff), 0.55);
+          selectedPos = pos;
+          selectedScale = baseR;
+        } else if (isHovered) {
+          tmpColor.lerp(new THREE.Color(0xffffff), 0.3);
+        } else if (!isScrubVisible || (lineage && !inLineage)) {
+          tmpColor.lerp(bgSlate, 0.82);
+        } else if (isQuietOutlineSection) {
+          tmpColor.lerp(bgSlate, 0.58);
+        }
+        mesh.setColorAt(slot, tmpColor);
       }
+
+      for (const mesh of raycastTargets) {
+        mesh.instanceMatrix.needsUpdate = true;
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+        mesh.computeBoundingSphere();
+      }
+
+      if (selectedPos) {
+        selectRing.visible = true;
+        selectRing.position.copy(selectedPos);
+        selectRing.scale.setScalar(selectedScale);
+      } else {
+        selectRing.visible = false;
+      }
+
+      // Update merged edge vertex colors in place for lineage focus & timeline growth.
+      let cPtr = 0;
+      for (const meta of validEdges) {
+        const isScrubVisible =
+          Math.max(nodeProgress[meta.sourceIdx], nodeProgress[meta.targetIdx]) <=
+          progressGate;
+        const inLineage = lineage
+          ? lineage.has(meta.sourceId) && lineage.has(meta.targetId)
+          : true;
+        const touchesSelection =
+          selId !== null && (meta.sourceId === selId || meta.targetId === selId);
+
+        let weight: number;
+        if (!isScrubVisible) {
+          weight = 0.02;
+        } else if (touchesSelection) {
+          weight = 1.0;
+        } else if (lineage) {
+          weight = inLineage ? 0.92 : 0.07;
+        } else {
+          weight = meta.baseIntensity;
+        }
+
+        tmpColor.copy(bgSlate).lerp(meta.baseColor, weight);
+        for (let v = 0; v < CURVE_SEGMENTS * 2; v++) {
+          edgeColBuf[cPtr] = tmpColor.r;
+          edgeColBuf[cPtr + 1] = tmpColor.g;
+          edgeColBuf[cPtr + 2] = tmpColor.b;
+          cPtr += 3;
+        }
+      }
+      edgeColAttr.needsUpdate = true;
+    };
+
+    syncVisualsRef.current = syncVisuals;
+
+    const recomputeCameraFraming = () => {
+      let maxR = 14;
+      let minX = 0;
+      let maxX = 0;
+      for (const p of nodePositions) {
+        const d = p.length();
+        if (d > maxR) maxR = d;
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+      }
+      const dist = THREE.MathUtils.clamp(maxR * 2.15, 28, 130);
+      framingPresetsRef.current = {
+        overview: { target: new THREE.Vector3(0, 0, 0), theta: 0.62, phi: 1.15, radius: dist },
+        roots: {
+          target: new THREE.Vector3(minX * 0.55, 0, 0),
+          theta: -0.35,
+          phi: 1.22,
+          radius: Math.max(20, dist * 0.62),
+        },
+        canopy: {
+          target: new THREE.Vector3(maxX * 0.55, 4.5, 0),
+          theta: 1.18,
+          phi: 0.9,
+          radius: Math.max(22, dist * 0.68),
+        },
+      };
+      orbitRef.current.desiredTarget.copy(framingPresetsRef.current.overview.target);
+      orbitRef.current.target.copy(framingPresetsRef.current.overview.target);
+      orbitRef.current.desiredRadius = dist;
+      orbitRef.current.radius = dist;
+    };
+
+    rebuildEdgePositions();
+    syncVisuals();
+    recomputeCameraFraming();
+
+    // 4. Async Rust WebAssembly Worker refinement (zero UI flicker!).
+    let wasmCancelled = false;
+    void computeLayout3DAsync(layoutInput).then((result) => {
+      if (wasmCancelled) return;
+      for (let i = 0; i < nodes.length; i++) {
+        nodePositions[i].set(
+          result.nodeXYZP[i * 4] ?? 0,
+          result.nodeXYZP[i * 4 + 1] ?? 0,
+          result.nodeXYZP[i * 4 + 2] ?? 0,
+        );
+        nodeProgress[i] = result.nodeXYZP[i * 4 + 3] ?? 0.5;
+      }
+      rebuildEdgePositions();
+      syncVisuals();
+      recomputeCameraFraming();
+      setLayoutEngine(result.engine);
     });
 
-    // 6. Glowing Nodes with Atmospheric Halos & Distinct Geometries
-    const nodeMeshMap = new Map<
-      string,
-      {
-        mesh: THREE.Mesh;
-        halo?: THREE.Mesh;
-        mat: THREE.MeshStandardMaterial;
-        baseColor: number;
-        node: GraphViewportNode;
+    // 5. Screen-projected 2D HTML hub labels (Paper, equation-bearing Sections, Hypotheses — collision culled).
+    const labelAnchorIndices: number[] = [];
+    nodes.forEach((node, idx) => {
+      const isKeySection =
+        node.kind === 'Section' &&
+        (equationSectionIds.size === 0 || equationSectionIds.has(node.id));
+      if (
+        node.kind === 'Paper' ||
+        node.kind === 'PaperVersion' ||
+        isKeySection ||
+        node.kind === 'Hypothesis'
+      ) {
+        labelAnchorIndices.push(idx);
       }
-    >();
-
-    nodes.forEach((node) => {
-      const pos = nodeCoords.get(node.id) ?? new THREE.Vector3(0, 0, 0);
-      const radius = kindRadius[node.kind] ?? 8;
-      const baseColor = kindColors[node.kind] ?? 0x22d3ee;
-      const opacity = 0.92;
-      const emissiveColor = baseColor;
-      const emissiveIntensity = 0.45;
-
-      const mat = new THREE.MeshStandardMaterial({
-        color: baseColor,
-        emissive: emissiveColor,
-        emissiveIntensity: emissiveIntensity,
-        roughness: 0.22,
-        metalness: 0.35,
-        transparent: true,
-        opacity,
+    });
+    // For tiny graphs with no sections, label up to 6 equations so the scene is readable.
+    if (labelAnchorIndices.length < 3) {
+      nodes.forEach((node, idx) => {
+        if (node.kind === 'Equation' && labelAnchorIndices.length < 7) {
+          labelAnchorIndices.push(idx);
+        }
       });
-
-      const mesh = new THREE.Mesh(getMeshGeometry(node.kind, radius), mat);
-      mesh.position.copy(pos);
-      mesh.userData = { nodeId: node.id, node };
-      treeGroup.add(mesh);
-
-      let haloMesh: THREE.Mesh | undefined;
-      // Glowing Cosmic Halo for Papers and Hypotheses
-      if (node.kind === 'Paper' || node.kind === 'Hypothesis') {
-        const haloGeom = new THREE.RingGeometry(radius * 1.35, radius * 1.7, 32);
-        const haloMat = new THREE.MeshBasicMaterial({
-          color: baseColor,
-          side: THREE.DoubleSide,
-          transparent: true,
-          opacity: opacity * 0.75,
-          blending: THREE.AdditiveBlending,
-        });
-        haloMesh = new THREE.Mesh(haloGeom, haloMat);
-        haloMesh.rotation.x = Math.PI / 2;
-        mesh.add(haloMesh);
-      }
-
-      nodeMeshMap.set(node.id, { mesh, halo: haloMesh, mat, baseColor, node });
-    });
-    nodeMeshMapRef.current = nodeMeshMap;
-    nodeNormalizedProgressRef.current = nodeNormalizedProgress;
-
-    // 7. Traveling Electric Sparks (Mana Charges)
-    const particleCount = Math.min(140, Math.max(20, pulseCurves.length * 2));
-    const particleGeom = new THREE.BufferGeometry();
-    const particlePositions = new Float32Array(particleCount * 3);
-    particleGeom.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
-    const particleMat = new THREE.PointsMaterial({
-      color: 0xffffff,
-      size: 3.8,
-      transparent: true,
-      opacity: 0.95,
-      blending: THREE.AdditiveBlending,
-    });
-    const particlePoints = new THREE.Points(particleGeom, particleMat);
-    treeGroup.add(particlePoints);
-
-    const particleProgress = Array.from({ length: particleCount }, () => Math.random());
-
-    // 8. Dynamic Frustum Framing: Bounding Cylinder along horizontal timeline axis
-    let bMinX = Infinity, bMaxX = -Infinity;
-    let maxRadiusYZ = 0;
-
-    nodeCoords.forEach((pos) => {
-      if (pos.x < bMinX) bMinX = pos.x;
-      if (pos.x > bMaxX) bMaxX = pos.x;
-      const r = Math.sqrt(pos.y * pos.y + pos.z * pos.z);
-      if (r > maxRadiusYZ) maxRadiusYZ = r;
-    });
-
-    if (bMinX === Infinity) {
-      bMinX = -50; bMaxX = 50; maxRadiusYZ = 35;
     }
 
-    const sizeX = Math.max(50, (bMaxX - bMinX) + 24);
-    const radiusYZ = Math.max(30, maxRadiusYZ + 14);
-    const boxCenter = new THREE.Vector3((bMinX + bMaxX) / 2, 0, 0);
+    const labelElements = new Map<number, HTMLDivElement>();
+    const labelsLayer = labelsLayerRef.current;
+    if (labelsLayer) {
+      labelsLayer.replaceChildren();
+      for (const idx of labelAnchorIndices.slice(0, 14)) {
+        const node = nodes[idx];
+        const el = document.createElement('div');
+        el.className = `spatial-hub-label is-kind-${node.kind.toLowerCase()}`;
+        const badge = document.createElement('span');
+        badge.className = 'spatial-hub-label-kind';
+        badge.textContent =
+          node.kind === 'PaperVersion'
+            ? 'PAPER'
+            : node.kind.slice(0, 3).toUpperCase();
+        const text = document.createElement('span');
+        text.className = 'spatial-hub-label-text';
+        text.textContent =
+          node.label.length > 26 ? `${node.label.slice(0, 25)}…` : node.label;
+        el.appendChild(badge);
+        el.appendChild(text);
+        labelsLayer.appendChild(el);
+        labelElements.set(idx, el);
+      }
+    }
 
-    const optimalDistance = computeFramingDistance(sizeX, radiusYZ, width / height, camera.fov, 1.08);
-    camera.position.set(boxCenter.x, 0, optimalDistance);
-
-    framingRef.current = {
-      overview: new THREE.Vector3(boxCenter.x, 0, optimalDistance),
-      roots: new THREE.Vector3(Math.min(bMinX * 0.85, -30), 0, Math.max(50, optimalDistance * 0.72)),
-      canopy: new THREE.Vector3(Math.max(bMaxX * 0.85, 30), 0, Math.max(50, optimalDistance * 0.72)),
-    };
-
-    // 9. Custom Axis Rotation Controller (Rotates Exclusively Around Horizontal X-Axis)
-    let isDragging = false;
-    let pointerStartY = 0;
-    let dragDeltaTotal = 0;
-    let targetRotationX = 0;
-    let currentRotationX = 0;
-
-    resetRotationRef.current = () => {
-      targetRotationX = 0;
-    };
+    // 6. True 360° Spherical Orbit + Shift/Right-Drag Pan + Smooth Zoom Controller
+    let dragMode: 'none' | 'orbit' | 'pan' = 'none';
+    let lastPtrX = 0;
+    let lastPtrY = 0;
+    let dragDistance = 0;
 
     const domElement = renderer.domElement;
     domElement.style.cursor = 'grab';
 
     const raycaster = new THREE.Raycaster();
-    const mouse = new THREE.Vector2(-1000, -1000);
+    const pointerNdc = new THREE.Vector2(-10, -10);
+
+    const pickNodeUnderPointer = (clientX: number, clientY: number): number | null => {
+      const rect = domElement.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return null;
+      pointerNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+      pointerNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointerNdc, camera);
+
+      const hits = raycaster.intersectObjects(raycastTargets, false);
+      for (const hit of hits) {
+        if (hit.instanceId === undefined) continue;
+        const fam = hit.object.userData.family as MeshFamily | undefined;
+        if (!fam) continue;
+        const nodeIdx = familyMembers[fam][hit.instanceId];
+        if (nodeIdx !== undefined && nodeProgress[nodeIdx] <= timelineRef.current / 100) {
+          return nodeIdx;
+        }
+      }
+      return null;
+    };
+
+    const onContextMenu = (evt: MouseEvent) => {
+      evt.preventDefault();
+    };
 
     const onPointerDown = (evt: PointerEvent) => {
-      isDragging = true;
-      pointerStartY = evt.clientY;
-      dragDeltaTotal = 0;
+      dragMode = evt.button === 2 || evt.shiftKey ? 'pan' : 'orbit';
+      lastPtrX = evt.clientX;
+      lastPtrY = evt.clientY;
+      dragDistance = 0;
       domElement.style.cursor = 'grabbing';
       try {
         domElement.setPointerCapture(evt.pointerId);
-      } catch {}
+      } catch {
+        // Ignore in jsdom/synthetic pointer events.
+      }
     };
 
+    const panRight = new THREE.Vector3();
+    const panUp = new THREE.Vector3();
+
     const onPointerMove = (evt: PointerEvent) => {
-      if (isDragging) {
-        const delta = evt.clientY - pointerStartY;
-        pointerStartY = evt.clientY;
-        dragDeltaTotal += Math.abs(delta);
-        targetRotationX += delta * 0.009; // Rolls tree around horizontal X-axis
+      if (dragMode !== 'none') {
+        const dx = evt.clientX - lastPtrX;
+        const dy = evt.clientY - lastPtrY;
+        lastPtrX = evt.clientX;
+        lastPtrY = evt.clientY;
+        dragDistance += Math.hypot(dx, dy);
+
+        const orbit = orbitRef.current;
+        if (dragMode === 'orbit') {
+          orbit.desiredTheta -= dx * 0.0072;
+          orbit.desiredPhi = THREE.MathUtils.clamp(
+            orbit.desiredPhi - dy * 0.0068,
+            0.16,
+            Math.PI - 0.16,
+          );
+        } else {
+          const panScale = orbit.radius * 0.0014;
+          panRight.setFromMatrixColumn(camera.matrix, 0);
+          panUp.setFromMatrixColumn(camera.matrix, 1);
+          orbit.desiredTarget.addScaledVector(panRight, -dx * panScale);
+          orbit.desiredTarget.addScaledVector(panUp, dy * panScale);
+        }
+        return;
       }
 
-      const rect = domElement.getBoundingClientRect();
-      mouse.x = ((evt.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((evt.clientY - rect.top) / rect.height) * 2 + 1;
-
-      raycaster.setFromCamera(mouse, camera);
-      const meshes = [...nodeMeshMap.values()].map((entry) => entry.mesh);
-      const intersects = raycaster.intersectObjects(meshes);
-
-      if (intersects.length > 0) {
-        const hit = intersects[0].object;
-        const targetNode = hit.userData.node as GraphViewportNode;
-        setHoveredNode(targetNode);
-        domElement.style.cursor = isDragging ? 'grabbing' : 'pointer';
-      } else {
-        setHoveredNode(null);
-        domElement.style.cursor = isDragging ? 'grabbing' : 'grab';
+      const hitIdx = pickNodeUnderPointer(evt.clientX, evt.clientY);
+      const nextHover = hitIdx !== null ? nodes[hitIdx] : null;
+      const nextId = nextHover?.id ?? null;
+      if (hoveredIdRef.current !== nextId) {
+        hoveredIdRef.current = nextId;
+        setHoveredNode(nextHover);
+        syncVisuals();
       }
+      domElement.style.cursor = nextHover ? 'pointer' : 'grab';
     };
 
     const onPointerUp = (evt: PointerEvent) => {
-      isDragging = false;
-      domElement.style.cursor = 'grab';
+      dragMode = 'none';
+      domElement.style.cursor = hoveredIdRef.current ? 'pointer' : 'grab';
       try {
         domElement.releasePointerCapture(evt.pointerId);
-      } catch {}
-    };
-
-    const onPointerCancel = () => {
-      isDragging = false;
-      domElement.style.cursor = 'grab';
-    };
-
-    // Zoom via mouse wheel
-    const onWheel = (evt: WheelEvent) => {
-      evt.preventDefault();
-      camera.position.z = THREE.MathUtils.clamp(
-        camera.position.z + evt.deltaY * 0.45,
-        180,
-        750
-      );
-    };
-
-    const onClick = () => {
-      if (dragDeltaTotal > 6) return; // Ignore drag release
-
-      raycaster.setFromCamera(mouse, camera);
-      const meshes = [...nodeMeshMap.values()].map((entry) => entry.mesh);
-      const intersects = raycaster.intersectObjects(meshes);
-
-      if (intersects.length > 0) {
-        const hit = intersects[0].object;
-        const targetNode = hit.userData.node as GraphViewportNode;
-        onSelectRef.current(targetNode.id);
-        setFocusActive(true);
-
-        const targetPos = nodeCoords.get(targetNode.id);
-        if (targetPos) {
-          const focusDist = THREE.MathUtils.clamp(optimalDistance * 0.68, 40, 260);
-          targetCamPosRef.current = new THREE.Vector3(targetPos.x, 0, focusDist);
-        }
+      } catch {
+        // Ignore in jsdom.
       }
     };
 
+    const onPointerCancel = () => {
+      dragMode = 'none';
+      domElement.style.cursor = 'grab';
+    };
+
+    const onWheel = (evt: WheelEvent) => {
+      evt.preventDefault();
+      const orbit = orbitRef.current;
+      const factor = Math.exp(evt.deltaY * 0.0012);
+      orbit.desiredRadius = THREE.MathUtils.clamp(orbit.desiredRadius * factor, 10, 210);
+    };
+
+    const onClick = (evt: MouseEvent) => {
+      if (dragDistance > 6) return;
+      const hitIdx = pickNodeUnderPointer(evt.clientX, evt.clientY);
+      if (hitIdx !== null) {
+        const targetNode = nodes[hitIdx];
+        onSelectRef.current(targetNode.id);
+        setFocusActive(true);
+        const orbit = orbitRef.current;
+        orbit.desiredTarget.copy(nodePositions[hitIdx]);
+        orbit.desiredRadius = THREE.MathUtils.clamp(
+          framingPresetsRef.current.overview.radius * 0.56,
+          16,
+          64,
+        );
+      }
+    };
+
+    domElement.addEventListener('contextmenu', onContextMenu);
     domElement.addEventListener('pointerdown', onPointerDown);
     domElement.addEventListener('pointermove', onPointerMove);
     domElement.addEventListener('pointerup', onPointerUp);
@@ -736,18 +969,13 @@ export default function Graph3DViewport({
     domElement.addEventListener('click', onClick);
 
     const onResize = () => {
-      if (!container) return;
       const w = container.clientWidth;
       const h = container.clientHeight;
       if (w === 0 || h === 0) return;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-
-      const newDist = computeFramingDistance(sizeX, radiusYZ, w / h, camera.fov, 1.08);
-      framingRef.current.overview.set(boxCenter.x, 0, newDist);
-      targetCamPosRef.current = new THREE.Vector3(boxCenter.x, 0, newDist);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     };
 
     let resizeRafId: number | null = null;
@@ -760,61 +988,97 @@ export default function Graph3DViewport({
     });
     resizeObserver.observe(container);
 
-    // Animation Loop
-    let animId: number;
+    // 7. Smooth 60 FPS Render & Label Projection Loop
+    const projVec = new THREE.Vector3();
+    let animId = 0;
+
     const animate = () => {
       animId = requestAnimationFrame(animate);
+      const orbit = orbitRef.current;
 
-      // Auto-rotation strictly around horizontal X-axis
-      if (!reducedMotionRef.current && autoRotateRef.current && !isDragging) {
-        targetRotationX += 0.0055;
+      if (!reducedMotionRef.current && autoRotateRef.current && dragMode === 'none') {
+        orbit.desiredTheta += 0.0024;
       }
 
-      // Smooth inertia lerp around X-axis
-      currentRotationX = THREE.MathUtils.lerp(currentRotationX, targetRotationX, 0.08);
-      treeGroup.rotation.x = currentRotationX;
+      const damp = reducedMotionRef.current ? 1 : 0.1;
+      orbit.theta = THREE.MathUtils.lerp(orbit.theta, orbit.desiredTheta, damp);
+      orbit.phi = THREE.MathUtils.lerp(orbit.phi, orbit.desiredPhi, damp);
+      orbit.radius = THREE.MathUtils.lerp(orbit.radius, orbit.desiredRadius, damp);
+      orbit.target.lerp(orbit.desiredTarget, damp);
 
-      // Spin node halos
-      if (!reducedMotionRef.current) {
-        nodeMeshMap.forEach(({ halo }) => {
-          if (halo) halo.rotation.z += 0.014;
-        });
-      }
+      const sinPhi = Math.sin(orbit.phi);
+      camera.position.set(
+        orbit.target.x + orbit.radius * sinPhi * Math.sin(orbit.theta),
+        orbit.target.y + orbit.radius * Math.cos(orbit.phi),
+        orbit.target.z + orbit.radius * sinPhi * Math.cos(orbit.theta),
+      );
+      camera.lookAt(orbit.target);
 
-      // Flowing electric sparks along curves
-      if (!reducedMotionRef.current && pulseCurves.length > 0) {
-        const positions = particleGeom.attributes.position.array as Float32Array;
-        for (let i = 0; i < particleCount; i++) {
-          particleProgress[i] = (particleProgress[i] + 0.008) % 1.0;
-          const curveIdx = i % pulseCurves.length;
-          const point = pulseCurves[curveIdx].getPoint(particleProgress[i]);
-          positions[i * 3] = point.x;
-          positions[i * 3 + 1] = point.y;
-          positions[i * 3 + 2] = point.z;
-        }
-        particleGeom.attributes.position.needsUpdate = true;
-      }
-
-      // Smooth camera position glide
-      if (targetCamPosRef.current) {
-        if (reducedMotionRef.current) {
-          camera.position.copy(targetCamPosRef.current);
-        } else {
-          camera.position.lerp(targetCamPosRef.current, 0.06);
-        }
-        if (camera.position.distanceTo(targetCamPosRef.current) < 2) {
-          targetCamPosRef.current = null;
-        }
+      if (selectRing.visible) {
+        selectRing.lookAt(camera.position);
       }
 
       renderer.render(scene, camera);
+
+      // Update projected 2D hub labels with screen-space collision culling (zero React renders!).
+      if (labelElements.size > 0) {
+        const cw = container.clientWidth || width;
+        const ch = container.clientHeight || height;
+        const placedBoxes: Array<[number, number, number, number]> = [];
+        const progressGate = timelineRef.current / 100;
+        const lineage = focusedLineageRef.current;
+
+        for (const [idx, el] of labelElements) {
+          const visible = nodeProgress[idx] <= progressGate;
+          if (!visible) {
+            el.style.opacity = '0';
+            continue;
+          }
+
+          projVec.copy(nodePositions[idx]);
+          projVec.y += (kindRadius[nodes[idx].kind] ?? 1) + 0.85;
+          projVec.project(camera);
+
+          if (projVec.z > 1 || projVec.z < -1) {
+            el.style.opacity = '0';
+            continue;
+          }
+
+          const sx = (projVec.x * 0.5 + 0.5) * cw;
+          const sy = (-projVec.y * 0.5 + 0.5) * ch;
+          const margin = 48;
+          if (sx < margin || sx > cw - margin || sy < 56 || sy > ch - 52) {
+            el.style.opacity = '0';
+            continue;
+          }
+
+          const boxW = 148;
+          const boxH = 26;
+          const collides = placedBoxes.some(
+            ([bx, by, bw, bh]) =>
+              Math.abs(sx - bx) < (boxW + bw) * 0.48 &&
+              Math.abs(sy - by) < (boxH + bh) * 0.52,
+          );
+          if (collides) {
+            el.style.opacity = '0';
+            continue;
+          }
+
+          placedBoxes.push([sx, sy, boxW, boxH]);
+          const isFocus = !lineage || lineage.has(nodes[idx].id);
+          el.style.transform = `translate3d(${sx.toFixed(1)}px, ${sy.toFixed(1)}px, 0) translate(-50%, -100%)`;
+          el.style.opacity = isFocus ? '0.94' : '0.2';
+        }
+      }
     };
     animate();
 
     return () => {
+      wasmCancelled = true;
       cancelAnimationFrame(animId);
       if (resizeRafId !== null) cancelAnimationFrame(resizeRafId);
       resizeObserver.disconnect();
+      domElement.removeEventListener('contextmenu', onContextMenu);
       domElement.removeEventListener('pointerdown', onPointerDown);
       domElement.removeEventListener('pointermove', onPointerMove);
       domElement.removeEventListener('pointerup', onPointerUp);
@@ -822,12 +1086,9 @@ export default function Graph3DViewport({
       domElement.removeEventListener('wheel', onWheel);
       domElement.removeEventListener('click', onClick);
 
-      // Deep GPU resource disposal across entire scene graph
       scene.traverse((obj) => {
         const mesh = obj as THREE.Mesh;
-        if (mesh.geometry) {
-          mesh.geometry.dispose();
-        }
+        if (mesh.geometry) mesh.geometry.dispose();
         if (mesh.material) {
           if (Array.isArray(mesh.material)) {
             mesh.material.forEach((m) => m.dispose());
@@ -838,76 +1099,29 @@ export default function Graph3DViewport({
       });
       renderer.dispose();
       scene.clear();
-      nodeMeshMapRef.current.clear();
-      edgeVisualsRef.current = [];
+      if (labelsLayer) labelsLayer.replaceChildren();
       if (domElement.parentElement) {
         domElement.parentElement.removeChild(domElement);
       }
     };
   }, [nodes, edges]);
 
-  // Lightweight visual state updates without rebuilding WebGL scene
+  // Lightweight state updates without touching WebGLRenderer.
   useEffect(() => {
-    nodeMeshMapRef.current.forEach(({ mesh, halo, mat, baseColor, node }) => {
-      const isSelected = selectedId === node.id;
-      const inLineage = focusedLineage ? focusedLineage.has(node.id) : true;
-      const normProg = nodeNormalizedProgressRef.current.get(node.id) ?? 0;
-      const isScrubVisible = normProg <= timelineProgress / 100;
-
-      const opacity = !isScrubVisible
-        ? 0.05
-        : focusedLineage
-          ? inLineage ? 1.0 : 0.12
-          : 0.92;
-
-      mat.opacity = opacity;
-      mat.color.setHex(isSelected ? 0xffffff : baseColor);
-      mat.emissive.setHex(isSelected ? 0xffffff : baseColor);
-      mat.emissiveIntensity = isSelected ? 1.2 : inLineage ? 0.65 : 0.15;
-
-      if (halo) {
-        halo.visible = isSelected || node.kind === 'Paper' || node.kind === 'Hypothesis';
-        const haloMat = halo.material as THREE.MeshBasicMaterial;
-        haloMat.color.setHex(isSelected ? 0xffffff : baseColor);
-        haloMat.opacity = opacity * 0.75;
-      }
-      mesh.scale.setScalar(isSelected ? 1.28 : 1.0);
-    });
-
-    edgeVisualsRef.current.forEach(({ lineMat, source, target, relation }) => {
-      const inLineage = focusedLineage
-        ? focusedLineage.has(source) && focusedLineage.has(target)
-        : true;
-      const srcProg = nodeNormalizedProgressRef.current.get(source) ?? 0;
-      const tgtProg = nodeNormalizedProgressRef.current.get(target) ?? 0;
-      const isScrubVisible = Math.max(srcProg, tgtProg) <= timelineProgress / 100;
-
-      lineMat.opacity = !isScrubVisible
-        ? 0.03
-        : focusedLineage
-          ? inLineage ? 1.0 : 0.08
-          : relation === 'derived_from' || relation === 'cites' ? 0.85 : 0.55;
-    });
+    syncVisualsRef.current();
   }, [selectedId, timelineProgress, focusedLineage]);
 
-  // Camera Preset Switcher (strictly horizontal targets)
   const handleCameraPreset = useCallback((preset: CameraPreset) => {
-    switch (preset) {
-      case 'overview':
-        targetCamPosRef.current = framingRef.current.overview.clone();
-        break;
-      case 'roots':
-        targetCamPosRef.current = framingRef.current.roots.clone();
-        break;
-      case 'canopy':
-        targetCamPosRef.current = framingRef.current.canopy.clone();
-        break;
-    }
+    const p = framingPresetsRef.current[preset];
+    const orbit = orbitRef.current;
+    orbit.desiredTarget.copy(p.target);
+    orbit.desiredTheta = p.theta;
+    orbit.desiredPhi = p.phi;
+    orbit.desiredRadius = p.radius;
   }, []);
 
   const handleResetCamera = useCallback(() => {
     handleCameraPreset('overview');
-    resetRotationRef.current();
     setFocusActive(false);
   }, [handleCameraPreset]);
 
@@ -919,6 +1133,7 @@ export default function Graph3DViewport({
   return (
     <div className="graph-3d-viewport">
       <div ref={containerRef} className="spatial-canvas" />
+      <div ref={labelsLayerRef} className="spatial-label-layer" aria-hidden="true" />
 
       {/* Keyboard Accessibility for 3D Navigation */}
       <button
@@ -957,7 +1172,7 @@ export default function Graph3DViewport({
           size="sm"
           className="spatial-control-button"
           onClick={() => setAutoRotate((prev) => !prev)}
-          title={autoRotate ? 'Pause automatic rotation' : 'Resume automatic rotation'}
+          title={autoRotate ? 'Pause automatic orbit' : 'Resume automatic orbit'}
           aria-pressed={autoRotate}
         >
           {autoRotate ? <Pause size={14} aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
@@ -1016,9 +1231,16 @@ export default function Graph3DViewport({
         </span>
         <span>
           <strong>3D lineage</strong>
-          <small>{nodes.length} nodes · {edges.length} links</small>
+          <small>
+            {nodes.length} nodes · {edges.length} links
+            {layoutEngine === 'rust-wasm' ? ' · WASM' : ''}
+          </small>
         </span>
-
+        {layoutEngine === 'rust-wasm' ? (
+          <span className="spatial-wasm-pill" title="Computed by Rust WebAssembly Worker">
+            <Cpu size={11} aria-hidden="true" />
+          </span>
+        ) : null}
         {focusActive && selectedId ? (
           <Button
             type="button"
@@ -1057,16 +1279,22 @@ export default function Graph3DViewport({
         </div>
       ) : null}
 
+      <div className="spatial-legend-bar" aria-hidden="true">
+        <span><i className="is-paper" />Paper</span>
+        <span><i className="is-section" />Section</span>
+        <span><i className="is-equation" />Equation</span>
+        <span><i className="is-symbol" />Symbol</span>
+        <span><i className="is-hypothesis" />Hypothesis</span>
+      </div>
+
       <span className="spatial-gesture-hint" aria-hidden="true">
-        Drag to orbit · Scroll to zoom
+        Drag to orbit 360° · Shift+drag pan · Scroll to zoom
       </span>
 
       {hoveredNode ? (
         <div className="spatial-hover-card">
           <div>
-            <span>
-              {hoveredNode.kind}
-            </span>
+            <span>{hoveredNode.kind}</span>
             <small>{hoveredNode.meta}</small>
           </div>
           <strong>{hoveredNode.label}</strong>
@@ -1079,7 +1307,7 @@ export default function Graph3DViewport({
             <code>{hoveredNode.expression}</code>
           )}
           <p>
-            <Focus size={12} aria-hidden="true" /> Select to isolate this branch
+            <Focus size={12} aria-hidden="true" /> Click to orbit &amp; isolate branch
           </p>
         </div>
       ) : null}

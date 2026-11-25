@@ -13,7 +13,7 @@ export function proxy(request: Request) {
     const nonce = crypto.randomUUID().replaceAll('-', '');
     policy = [
       "default-src 'self'",
-      `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
+      `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'wasm-unsafe-eval'`,
       "script-src-attr 'none'",
       `style-src 'self' 'nonce-${nonce}'`,
       // ponytail: KaTeX/React Flow need dynamic geometry style attributes,

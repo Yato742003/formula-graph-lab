@@ -1,0 +1,15 @@
+[package]
+name = "formula-layout-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic 2D hierarchical lane & 3D scientific constellation layout engine compiled to WebAssembly for FormulaGraph Lab."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

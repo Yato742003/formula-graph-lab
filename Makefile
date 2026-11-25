@@ -3,7 +3,7 @@ SHELL := /usr/bin/env bash
 
 PYTHON ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; elif [ -x .venv/Scripts/python.exe ]; then echo .venv/Scripts/python.exe; else command -v python3 || command -v python; fi)
 
-.PHONY: help setup db-up db-down db-migrate api web verify build test-integration test-sandbox benchmark replay
+.PHONY: help setup db-up db-down db-migrate api web verify build build-wasm test-integration test-sandbox benchmark replay
 
 help: ## Show available cross-platform targets (macOS / Linux / Git Bash)
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -37,6 +37,11 @@ verify: ## Run full offline verification gate (Ruff, Pytest, Oxlint, TypeScript,
 
 build: ## Build production Cloudflare Worker / Vinext bundle
 	npm run build
+
+build-wasm: ## Compile Rust layout engine crate to public/wasm/formula-layout.wasm
+	cd crates/formula-layout-wasm && cargo test --quiet && cargo build --target wasm32-unknown-unknown --release
+	mkdir -p public/wasm
+	cp crates/formula-layout-wasm/target/wasm32-unknown-unknown/release/formula_layout_wasm.wasm public/wasm/formula-layout.wasm
 
 test-integration: ## Run Neo4j integration tests against an isolated tmpfs container
 	@set -euo pipefail; \

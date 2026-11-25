@@ -14,8 +14,10 @@ describe('production browser security boundary', () => {
     } });
     const first = proxy(request);
     const policy = first.headers.get('content-security-policy')!;
-    expect(policy).toMatch(/script-src 'self' 'nonce-[a-f0-9]{32}' 'strict-dynamic'/);
-    expect(policy.split('; ').find((p) => p.startsWith('script-src '))).not.toContain('unsafe');
+    const scriptSrc = policy.split('; ').find((p) => p.startsWith('script-src ')) ?? '';
+    expect(scriptSrc).toMatch(/^script-src 'self' 'nonce-[a-f0-9]{32}' 'strict-dynamic' 'wasm-unsafe-eval'$/);
+    expect(scriptSrc).not.toContain("'unsafe-inline'");
+    expect(scriptSrc).not.toContain("'unsafe-eval'");
     expect(first.headers.get('x-middleware-request-content-security-policy')).toBe(policy);
     expect(first.headers.get('x-middleware-request-x-nonce')).toMatch(/^[a-f0-9]{32}$/);
     expect(first.headers.get('x-middleware-request-content-security-policy-report-only')).toBeNull();

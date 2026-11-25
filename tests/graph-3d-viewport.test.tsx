@@ -125,4 +125,27 @@ describe('Graph3DViewport', () => {
     fireEvent.click(pause);
     expect(screen.getByRole('button', { name: /rotate/i }).getAttribute('aria-pressed')).toBe('false');
   });
+
+  it('supports 360-degree pointer orbit drag and renders semantic legend items', () => {
+    const { container } = render(
+      <Graph3DViewport
+        nodes={[
+          { id: 'p1', kind: 'Paper', label: 'Attention', expression: '1706.03762', meta: '2017' },
+          ...mockNodes,
+        ]}
+        edges={[{ id: 'e1', source: 'p1', target: 'eq1', relation: 'contains' }]}
+        selectedId={null}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    const canvas = container.querySelector('canvas');
+    expect(canvas).toBeTruthy();
+    fireEvent.pointerDown(canvas!, { clientX: 200, clientY: 200, pointerId: 1, button: 0 });
+    fireEvent.pointerMove(canvas!, { clientX: 320, clientY: 140, pointerId: 1 });
+    fireEvent.pointerUp(canvas!, { clientX: 320, clientY: 140, pointerId: 1 });
+
+    expect(container.querySelector('.spatial-legend-bar')?.textContent).toContain('Equation');
+    expect(container.querySelector('.spatial-gesture-hint')?.textContent).toContain('360°');
+  });
 });

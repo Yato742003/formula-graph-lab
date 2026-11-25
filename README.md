@@ -6,6 +6,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com/)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python)](https://python.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?style=flat-square&logo=typescript)](https://typescriptlang.org/)
+[![Rust WASM](https://img.shields.io/badge/Rust-WASM%20Layout%20Worker-000000?style=flat-square&logo=rust)](crates/formula-layout-wasm)
 [![Neo4j](https://img.shields.io/badge/Neo4j-5.26-008CC1?style=flat-square&logo=neo4j)](https://neo4j.com/)
 [![Cloudflare D1](https://img.shields.io/badge/Cloudflare%20D1-Drizzle%20ORM-F38020?style=flat-square&logo=cloudflare)](https://developers.cloudflare.com/d1/)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
@@ -15,9 +16,11 @@
 
 ![FormulaGraph Lab Live End-to-End Walkthrough: 2D Graph → 3D Sacred Timeline → Spec Builder → Proposals → Reports → /ops Dead-Letter Ledger](docs/screenshots/workbench-demo.gif)
 
-| 2D Formula Graph & KaTeX Inspector | Visual Problem Spec Builder (G1) | `/ops` Dead-Letter & Reconciliation Ledger |
-| :---: | :---: | :---: |
-| ![FormulaGraph Lab 2D Graph Viewport](docs/screenshots/evidence-graph-2d.jpg) | ![FormulaGraph Lab Problem Spec Gate](docs/screenshots/research-problem-spec.png) | ![FormulaGraph Lab Ops Dead-Letter Ledger](docs/screenshots/ops-dead-letter-ledger.png) |
+| 2D Unified Formula Graph (Rust/WASM Worker) | 3D Scientific Observatory (`InstancedMesh` · 360° Orbit) |
+| :---: | :---: |
+| ![FormulaGraph Lab 2D Graph Viewport](docs/screenshots/evidence-graph-2d.jpg) | ![FormulaGraph Lab 3D Scientific Observatory](docs/screenshots/evidence-graph-3d.jpg) |
+| **Visual Problem Spec Builder (G1)** | **`/ops` Dead-Letter & Reconciliation Ledger** |
+| ![FormulaGraph Lab Problem Spec Gate](docs/screenshots/research-problem-spec.png) | ![FormulaGraph Lab Ops Dead-Letter Ledger](docs/screenshots/ops-dead-letter-ledger.png) |
 
 ---
 
@@ -69,7 +72,7 @@ Four fixed anchor-finding queries × 3 alternating repeats on isolated Neo4j (`k
 
 ### 4. Automated Test & Release-Gate Coverage
 
-- **Offline regression (`make verify` / `scripts/verify-research.ps1`):** `705` Pytest tests + `208` Vitest tests (`28` files) + Ruff (`0` errors) + Oxlint (`0` errors) + `tsc --noEmit` (`0` errors).
+- **Offline regression (`make verify` / `scripts/verify-research.ps1`):** `705` Pytest tests + `212` Vitest tests (`29` files, including live `public/wasm/formula-layout.wasm` verification) + `3` Rust crate tests + Ruff (`0` errors) + Oxlint (`0` errors) + `tsc --noEmit` (`0` errors).
 - **Live isolated Neo4j integration (`make test-integration` / `scripts/test-integration.ps1`):** `35` integration tests on ephemeral tmpfs `neo4j:5.26-community` (including signed `fgl1` auth replay rejection, double-delivery quarantine, and dead-letter reconciliation).
 - **Adversarial Docker sandbox & clean-container replay (`make test-sandbox` / `scripts/test-sandbox.ps1`):** `7` container boundary tests (controls, OOM kill, wall-clock kill, stdout flood cap, read-only rootfs, network lockdown) + `1` zero-network replay test.
 - **Production HTTP/CSP smoke (`tests/production-security-smoke.mjs`):** Verifies per-request SSR CSP script nonces, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and fail-closed anonymous BFF denial.
@@ -80,8 +83,8 @@ Four fixed anchor-finding queries × 3 alternating repeats on isolated Neo4j (`k
 
 ### 1. Dual-Mode 2D & 3D Evidence Workbench (5-Step Pipeline)
 - **Unified Workspace Shell**: Five-stage workflow (`01 Graph` → `02 Spec` → `03 Compatibility` → `04 Proposals` → `05 Reports`) plus `/ops` control plane and `/help`.
-- **2D Section Swimlanes (`@xyflow/react`)**: Structured view of papers, sections, extracted equations (`S*.E*`), and symbol contracts.
-- **3D Sacred Timeline (`Three.js` / WebGL)**: Deterministic golden-angle volumetric layout with dynamic camera framing for exploring derivation lineage.
+- **2D Unified Section Swimlanes (`@xyflow/react` + Rust/WASM Worker)**: Off-main-thread `wasm32-unknown-unknown` layout engine (`crates/formula-layout-wasm`, `63 KB`) with variable-height KaTeX + symbol-chip packing, Sugiyama barycenter ordering, balanced sub-column folding, and consistent lane framing across both equation-rich and text-only papers.
+- **3D Scientific Observatory (`Three.js` Lazy Chunk + `InstancedMesh`)**: Dynamically split WebGL chunk using GPU instanced polyhedra (`<= 6` draw calls), merged quadratic Bézier edge buffers, two-tier equation/section hierarchy, collision-culled 2D hub labels, and 360° damped spherical orbit/pan controls.
 
 ### 2. Source-Bound arXiv HTML / MathML Extraction
 - Strict ingestion gate accepts only canonical `https://arxiv.org/html/\d{4}\.\d{4,5}(v\d+)?` URLs with bounded redirects, MIME validation, and size caps.
@@ -203,7 +206,7 @@ Copy [`.env.example`](.env.example) to `.env`:
 
 | Check | macOS / Linux (`Makefile`) | Windows (`PowerShell`) |
 | :--- | :--- | :--- |
-| **Offline Gate** (Ruff + 705 Pytest + Oxlint + `tsc` + 208 Vitest) | `make verify` | `powershell -NoProfile -File .\scripts\verify-research.ps1` |
+| **Offline Gate** (Ruff + 705 Pytest + Oxlint + `tsc` + 212 Vitest) | `make verify` | `powershell -NoProfile -File .\scripts\verify-research.ps1` |
 | **Live Neo4j Integration** (isolated tmpfs Neo4j, 35 tests) | `make test-integration` | `powershell -NoProfile -File .\scripts\test-integration.ps1` |
 | **Docker Sandbox & Clean Replay** (7 isolation + 1 replay) | `make test-sandbox` | `powershell -NoProfile -File .\scripts\test-sandbox.ps1` |
 | **Empirical Corpus + Sandbox Benchmark** | `make benchmark` | `python scripts/benchmark_evidence.py --sandbox-image <sha256>` |
