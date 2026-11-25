@@ -5,7 +5,7 @@ import type {
   ImportedSection,
   WorkspaceImportResponse,
 } from '../import-types';
-import { normalizeArxivHtmlUrl } from '../paper-url';
+import { validatedPaperSource } from '../paper-url';
 import { emitBffTelemetry, newBffRequestId, safeUpstreamRequestId } from './bff-telemetry';
 import { signedGraphHeaders } from './graph-service-auth';
 import {
@@ -17,8 +17,6 @@ import {
 const MAX_GRAPH_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_SECTIONS = 2_000;
 const MAX_EQUATIONS = 10_000;
-const ARXIV_ID = /^\d{4}\.\d{4,5}$/;
-const SHA256 = /^[a-f0-9]{64}$/;
 const EXTRACTION_METHODS = new Set<ImportedEquation['extraction_method']>([
   'tex_annotation',
   'alttext',
@@ -100,13 +98,14 @@ export class HttpGraphImportClient implements GraphImportClient {
   constructor(
     private readonly configuration: GraphApiConfiguration,
     private readonly fetchImplementation: typeof fetch = fetch,
+    private readonly tex?: { tex_source: string; title?: string; filename?: string },
   ) {}
 
   async importEvidence(canonicalUrl: string, workspaceId: string, actorId: string) {
     let response: Response;
     try {
-      const url = new URL('/v1/imports', this.configuration.baseUrl);
-      const body = JSON.stringify({ url: canonicalUrl, workspace_id: workspaceId });
+      const url = new URL(this.tex ? '/v1/evidence/import-tex' : '/v1/imports', this.configuration.baseUrl);
+      const body = JSON.stringify({ ...(this.tex ?? { url: canonicalUrl }), workspace_id: workspaceId });
       response = await this.fetchImplementation(
         url,
         {
@@ -145,7 +144,11 @@ export class HttpGraphImportClient implements GraphImportClient {
         response.body,
         MAX_GRAPH_RESPONSE_BYTES,
       );
-      return parseGraphImportResponse(JSON.parse(responseText));
+      const result = parseGraphImportResponse(JSON.parse(responseText));
+      if (this.tex ? result.paper.source_url !== canonicalUrl : result.paper.source_kind === 'local_tex') {
+        throw new TypeError('Unexpected source.');
+      }
+      return result;
     } catch (error) {
       if (error instanceof PayloadTooLargeError) {
         throw new ImportWorkflowError('GRAPH_API_RESPONSE_TOO_LARGE', 502);
@@ -368,7 +371,7 @@ export async function runPaperImport(input: {
       now: startedAt,
     });
   } catch {
-    emitBffTelemetry('bff_paper_import', {
+    emitBffTelemetry(input.canonicalUrl.startsWith('urn:') ? 'bff_tex_import' : 'bff_paper_import', {
       bff_request_id: bffRequestId,
       workspace_id: workspaceId,
       import_job_id: jobId,
@@ -406,7 +409,7 @@ export async function runPaperImport(input: {
         now: now(),
       },
     });
-    emitBffTelemetry('bff_paper_import', {
+    emitBffTelemetry(input.canonicalUrl.startsWith('urn:') ? 'bff_tex_import' : 'bff_paper_import', {
       bff_request_id: bffRequestId,
       upstream_request_id: upstreamRequestId,
       workspace_id: workspaceId,
@@ -434,7 +437,7 @@ export async function runPaperImport(input: {
         now: now(),
       });
     } catch {
-      emitBffTelemetry('bff_paper_import', {
+      emitBffTelemetry(input.canonicalUrl.startsWith('urn:') ? 'bff_tex_import' : 'bff_paper_import', {
         bff_request_id: bffRequestId,
         upstream_request_id: upstreamRequestId,
         workspace_id: workspaceId,
@@ -444,7 +447,7 @@ export async function runPaperImport(input: {
       });
       throw databaseUnavailable();
     }
-    emitBffTelemetry('bff_paper_import', {
+    emitBffTelemetry(input.canonicalUrl.startsWith('urn:') ? 'bff_tex_import' : 'bff_paper_import', {
       bff_request_id: bffRequestId,
       upstream_request_id: upstreamRequestId,
       workspace_id: workspaceId,
@@ -474,19 +477,12 @@ function parseGraphImportResponse(value: unknown): {
 function parsePaper(value: unknown): ImportedPaper {
   const paper = record(value);
   const paperId = boundedString(paper.paper_id, 32);
-  if (!ARXIV_ID.test(paperId)) throw new TypeError('Invalid paper id.');
   const version = nullablePositiveInteger(paper.version);
-  if (version === null) throw new TypeError('A pinned paper version is required.');
-  const sourceUrl = normalizeArxivHtmlUrl(
-    boundedString(paper.source_url, 2_048),
-  );
-  if (!sourceUrl.endsWith(`v${version}`)) {
-    throw new TypeError('Paper source is not pinned to its declared version.');
-  }
+  if (version === null) throw new TypeError('Missing paper version.');
   const sourceSha256 = boundedString(paper.source_sha256, 64);
-  if (!SHA256.test(sourceSha256)) throw new TypeError('Invalid source hash.');
-
+  const sourceUrl = validatedPaperSource(paperId, version, sourceSha256, boundedString(paper.source_url, 2048));
   return {
+    source_kind: paperId.startsWith("tex_") ? "local_tex" : "arxiv_html",
     paper_id: paperId,
     version,
     title: boundedString(paper.title, 2_000),

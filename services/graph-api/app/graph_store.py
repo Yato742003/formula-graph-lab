@@ -94,7 +94,9 @@ class GraphitiResearchStore:
                     result = await self._client.add_episode(
                         name=episode.name, episode_body=episode.body,
                         source_description=(
-                            f"Structured HTML/MathML extraction from {paper.source_url}"
+                            f"Structured LaTeX extraction from {paper.source_url}"
+                            if paper.source_kind == "local_tex"
+                            else f"Structured HTML/MathML extraction from {paper.source_url}"
                         ),
                         reference_time=episode.reference_time, source=EpisodeType.json,
                         group_id=episode.group_id, uuid=episode.uuid,

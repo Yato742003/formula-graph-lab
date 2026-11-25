@@ -7528,3 +7528,8 @@ html {
     animation: none;
   }
 }
+
+.tex-import-fields { display: grid; gap: .5rem; flex: 1; min-width: 0; }
+.tex-import-fields textarea { resize: vertical; min-height: 4rem; }
+.import-label button { padding: .4rem; }
+.import-label button[aria-pressed="true"] { text-decoration: underline; }

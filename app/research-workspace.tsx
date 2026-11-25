@@ -675,6 +675,10 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
   const [graphNotice, setGraphNotice] = useState('Loading saved evidence…');
   const [selectedSearchHit, setSelectedSearchHit] =
     useState<EvidenceSearchHit | null>(null);
+  const [localTex, setLocalTex] = useState(false);
+  const [texSource, setTexSource] = useState('');
+  const [texFilename, setTexFilename] = useState('');
+  const [texTitle, setTexTitle] = useState('');
   const [paperUrl, setPaperUrl] = useState('https://arxiv.org/html/1706.03762');
   const [notice, setNotice] = useState(
     'Curated demo · import an arXiv HTML paper to replace it',
@@ -1365,14 +1369,19 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
   async function handleImport(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
     try {
-      const canonicalUrl = normalizeArxivHtmlUrl(paperUrl);
-      setPaperUrl(canonicalUrl);
+      if (localTex && new TextEncoder().encode(texSource).length > 512 * 1024) {
+        setNotice('LaTeX source exceeds 512 KiB.');
+        return;
+      }
+      const payload = localTex
+        ? { tex_source: texSource, filename: texFilename || undefined, title: texTitle || undefined }
+        : { url: normalizeArxivHtmlUrl(paperUrl) };
       setIsImporting(true);
       setNotice('Extracting and persisting source-bound evidence…');
-      const response = await fetch('/api/imports', {
+      const response = await fetch(localTex ? '/api/imports/tex' : '/api/imports', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ url: canonicalUrl }),
+        body: JSON.stringify(payload),
       });
       const result =
         (await response.json()) as Partial<WorkspaceImportResponse> & {
@@ -1388,7 +1397,9 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
       }
       const completed = result as WorkspaceImportResponse;
       setImported(completed);
-      const refreshedGraph = await loadPersistedGraph();
+      const refreshedGraph = await loadPersistedGraph(undefined, localTex ? {
+        id: completed.paper.paper_id, version: completed.paper.version ?? undefined,
+      } : undefined);
       setNotice(
         `${completed.paper.equations.length} equations ${
           completed.receipt.replayed ? 'already synchronized' : 'persisted'
@@ -1398,7 +1409,7 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
       setNotice(
         error instanceof PaperUrlError
           ? error.message
-          : 'Enter a valid paper URL.',
+          : 'Could not complete the import.',
       );
     } finally {
       setIsImporting(false);
@@ -1480,7 +1491,7 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
   }
 
   const importPhases = [
-    '1. Fetching arXiv HTML',
+    localTex ? '1. Reading LaTeX source' : '1. Fetching arXiv HTML',
     '2. Extracting MathML & LaTeX',
     '3. Checking AST & dimensions',
     '4. Saving SHA-256 snapshot',
@@ -1617,7 +1628,7 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                 Active:
               </span>
               <span className="text-xs text-muted-foreground truncate font-medium">
-                arXiv:{paperId} &mdash; {paperTitle}
+                {paperId.startsWith('tex_') ? 'local .tex · ' : 'arXiv:'}{paperId} &mdash; {paperTitle}
               </span>
               <Badge
                 variant="outline"
@@ -1647,10 +1658,27 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
           <>
             <div className="import-label">
               <Link2 size={16} />
-              HTML source
+              <fieldset aria-label="Paper source">
+                <button type="button" aria-pressed={!localTex} onClick={() => setLocalTex(false)}>arXiv HTML</button>
+                <button type="button" aria-pressed={localTex} onClick={() => setLocalTex(true)}>.tex / LaTeX</button>
+              </fieldset>
             </div>
             <form className="import-form" onSubmit={handleImport}>
-              <Input
+              {localTex ? <div className="tex-import-fields">
+                <input type="file" accept=".tex,.txt" aria-label="Upload LaTeX source" onChange={async event => {
+                  const file = event.target.files?.[0];
+                  if (!file) return;
+                  if (file.size > 512 * 1024) { setNotice('LaTeX source exceeds 512 KiB.'); return; }
+                  try {
+                    setTexSource(await file.text());
+                    setTexFilename(file.name);
+                  } catch { setNotice('Could not read the selected file.'); }
+                }} />
+                <textarea aria-label="Paste LaTeX source" required value={texSource}
+                  onChange={event => { setTexSource(event.target.value); setTexFilename(''); }} />
+                <Input aria-label="Optional document title" placeholder="Document title (optional)"
+                  maxLength={2000} value={texTitle} onChange={event => setTexTitle(event.target.value)} />
+              </div> : <Input
                 id="arxiv-paper-url"
                 name="paper_url"
                 aria-label="arXiv HTML paper URL"
@@ -1658,7 +1686,7 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                 onChange={(event) => setPaperUrl(event.target.value)}
                 className="paper-url-input"
                 spellCheck={false}
-              />
+              />}
               <Button
                 className="import-button"
                 type="submit"
@@ -1721,7 +1749,7 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
             <h3>{paperTitle}</h3>
             <p>
               {hasPersistedGraph || imported
-                ? `${authorsLabel(paperAuthors)} · arXiv:${paperId}`
+                ? `${authorsLabel(paperAuthors)} · ${paperId.startsWith('tex_') ? 'local .tex · ' : 'arXiv:'}${paperId}`
                 : 'Vaswani et al. · arXiv:1706.03762'}
             </p>
             <div className="paper-meta">
@@ -1778,14 +1806,14 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                     {/* Row 1: Paper Number / ID & Eq Count Badge */}
                     <div className="flex items-center justify-between gap-1">
                       <span className="font-semibold text-[11px] font-mono text-foreground truncate">
-                        P–0{idx + 1} · arXiv:{p.id}
+                        P–0{idx + 1} · {p.id.startsWith('tex_') ? 'local .tex · ' : 'arXiv:'}{p.id}
                       </span>
                       {p.hasHtml ? (
                         <Badge
                           variant="outline"
                           className="text-[9px] py-0 h-4 border-emerald-500/40 text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 shrink-0 font-medium"
                         >
-                          HTML ({p.eqCount} eq)
+                          {p.id.startsWith('tex_') ? 'local .tex' : 'HTML'} ({p.eqCount} eq)
                         </Badge>
                       ) : (
                         <Badge
@@ -2773,7 +2801,7 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                 </ul>
               </details>
 
-              <a
+              {paperId.startsWith('tex_') ? <span className="source-link">local .tex · {inspector.anchor}</span> : <a
                 className="source-link"
                 href={inspector.sourceHref}
                 target="_blank"
@@ -2784,7 +2812,7 @@ export default function ResearchWorkspace({ user, stage }: ResearchWorkspaceProp
                   ? 'Open evidence in source'
                   : 'Open paper source'}
                 <span>↗</span>
-              </a>
+              </a>}
             </>
           ) : (
             <>

@@ -137,6 +137,17 @@ async def test_signed_http_import_search_spec_and_replica_replay(monkeypatch):
             assert (
                 await client.post("/v1/imports", content=body, headers=signed)
             ).status_code == 200
+            tex_path = "/v1/evidence/import-tex"
+            tex_body = json.dumps({"tex_source": "$$x=1$$", "workspace_id": workspaces[0]}).encode()
+            for replay in (False, True):
+                imported = await client.post(
+                    tex_path, content=tex_body,
+                    headers=sign_request("POST", tex_path, tex_body,
+                                         actor=actors[0], role="graph_write"),
+                )
+                assert imported.status_code == 200, imported.text
+                assert imported.json()["receipt"]["replayed"] is replay
+                assert imported.json()["paper"]["source_kind"] == "local_tex"
             # Another API instance uses another driver, but the replay ledger is shared.
             monkeypatch.setattr(app.state, "evidence_store", second)
             assert (

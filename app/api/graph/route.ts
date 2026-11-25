@@ -12,7 +12,7 @@ import {
 } from '@/lib/server/paper-import';
 import { env } from 'cloudflare:workers';
 
-const ARXIV_ID_PARAM = /^\d{4}\.\d{4,5}$/;
+import { PAPER_ID } from '@/lib/paper-url';
 const PAPER_VERSION_PARAM = /^[1-9]\d{0,5}$/;
 
 function json(body: unknown, status: number) {
@@ -36,7 +36,7 @@ export async function GET(request: Request) {
   const targetPaperId = url.searchParams.get('paper_id');
   const targetVersionStr = url.searchParams.get('version');
 
-  if (targetPaperId !== null && !ARXIV_ID_PARAM.test(targetPaperId)) {
+  if (targetPaperId !== null && !PAPER_ID.test(targetPaperId)) {
     return json({ code: 'INVALID_PAPER_ID' }, 400);
   }
   if (targetVersionStr !== null && !PAPER_VERSION_PARAM.test(targetVersionStr)) {

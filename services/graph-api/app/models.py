@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.verification import VerificationVector
 
@@ -15,6 +16,14 @@ class PaperImportRequest(BaseModel):
 
 class EvidenceImportRequest(PaperImportRequest):
     workspace_id: str = Field(min_length=1, max_length=200, pattern=r".*\S.*")
+
+
+class TexEvidenceImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    workspace_id: str = Field(min_length=1, max_length=200)
+    tex_source: str = Field(min_length=1, max_length=512 * 1024)
+    title: str | None = Field(default=None, max_length=2000)
+    filename: str | None = Field(default=None, max_length=255)
 
 
 class ExtractedEquation(BaseModel):
@@ -51,10 +60,23 @@ class ExtractedPaper(BaseModel):
     authors: list[str] = Field(default_factory=list)
     version_published_at: date | None = None
     metadata_warnings: list[str] = Field(default_factory=list)
-    source_url: HttpUrl
+    source_kind: Literal["arxiv_html", "local_tex"] = "arxiv_html"
+    source_url: str
     source_sha256: str
     sections: list[ExtractedSection] = Field(default_factory=list)
     equations: list[ExtractedEquation]
+
+
+    @model_validator(mode="after")
+    def validate_source(self):
+        if self.source_kind == "local_tex":
+            if (not re.fullmatch(r"[a-f0-9]{64}", self.source_sha256)
+                    or self.source_url != f"urn:fgl:local-tex:{self.source_sha256}"
+                    or self.paper_id != f"tex_{self.source_sha256[:12]}" or self.version != 1):
+                raise ValueError("Invalid local TeX provenance.")
+        elif not re.fullmatch(r"https://arxiv\.org/html/\d{4}\.\d{4,5}(v\d+)?", self.source_url):
+            raise ValueError("Expected canonical arXiv HTML source.")
+        return self
 
 
 class HealthResponse(BaseModel):
@@ -119,7 +141,7 @@ EvidenceRelationType = Literal[
 class EvidenceSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500, pattern=r".*\S.*")
     workspace_id: str = Field(min_length=1, max_length=200, pattern=r".*\S.*")
-    paper_id: str | None = Field(default=None, pattern=r"^\d{4}\.\d{4,5}$")
+    paper_id: str | None = Field(default=None, pattern=r"^(\d{4}\.\d{4,5}|tex_[a-f0-9]{12})$")
     version: int | None = Field(default=None, ge=1)
     entity_types: list[EvidenceEntityType] = Field(default_factory=list, max_length=20)
     verification_statuses: list[VerificationStatus] = Field(
@@ -183,7 +205,7 @@ class EvidenceSearchResponse(BaseModel):
 
 class EvidenceGraphSnapshotRequest(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=200, pattern=r".*\S.*")
-    paper_id: str = Field(pattern=r"^\d{4}\.\d{4,5}$")
+    paper_id: str = Field(pattern=r"^(\d{4}\.\d{4,5}|tex_[a-f0-9]{12})$")
     version: int = Field(ge=1)
 
 

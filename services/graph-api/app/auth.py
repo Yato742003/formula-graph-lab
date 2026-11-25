@@ -14,9 +14,8 @@ from fastapi import Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from app.security import (
-    MAX_PAPER_IMPORT_BYTES,
-    MAX_REQUEST_BODY_BYTES,
     PayloadTooLargeError,
+    body_limit,
     check_payload_size,
     log_audit_event,
     request_context,
@@ -110,11 +109,7 @@ async def require_service_claims(
         raise HTTPException(status_code=401, detail="Invalid service credentials.")
     if request.headers.getlist("authorization") != [authorization]:
         raise HTTPException(status_code=401, detail="Invalid service credentials.")
-    max_body_bytes = (
-        MAX_PAPER_IMPORT_BYTES
-        if request.url.path == "/v1/imports"
-        else MAX_REQUEST_BODY_BYTES
-    )
+    max_body_bytes = body_limit(request.url.path)
     content_length_header = request.headers.get("content-length")
     if content_length_header:
         try:
@@ -184,7 +179,9 @@ async def require_service_claims(
         raise HTTPException(status_code=403, detail="Service workspace denied.")
     if request.method == "POST" and request.url.path in READ_PATHS:
         required_role = "graph_read"
-    elif request.method == "POST" and request.url.path in {"/v1/imports", "/v1/contract-reviews"}:
+    elif request.method == "POST" and request.url.path in {
+        "/v1/imports", "/v1/evidence/import", "/v1/evidence/import-tex", "/v1/contract-reviews",
+    }:
         required_role = "graph_write"
     elif request.url.path.startswith("/v1/research/") and request.method in {"GET", "POST"}:
         required_role = "research_read" if request.method == "GET" else "research_write"

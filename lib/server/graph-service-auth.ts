@@ -34,7 +34,7 @@ export async function signedGraphHeaders(
     serviceRole = method === 'GET' ? 'research_read' : 'research_write';
   } else if (method === 'POST' && READ_PATHS.has(url.pathname)) {
     serviceRole = 'graph_read';
-  } else if (method === 'POST' && ['/v1/imports', '/v1/contract-reviews'].includes(url.pathname)) {
+  } else if (method === 'POST' && ['/v1/imports', '/v1/evidence/import', '/v1/evidence/import-tex', '/v1/contract-reviews'].includes(url.pathname)) {
     serviceRole = 'graph_write';
   } else {
     throw new TypeError('Unknown service operation.');

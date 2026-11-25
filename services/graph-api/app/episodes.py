@@ -57,6 +57,9 @@ def build_paper_episodes(
     workspace_id: str,
     reference_time: datetime | None = None,
 ) -> list[ResearchEpisode]:
+    if reference_time is None and paper.source_kind == "local_tex":
+        # Local documents have no publication date. Use first ingestion time.
+        reference_time = datetime.now(UTC)
     if reference_time is None:
         if paper.version_published_at is None:
             raise ValueError("A source reference time is required when the version date is absent.")
@@ -72,6 +75,8 @@ def build_paper_episodes(
     root_uuid = paper_episode_uuid(paper, workspace_id=workspace_id)
     version_key = paper.version if paper.version is not None else paper.source_sha256
     saga = f"arxiv_{paper.paper_id.replace('.', '_')}_v{version_key}"
+    if paper.source_kind == "local_tex":
+        saga = f"{paper.paper_id}_v{version_key}"
     metadata = paper.model_dump(mode="json", exclude={"equations", "sections"})
     sections = sorted(paper.sections, key=lambda item: item.order)
     if len({s.order for s in sections}) != len(sections):

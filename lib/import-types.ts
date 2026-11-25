@@ -30,6 +30,7 @@ export type ImportedSection = {
 };
 
 export type ImportedPaper = {
+  source_kind?: "arxiv_html" | "local_tex";
   paper_id: string;
   version: number | null;
   title: string;

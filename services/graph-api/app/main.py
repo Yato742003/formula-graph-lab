@@ -77,6 +77,7 @@ from app.models import (
     PaperImportRequest,
     ReviewedFormulaContract,
     SymbolicCheckCreateRequest,
+    TexEvidenceImportRequest,
 )
 from app.numerical_verification import (
     NumericalFixtureReceipt,
@@ -337,6 +338,25 @@ async def preview_extraction(
     return await extract_request(request.url)
 
 
+@app.post("/v1/evidence/import-tex", response_model=EvidenceImportResponse)
+async def import_tex(
+    body: TexEvidenceImportRequest,
+    http_request: Request,
+    _: None = Depends(require_service_token),
+    store: Neo4jEvidenceStore = Depends(require_evidence_store),  # noqa: B008
+) -> EvidenceImportResponse:
+    from app.tex_extractor import extract_tex
+
+    if len(body.tex_source.encode("utf-8")) > 512 * 1024:
+        raise HTTPException(status_code=413, detail="LaTeX source exceeds 512 KiB.")
+    try:
+        paper = extract_tex(body.tex_source, body.title, body.filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return await persist_import(paper, body.workspace_id, store, http_request, time.perf_counter())
+
+
+@app.post("/v1/evidence/import", response_model=EvidenceImportResponse)
 @app.post("/v1/imports", response_model=EvidenceImportResponse)
 async def import_evidence(
     body: EvidenceImportRequest,
@@ -346,11 +366,15 @@ async def import_evidence(
 ) -> EvidenceImportResponse:
     started = time.perf_counter()
     paper = await extract_request(body.url)
+    return await persist_import(paper, body.workspace_id, store, http_request, started)
+
+
+async def persist_import(paper, workspace_id, store, http_request, started):
     emit_event("paper_extracted", paper_id=paper.paper_id, source_hash=paper.source_sha256,
                equation_count=len(paper.equations), section_count=len(paper.sections),
                duration_ms=round((time.perf_counter()-started)*1000, 3))
     try:
-        graph = build_evidence_graph(paper, workspace_id=body.workspace_id)
+        graph = build_evidence_graph(paper, workspace_id=workspace_id)
         receipt = await store.ingest(graph)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -360,7 +384,7 @@ async def import_evidence(
             level=logging.ERROR,
             code="NEO4J_UNAVAILABLE",
             operation="import_evidence",
-            workspace_id=body.workspace_id,
+            workspace_id=workspace_id,
             error_type=type(exc).__name__,
         )
         raise HTTPException(status_code=503, detail="Exact evidence storage failed.") from exc
@@ -371,7 +395,7 @@ async def import_evidence(
     if semantic_store is not None:
         try:
             await semantic_store.ingest_paper_version(
-                workspace_id=body.workspace_id,
+                workspace_id=workspace_id,
                 paper=paper,
                 receipts=store,
             )

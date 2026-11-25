@@ -873,6 +873,8 @@ class Neo4jEvidenceStore:
             raise EvidenceSnapshotDataError("Evidence payload is invalid.") from exc
         if not isinstance(payload, dict):
             raise EvidenceSnapshotDataError("Evidence payload must be an object.")
+        if record["kind"] == "PaperVersion":
+            payload.setdefault("source_kind", "arxiv_html")
         analysis_payload = record.get("analysis_payload")
         if analysis_payload is not None:
             try:
@@ -1182,10 +1184,12 @@ class Neo4jEvidenceStore:
             UNWIND $episodes AS item
             MERGE (e:Episodic {uuid:item.uuid})
             ON CREATE SET e.name=item.name, e.group_id=$group, e.content=item.content,
-                e.source='json', e.source_description='Source-bound arXiv HTML extraction',
+                e.source='json', e.source_description=$description,
                 e.created_at=$now, e.valid_at=item.valid_at, e.entity_edges=[]
             """,
             episodes=episodes, group=graph.group_id, now=now,
+            description=("Source-bound local LaTeX extraction" if graph.paper_id.startswith("tex_")
+                         else "Source-bound arXiv HTML extraction"),
         )
         await tx.run(
             """
@@ -1272,6 +1276,8 @@ class Neo4jEvidenceStore:
             ON CREATE SET r.group_id=$group, r.created_at=$now
             """,
             episodes=episodes, group=graph.group_id, now=now,
+            description=("Source-bound local LaTeX extraction" if graph.paper_id.startswith("tex_")
+                         else "Source-bound arXiv HTML extraction"),
         )
         # Rebuild the direct revision chain so out-of-order imports still produce
         # v3 -> v2 -> v1. The scope includes only one workspace and paper identity.

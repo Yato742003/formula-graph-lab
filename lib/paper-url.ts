@@ -51,3 +51,18 @@ export function normalizeArxivHtmlUrl(value: string): string {
 
   return `https://arxiv.org/html/${path[1]}`;
 }
+
+export const PAPER_ID = /^(?:\d{4}\.\d{4,5}|tex_[a-f0-9]{12})$/;
+
+export function validatedPaperSource(id: string, version: number, hash: string, url: string) {
+  if (!PAPER_ID.test(id) || !/^[a-f0-9]{64}$/.test(hash)) throw new TypeError('Invalid paper identity.');
+  if (id.startsWith('tex_')) {
+    if (id !== 'tex_' + hash.slice(0, 12) || version !== 1 || url !== 'urn:fgl:local-tex:' + hash) {
+      throw new TypeError('Invalid local paper provenance.');
+    }
+    return url;
+  }
+  const canonical = normalizeArxivHtmlUrl(url);
+  if (canonical !== 'https://arxiv.org/html/' + id + 'v' + version) throw new TypeError('Invalid paper provenance.');
+  return canonical;
+}

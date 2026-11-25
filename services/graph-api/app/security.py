@@ -77,6 +77,14 @@ request_context: ContextVar[Mapping[str, str]] = ContextVar(
 )
 
 
+def body_limit(path: str) -> int:
+    if path == "/v1/evidence/import-tex":
+        return 520 * 1024
+    if path in {"/v1/imports", "/v1/evidence/import"}:
+        return MAX_PAPER_IMPORT_BYTES
+    return MAX_REQUEST_BODY_BYTES
+
+
 class PayloadTooLargeError(ValueError):
     """Raised when request payload exceeds defined size caps."""
 
@@ -100,7 +108,7 @@ class RequestBodyLimitMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
-        cap = MAX_PAPER_IMPORT_BYTES if scope["path"] == "/v1/imports" else MAX_REQUEST_BODY_BYTES
+        cap = body_limit(scope["path"])
         lengths = [value for key, value in scope["headers"] if key.lower() == b"content-length"]
         if lengths and (len(lengths) != 1 or len(lengths[0]) > 20 or not lengths[0].isdigit()):
             return await JSONResponse({"detail": "Invalid content length."}, 400)(

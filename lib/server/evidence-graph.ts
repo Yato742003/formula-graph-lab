@@ -7,7 +7,7 @@ import type {
   PersistedPaperSummary,
   VerificationStatus,
 } from '../import-types';
-import { normalizeArxivHtmlUrl } from '../paper-url';
+import { validatedPaperSource } from '../paper-url';
 import type { GraphApiConfiguration } from './paper-import';
 import { signedGraphHeaders } from './graph-service-auth';
 import {
@@ -19,8 +19,6 @@ import {
 const MAX_GRAPH_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_GRAPH_NODES = 500;
 const MAX_GRAPH_EDGES = 1_500;
-const ARXIV_ID = /^\d{4}\.\d{4,5}$/;
-const SHA256 = /^[a-f0-9]{64}$/;
 const NODE_UUID =
   /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const ENTITY_TYPES = new Set<EvidenceEntityType>([
@@ -209,14 +207,10 @@ export function emptyGraphSnapshot(): EvidenceGraphSnapshotResponse {
 
 function parsePersistedPaper(value: Record<string, unknown>): PersistedPaperSummary {
   const paperId = boundedString(value.paper_id, 32);
-  if (!ARXIV_ID.test(paperId)) throw new TypeError('Invalid persisted paper ID.');
   const version = positiveInteger(value.version, 1_000_000);
-  const sourceUrl = normalizeArxivHtmlUrl(boundedString(value.source_url, 2_048));
-  if (!sourceUrl.endsWith(`v${version}`)) {
-    throw new TypeError('Persisted paper URL is not pinned to its version.');
-  }
+  if (version === null) throw new TypeError('Missing paper version.');
   const sourceSha256 = boundedString(value.source_sha256, 64);
-  if (!SHA256.test(sourceSha256)) throw new TypeError('Invalid persisted source hash.');
+  const sourceUrl = validatedPaperSource(paperId, version, sourceSha256, boundedString(value.source_url, 2048));
   return {
     paper_id: paperId,
     version,
