@@ -5,16 +5,21 @@ import yaml
 
 def test_security_ci_and_deployment_keep_frozen_inputs_and_fail_closed_scan_gates():
     root = Path(__file__).resolve().parents[3]
-    workflow = yaml.load((root / ".github/workflows/security-gates.yml").read_text(),
-                         Loader=yaml.BaseLoader)
-    assert workflow["permissions"] == {"contents": "read"}
-    for job in workflow["jobs"].values():
-        for step in job["steps"]:
-            if "uses" in step:
-                ref = step["uses"].split("@")[1].split(" ")[0]
-                assert len(ref) == 40 and all(c in "0123456789abcdef" for c in ref)
-            assert "continue-on-error" not in step
-    scans = " ".join(step.get("run", "") for step in workflow["jobs"]["images"]["steps"])
+    workflows = {
+        name: yaml.load((root / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader)
+        for name in ("security-gates.yml", "regression-ci.yml")
+    }
+    for workflow in workflows.values():
+        assert workflow["permissions"] == {"contents": "read"}
+        for job in workflow["jobs"].values():
+            for step in job["steps"]:
+                if "uses" in step:
+                    ref = step["uses"].split("@")[1].split(" ")[0]
+                    assert len(ref) == 40 and all(c in "0123456789abcdef" for c in ref)
+                assert "continue-on-error" not in step
+    scans = " ".join(
+        step.get("run", "") for step in workflows["security-gates.yml"]["jobs"]["images"]["steps"]
+    )
     assert "--exit-code 1" in scans and "--severity HIGH,CRITICAL" in scans
     assert "--ignore-unfixed" not in scans and "sha256:" in scans
     dockerfile = (root / "services/graph-api/Dockerfile").read_text()

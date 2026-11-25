@@ -1,6 +1,7 @@
 # FormulaGraph Lab
 
-[![Security & Regression Gates](https://github.com/Yato742003/formula-graph-lab/actions/workflows/security-gates.yml/badge.svg)](https://github.com/Yato742003/formula-graph-lab/actions/workflows/security-gates.yml)
+[![Regression & Dependency Audit](https://github.com/Yato742003/formula-graph-lab/actions/workflows/regression-ci.yml/badge.svg)](https://github.com/Yato742003/formula-graph-lab/actions/workflows/regression-ci.yml)
+[![Container CVE Gate](https://github.com/Yato742003/formula-graph-lab/actions/workflows/security-gates.yml/badge.svg)](https://github.com/Yato742003/formula-graph-lab/actions/workflows/security-gates.yml)
 [![Vinext / React 19](https://img.shields.io/badge/Vinext-React%2019%20App%20Router-black?style=flat-square&logo=vite)](https://github.com/cloudflare/vinext)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com/)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python)](https://python.org/)
@@ -125,7 +126,7 @@ The frontend uses **[Vinext](https://github.com/cloudflare/vinext)** (`vinext de
 - **Immutable Evidence vs. AI Hypotheses:** Paper-extracted equations carry cryptographic hashes and source HTML anchors so proposers can never overwrite ground truth; hypotheses live in a separate reviewable proposal/candidate tier, and AI generation flags stay **fail-closed (`false`)** by default.
 - **Ephemeral Air-Gapped Containers Over In-Process `eval`:** Spawning a fresh non-root Docker container adds ~`400–830 ms` median overhead per job in exchange for hard kernel isolation (`--network=none`, `--read-only`, `--cap-drop=ALL`, cgroup memory/PID caps).
 - **Signed Graph-API Boundary (No Direct Browser-to-Neo4j Access):** Every BFF → FastAPI call carries an `fgl1.<claims>.<HMAC-SHA256>` token bound to HTTP method, raw path/query, SHA-256 body hash, and a single-use UUID nonce atomically consumed in Neo4j.
-- **Fail-Closed Supply-Chain Gates:** Trivy container scans in [`.github/workflows/security-gates.yml`](.github/workflows/security-gates.yml) omit `--ignore-unfixed` and `continue-on-error` (enforced by [`test_deployment_security.py`](services/graph-api/tests/test_deployment_security.py)), preferring explicit operator risk sign-off over green-by-default CI.
+- **Fail-Closed Supply-Chain Gates:** Code regression & dependency audits ([`.github/workflows/regression-ci.yml`](.github/workflows/regression-ci.yml)) run separately from Trivy container CVE scanning ([`.github/workflows/security-gates.yml`](.github/workflows/security-gates.yml)), which intentionally omits `--ignore-unfixed` and `continue-on-error` (enforced by [`test_deployment_security.py`](services/graph-api/tests/test_deployment_security.py)) so unpatched upstream Debian OS advisories stay visible rather than silently green.
 
 ---
 
