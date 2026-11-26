@@ -32,12 +32,13 @@ dev-sandbox: db-up ## Build a pinned local worker and run the research API
 web: ## Run Vinext (Next.js App Router on Vite + Cloudflare Workers) dev server
 	npm run dev
 
-verify: ## Run full offline verification gate (Ruff, Pytest, Oxlint, TypeScript, Vitest)
+verify: ## Run full offline verification gate (Ruff, Pytest, Oxlint, TypeScript, Vitest, Rust proptest)
 	cd services/graph-api && $(abspath $(PYTHON)) -m ruff check app tests
 	cd services/graph-api && $(abspath $(PYTHON)) -m pytest -m "not integration and not live and not sandbox" -q
 	npm run lint
 	npx tsc --noEmit --incremental false
 	npm test
+	cargo test --manifest-path crates/formula-layout-wasm/Cargo.toml --quiet
 
 build: ## Build production Cloudflare Worker / Vinext bundle
 	npm run build

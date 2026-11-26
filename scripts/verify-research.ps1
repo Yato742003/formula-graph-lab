@@ -35,6 +35,11 @@ try {
     Invoke-ResearchCheck (Join-Path $researchRoot 'node_modules\.bin\vitest.cmd') @(
         'run', '--config', 'vitest.config.ts'
     )
+    if (Get-Command cargo -ErrorAction SilentlyContinue) {
+        Invoke-ResearchCheck 'cargo' @(
+            'test', '--manifest-path', 'crates/formula-layout-wasm/Cargo.toml', '--quiet'
+        )
+    }
     if ($IncludeIntegration) {
         # The existing runner creates its own isolated Neo4j Compose project.
         $psExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }

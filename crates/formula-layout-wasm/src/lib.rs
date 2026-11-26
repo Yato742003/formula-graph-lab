@@ -1014,4 +1014,311 @@ mod tests {
             }
         }
     }
+
+    mod pbt {
+        use super::*;
+        use proptest::prelude::*;
+
+        #[derive(Debug, Clone)]
+        struct Layout2dCase {
+            group_count: usize,
+            group_ids: Vec<u32>,
+            kind_ranks: Vec<u32>,
+            widths: Vec<f32>,
+            heights: Vec<f32>,
+            edge_srcs: Vec<u32>,
+            edge_dsts: Vec<u32>,
+            edge_weights: Vec<f32>,
+            max_cols: Vec<u32>,
+            bary_flags: Vec<u32>,
+            params: [f32; 8],
+        }
+
+        fn layout_2d_strategy() -> impl Strategy<Value = Layout2dCase> {
+            (1usize..=8, 1usize..=48).prop_flat_map(|(group_count, node_count)| {
+                let g_max = (group_count - 1) as u32;
+                let n_max = (node_count - 1) as u32;
+                (
+                    prop::collection::vec(0u32..=g_max, node_count),
+                    prop::collection::vec(0u32..=6, node_count),
+                    prop::collection::vec(80.0f32..=420.0, node_count),
+                    prop::collection::vec(24.0f32..=280.0, node_count),
+                    prop::collection::vec((0u32..=n_max, 0u32..=n_max, 0.0f32..=5.0), 0..=40),
+                    prop::collection::vec(0u32..=4, group_count),
+                    prop::collection::vec(0u32..=1, group_count),
+                    (
+                        -10.0f32..=48.0,
+                        -10.0f32..=84.0,
+                        -10.0f32..=48.0,
+                        -10.0f32..=48.0,
+                        -10.0f32..=48.0,
+                        -10.0f32..=96.0,
+                        -10.0f32..=96.0,
+                        -2.0f32..=6.0,
+                    ),
+                )
+                    .prop_map(
+                        move |(
+                            group_ids,
+                            kind_ranks,
+                            widths,
+                            heights,
+                            edges,
+                            max_cols,
+                            bary_flags,
+                            p,
+                        )| {
+                            let mut edge_srcs = Vec::with_capacity(edges.len());
+                            let mut edge_dsts = Vec::with_capacity(edges.len());
+                            let mut edge_weights = Vec::with_capacity(edges.len());
+                            for (u, v, w) in edges {
+                                edge_srcs.push(u);
+                                edge_dsts.push(v);
+                                edge_weights.push(w);
+                            }
+                            Layout2dCase {
+                                group_count,
+                                group_ids,
+                                kind_ranks,
+                                widths,
+                                heights,
+                                edge_srcs,
+                                edge_dsts,
+                                edge_weights,
+                                max_cols,
+                                bary_flags,
+                                params: [p.0, p.1, p.2, p.3, p.4, p.5, p.6, p.7],
+                            }
+                        },
+                    )
+            })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(128))]
+
+            #[test]
+            fn prop_layout_2d_zero_overlap_containment_and_determinism(case in layout_2d_strategy()) {
+                let n = case.group_ids.len();
+                let mut node_xy_a = vec![0.0f32; n * 2];
+                let mut rects_a = vec![0.0f32; case.group_count * 4];
+                let mut node_xy_b = vec![0.0f32; n * 2];
+                let mut rects_b = vec![0.0f32; case.group_count * 4];
+
+                compute_layout_2d(
+                    &case.group_ids,
+                    &case.kind_ranks,
+                    &case.widths,
+                    &case.heights,
+                    &case.edge_srcs,
+                    &case.edge_dsts,
+                    &case.edge_weights,
+                    case.group_count,
+                    &case.max_cols,
+                    &case.bary_flags,
+                    &case.params,
+                    &mut node_xy_a,
+                    &mut rects_a,
+                );
+                compute_layout_2d(
+                    &case.group_ids,
+                    &case.kind_ranks,
+                    &case.widths,
+                    &case.heights,
+                    &case.edge_srcs,
+                    &case.edge_dsts,
+                    &case.edge_weights,
+                    case.group_count,
+                    &case.max_cols,
+                    &case.bary_flags,
+                    &case.params,
+                    &mut node_xy_b,
+                    &mut rects_b,
+                );
+
+                // 1. Determinism and finiteness.
+                prop_assert_eq!(&node_xy_a, &node_xy_b);
+                prop_assert_eq!(&rects_a, &rects_b);
+                prop_assert!(node_xy_a.iter().all(|v| v.is_finite()));
+                prop_assert!(rects_a.iter().all(|v| v.is_finite()));
+
+                // 2. Pairwise 0-overlap across ALL laid-out cards (effective clamped dimensions).
+                for i in 0..n {
+                    let xi = node_xy_a[i * 2];
+                    let yi = node_xy_a[i * 2 + 1];
+                    let wi = case.widths[i].max(160.0);
+                    let hi = case.heights[i].max(44.0);
+                    for j in (i + 1)..n {
+                        let xj = node_xy_a[j * 2];
+                        let yj = node_xy_a[j * 2 + 1];
+                        let wj = case.widths[j].max(160.0);
+                        let hj = case.heights[j].max(44.0);
+                        let overlap_x = xi < xj + wj - 1e-3 && xi + wi > xj + 1e-3;
+                        let overlap_y = yi < yj + hj - 1e-3 && yi + hi > yj + 1e-3;
+                        prop_assert!(
+                            !(overlap_x && overlap_y),
+                            "2D card overlap between {i} ({xi},{yi},{wi},{hi}) and {j} ({xj},{yj},{wj},{hj})"
+                        );
+                    }
+                }
+
+                // 3. Pairwise 0-overlap across non-empty group lane rects.
+                let non_empty_groups: Vec<usize> = (0..case.group_count)
+                    .filter(|&g| rects_a[g * 4 + 2] > 0.0 && rects_a[g * 4 + 3] > 0.0)
+                    .collect();
+                for idx_a in 0..non_empty_groups.len() {
+                    let ga = non_empty_groups[idx_a];
+                    let (xa, ya, wa, ha) = (
+                        rects_a[ga * 4],
+                        rects_a[ga * 4 + 1],
+                        rects_a[ga * 4 + 2],
+                        rects_a[ga * 4 + 3],
+                    );
+                    for &gb in &non_empty_groups[(idx_a + 1)..] {
+                        let (xb, yb, wb, hb) = (
+                            rects_a[gb * 4],
+                            rects_a[gb * 4 + 1],
+                            rects_a[gb * 4 + 2],
+                            rects_a[gb * 4 + 3],
+                        );
+                        let ox = xa < xb + wb - 1e-3 && xa + wa > xb + 1e-3;
+                        let oy = ya < yb + hb - 1e-3 && ya + ha > yb + 1e-3;
+                        prop_assert!(
+                            !(ox && oy),
+                            "Lane overlap between groups {ga} and {gb}"
+                        );
+                    }
+                }
+
+                // 4. Every card is strictly contained inside its owning lane bounding box.
+                for i in 0..n {
+                    let g = (case.group_ids[i] as usize).min(case.group_count - 1);
+                    let (gx, gy, gw, gh) = (
+                        rects_a[g * 4],
+                        rects_a[g * 4 + 1],
+                        rects_a[g * 4 + 2],
+                        rects_a[g * 4 + 3],
+                    );
+                    let xi = node_xy_a[i * 2];
+                    let yi = node_xy_a[i * 2 + 1];
+                    let wi = case.widths[i].max(160.0);
+                    let hi = case.heights[i].max(44.0);
+                    prop_assert!(xi >= gx - 1e-2 && xi + wi <= gx + gw + 1e-2);
+                    prop_assert!(yi >= gy - 1e-2 && yi + hi <= gy + gh + 1e-2);
+                }
+            }
+
+            #[test]
+            fn prop_layout_3d_finite_deterministic_and_epistemic_elevation(
+                n_sections in 1usize..=6,
+                n_equations in 1usize..=14,
+                n_symbols in 0usize..=10,
+                n_concepts in 1usize..=4,
+                n_hypotheses in 1usize..=4,
+            ) {
+                let mut kinds = vec![0u32];
+                let mut parents = vec![-1i32];
+                let mut roots = vec![0i32];
+
+                for _ in 0..n_sections {
+                    kinds.push(1);
+                    parents.push(0);
+                    roots.push(0);
+                }
+                for eq in 0..n_equations {
+                    kinds.push(2);
+                    parents.push(1 + (eq % n_sections) as i32);
+                    roots.push(0);
+                }
+                let first_eq = 1 + n_sections;
+                for sym in 0..n_symbols {
+                    kinds.push(3);
+                    parents.push((first_eq + (sym % n_equations)) as i32);
+                    roots.push(0);
+                }
+                for _ in 0..n_concepts {
+                    kinds.push(4);
+                    parents.push(0);
+                    roots.push(0);
+                }
+                for _ in 0..n_hypotheses {
+                    kinds.push(5);
+                    parents.push(0);
+                    roots.push(0);
+                }
+
+                let n = kinds.len();
+                let mut edge_srcs = Vec::new();
+                let mut edge_dsts = Vec::new();
+                let mut edge_codes = Vec::new();
+                for eq in 0..n_equations.saturating_sub(1) {
+                    edge_srcs.push((first_eq + eq) as u32);
+                    edge_dsts.push((first_eq + eq + 1) as u32);
+                    edge_codes.push(1u32);
+                }
+
+                let mut out_a = vec![0.0f32; n * 4];
+                let mut out_b = vec![0.0f32; n * 4];
+                compute_layout_3d(&kinds, &parents, &roots, &edge_srcs, &edge_dsts, &edge_codes, &mut out_a);
+                compute_layout_3d(&kinds, &parents, &roots, &edge_srcs, &edge_dsts, &edge_codes, &mut out_b);
+
+                prop_assert_eq!(&out_a, &out_b);
+                for i in 0..n {
+                    for k in 0..4 {
+                        prop_assert!(out_a[i * 4 + k].is_finite());
+                    }
+                    let progress = out_a[i * 4 + 3];
+                    prop_assert!((0.02..=1.0).contains(&progress));
+                }
+
+                // Epistemic stratification invariant: hypotheses float above root paper, concepts below.
+                let paper_y = out_a[1];
+                for i in 0..n {
+                    if kinds[i] == 5 {
+                        prop_assert!(
+                            out_a[i * 4 + 1] > paper_y + 1.0,
+                            "Hypothesis node {i} dropped below epistemic halo"
+                        );
+                    } else if kinds[i] == 4 {
+                        prop_assert!(
+                            out_a[i * 4 + 1] < paper_y - 1.0,
+                            "Concept node {i} drifted above semantic support ring"
+                        );
+                    }
+                }
+            }
+
+            #[test]
+            fn prop_layout_3d_arbitrary_inputs_never_panic_and_stay_finite(
+                node_count in 1usize..=40,
+                seed_kinds in prop::collection::vec(0u32..=9, 40),
+                seed_parents in prop::collection::vec(-5i32..=50, 40),
+                seed_roots in prop::collection::vec(-3i32..=10, 40),
+                edges in prop::collection::vec((0u32..=60, 0u32..=60, 0u32..=6), 0..=40),
+            ) {
+                let kinds = &seed_kinds[..node_count];
+                let parents = &seed_parents[..node_count];
+                let roots = &seed_roots[..node_count];
+                let mut edge_srcs = Vec::with_capacity(edges.len());
+                let mut edge_dsts = Vec::with_capacity(edges.len());
+                let mut edge_codes = Vec::with_capacity(edges.len());
+                for (u, v, c) in edges {
+                    edge_srcs.push(u);
+                    edge_dsts.push(v);
+                    edge_codes.push(c);
+                }
+
+                let mut out_a = vec![0.0f32; node_count * 4];
+                let mut out_b = vec![0.0f32; node_count * 4];
+                compute_layout_3d(kinds, parents, roots, &edge_srcs, &edge_dsts, &edge_codes, &mut out_a);
+                compute_layout_3d(kinds, parents, roots, &edge_srcs, &edge_dsts, &edge_codes, &mut out_b);
+
+                prop_assert_eq!(&out_a, &out_b);
+                prop_assert!(out_a.iter().all(|v| v.is_finite()));
+                for i in 0..node_count {
+                    prop_assert!((0.02..=1.0).contains(&out_a[i * 4 + 3]));
+                }
+            }
+        }
+    }
 }

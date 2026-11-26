@@ -313,7 +313,7 @@ async def test_check_result_is_immutable_scoped_and_idempotent():
         await store.initialize()
         await store.ingest(graph)
         equation = next(node for node in graph.nodes if node["kind"] == "Equation")
-        result = run_symbolic_check("1+1", "2")
+        result = run_symbolic_check("1+1", "2", timeout_ms=8_000)
         first = await store.append_check_result(
             workspace_id=workspace_id,
             target_uuid=equation["uuid"],
@@ -351,7 +351,7 @@ async def test_check_result_is_immutable_scoped_and_idempotent():
         assert persisted["outcome"] == "supported"
         assert persisted["vector"]["symbolic"] == "supported"
 
-        conflicting = run_symbolic_check("1+1", "3")
+        conflicting = run_symbolic_check("1+1", "3", timeout_ms=8_000)
         with pytest.raises(ValueError, match="idempotency key conflicts"):
             await store.append_check_result(
                 workspace_id=workspace_id,

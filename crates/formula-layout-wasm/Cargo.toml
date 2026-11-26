@@ -7,6 +7,9 @@ description = "Deterministic 2D hierarchical lane & 3D scientific constellation 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[dev-dependencies]
+proptest = "1.6"
+
 [profile.release]
 opt-level = "s"
 lto = true

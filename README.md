@@ -26,7 +26,7 @@
 
 ## Researcher daily workflow
 
-In **Graph**, choose **.tex / LaTeX** to upload a single UTF-8 file or paste display math (up to 512 KiB of source). The Inspector shows local provenance and line anchors. Each aligned environment remains one evidence block. External TeX includes are ignored.
+In **Graph**, choose **.tex / LaTeX** to upload a single UTF-8 file or paste display math (up to 512 KiB of source). Safe preamble macros (`\newcommand`, `\renewcommand`, `\providecommand`, `\DeclareMathOperator`) expand deterministically under strict cycle, depth, step, and size ceilings while keeping raw `source_sha256` and `source_fragments` immutable. The Inspector shows local provenance and line anchors. Each aligned environment remains one evidence block. External TeX includes are ignored.
 
 Select an equation and open **Batch Review**. Apply a preset or edit individual shape and domain values, select the symbols, enter your rationale, and approve. Each selected symbol gets its own immutable review.
 
@@ -82,7 +82,7 @@ Four fixed anchor-finding queries × 3 alternating repeats on isolated Neo4j (`k
 
 ### 4. Automated Test & Release-Gate Coverage
 
-- **Offline regression (`make verify` / `scripts/verify-research.ps1`):** `728` Pytest tests + `220` Vitest tests (`34` files, including live `public/wasm/formula-layout.wasm`, `.tex` import, batch contract review, SymPy assumptions/domain discharge, multi-step derivation chains & Lean 4 five-bin statement audit) + `3` Rust crate tests + Ruff (`0` errors) + Oxlint (`0` errors) + `tsc --noEmit` (`0` errors).
+- **Offline regression (`make verify` / `scripts/verify-research.ps1`):** `742` Pytest tests (including `Hypothesis` PBT invariants on TeX macro expansion, AST alpha-canonicalization, domain discharge & Lean 4 audit) + `226` Vitest tests (`35` files, including live `public/wasm/formula-layout.wasm`, `.tex` import, batch contract review, SymPy assumptions/domain discharge, multi-step derivation chains, Lean 4 five-bin statement audit & `fast-check` BFF/provenance/stream PBT invariants) + `6` Rust crate tests (including `proptest` 2D 0-overlap/containment & 3D constellation invariants, `0` runtime crate bloat on `64.5 KB` WASM) + Ruff (`0` errors) + Oxlint (`0` errors) + `tsc --noEmit` (`0` errors).
 - **Live isolated Neo4j integration (`make test-integration` / `scripts/test-integration.ps1`):** `35` integration tests on ephemeral tmpfs `neo4j:5.26-community` (including signed `fgl1` auth replay rejection, double-delivery quarantine, and dead-letter reconciliation).
 - **Adversarial Docker sandbox & clean-container replay (`make test-sandbox` / `scripts/test-sandbox.ps1`):** `8` container boundary & assumption-aware SymPy tests (controls, OOM kill, wall-clock kill, stdout flood cap, read-only rootfs, network lockdown, positive vs real radical & non-commutative matrix checks) + `1` zero-network replay test.
 - **Production HTTP/CSP smoke (`tests/production-security-smoke.mjs`):** Verifies per-request SSR CSP script nonces, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and fail-closed anonymous BFF denial.
@@ -216,7 +216,7 @@ Copy [`.env.example`](.env.example) to `.env`:
 
 | Check | macOS / Linux (`Makefile`) | Windows (`PowerShell`) |
 | :--- | :--- | :--- |
-| **Offline Gate** (Ruff + 728 Pytest + Oxlint + `tsc` + 220 Vitest) | `make verify` | `powershell -NoProfile -File .\scripts\verify-research.ps1` |
+| **Offline Gate** (Ruff + 742 Pytest/Hypothesis + Oxlint + `tsc` + 226 Vitest/fast-check + 6 Rust/proptest) | `make verify` | `powershell -NoProfile -File .\scripts\verify-research.ps1` |
 | **Live Neo4j Integration** (isolated tmpfs Neo4j, 35 tests) | `make test-integration` | `powershell -NoProfile -File .\scripts\test-integration.ps1` |
 | **Docker Sandbox & Clean Replay** (8 isolation/SymPy + 1 replay) | `make test-sandbox` | `powershell -NoProfile -File .\scripts\test-sandbox.ps1` |
 | **Empirical Corpus + Sandbox Benchmark** | `make benchmark` | `python scripts/benchmark_evidence.py --sandbox-image <sha256>` |

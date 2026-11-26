@@ -20,6 +20,7 @@ jobs:
       - run: npm ci
       - run: npm audit --json > npm-audit.json
       - run: npm test && npm run lint && npx tsc --noEmit --incremental false && npm run build
+      - run: cargo test --manifest-path crates/formula-layout-wasm/Cargo.toml
       - run: uv sync --project services/graph-api --frozen --extra dev
       - run: uv run --project services/graph-api --frozen --extra dev ruff check services/graph-api/app services/graph-api/tests
       - run: uv run --project services/graph-api --frozen --extra dev pytest -c services/graph-api/pyproject.toml services/graph-api/tests
