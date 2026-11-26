@@ -30,7 +30,7 @@ export async function signedGraphHeaders(
     throw new TypeError('Ambiguous idempotency key.');
   }
   let serviceRole: string;
-  if (url.pathname.startsWith('/v1/research/')) {
+  if (url.pathname.startsWith('/v1/research/') || (method === 'POST' && url.pathname === '/v1/checks/symbolic/quick')) {
     serviceRole = method === 'GET' ? 'research_read' : 'research_write';
   } else if (method === 'POST' && READ_PATHS.has(url.pathname)) {
     serviceRole = 'graph_read';

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import QuickVerifyPanel from './quick-verify-panel';
 import type { ReviewedContractInput } from '@/lib/server/contract-review';
 
 type Entry = {
@@ -81,7 +82,7 @@ export default function BatchContractReviewPanel({equation}: {equation: string})
     } catch { setNotice('Approval failed. Review the values and retry.'); }
     finally { setBusy(false); }
   }
-  return <section id="batch-contract-review" className="inspector-section inspector-contracts">
+  return <><section id="batch-contract-review" className="inspector-section inspector-contracts">
     <button type="button" aria-expanded={open} onClick={() => setOpen(!open)}>Batch Review</button>
     {open && <fieldset disabled={busy}>
       <legend>Symbol contracts</legend>
@@ -102,5 +103,8 @@ export default function BatchContractReviewPanel({equation}: {equation: string})
         onClick={() => void approve()}>Approve {count} reviewed contracts</button>
       <output>{notice}</output>
     </fieldset>}
-  </section>;
+  </section><QuickVerifyPanel equation={equation} onReview={() => {
+    setOpen(true);
+    document.getElementById('batch-contract-review')?.scrollIntoView({block:'nearest'});
+  }}/></>;
 }

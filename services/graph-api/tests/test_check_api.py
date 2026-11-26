@@ -334,3 +334,27 @@ def test_execution_profile_change_cannot_replay_prior_check_result(monkeypatch):
         assert "idempotency key conflicts" in conflict.json()["detail"]
     finally:
         app.dependency_overrides.clear()
+
+
+def test_quick_check_uses_exact_source_and_requires_human_symbol_coverage(monkeypatch):
+    from app.main import require_research_service_actor
+
+    store = CheckStore(source_latex="x+x")
+    client = _client(monkeypatch, store)
+    app.dependency_overrides[require_research_service_actor] = lambda: (None, "workspace-1")
+    url = "/v1/checks/symbolic/quick"
+    body = {"workspace_id": "workspace-1", "target_uuid": str(uuid4()), "formula_b": "2x"}
+    try:
+        response = client.post(url, json=body, headers=_headers())
+        assert response.json()["missing_symbols"] == ["x"]
+        assert response.json()["reason_code"] == "UNRESOLVED_SHAPE"
+        assert store.call is None
+        spoofed = client.post(url, json={**body, "formula_a": "2x"}, headers=_headers())
+        assert spoofed.status_code == 422
+        monkeypatch.delenv("FGL_SANDBOX_IMAGE")
+        assert client.post(url, json=body, headers=_headers()).status_code == 503
+        monkeypatch.delenv("FGL_ENABLE_RESEARCH_CHECKS")
+        assert client.post(url, json=body, headers=_headers()).status_code == 503
+    finally:
+        app.dependency_overrides.pop(require_research_service_actor)
+        app.dependency_overrides.pop(require_evidence_store)

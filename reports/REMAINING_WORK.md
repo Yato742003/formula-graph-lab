@@ -1,12 +1,18 @@
 # FormulaGraph Lab — Remaining Work & Release Checklist
 
-Cập nhật: `2026-11-25` (sau khi hoàn tất mã nguồn & kiểm chứng offline cho **FGL-603 End-to-End Telemetry Correlation & Dead-Letter Recovery**).  
+Cập nhật: `2026-11-26` (sau khi hoàn tất & kiểm chứng toàn bộ 3 chặng **Researcher Daily-Driver v1.1.0**: Direct `.tex` Import, Batch Contract Review, Quick Symbolic Verify + 1-command sandbox setup).  
 Tham chiếu chi tiết: [`FGL602_FGL603_HARDENING.md`](FGL602_FGL603_HARDENING.md), [`SPRINT6_REVIEW_2026-10-01.md`](SPRINT6_REVIEW_2026-10-01.md), [`../DESIGN.md`](../DESIGN.md), [`../docs/PHASE5_COMPLETION.md`](../docs/PHASE5_COMPLETION.md).
 
 > **Trạng thái phát hành hiện tại:** **Chưa release-ready (Production gates vẫn mở).**  
 > Không bật `FGL_TRUST_SITES_IDENTITY=true` trên origin công khai và không mở các cờ gọi AI/model khi chưa chốt đủ các cổng dưới đây.
 
 ---
+
+## Researcher Daily-Driver v1.1.0
+
+- Stage 1 (`6b0d79d`) bổ sung nhập tệp hoặc dán LaTeX với SHA-256 và anchor theo dòng.
+- Stage 2 (`bba7432`) đưa bản nháp contract và preset vào Inspector. Mỗi quyết định của người duyệt có một bản ghi riêng.
+- Stage 3 hoàn tất kiểm chứng (`verify-research.ps1`, `35` Neo4j integration, `7` sandbox + `1` clean replay, `35` Phase 5, production HTTP/CSP smoke `4173`, và QA trình duyệt thật `1440×900` trọn vòng `.tex` → Batch Review → Quick Verify `supported`/`refuted` với `0` lỗi console/HTTP). Kết quả Quick Verify luôn giữ nguyên phạm vi `ad-hoc check · not frozen campaign`.
 
 ## 1. Đã hoàn thành gần đây
 
@@ -52,4 +58,4 @@ Tham chiếu chi tiết: [`FGL602_FGL603_HARDENING.md`](FGL602_FGL603_HARDENING.
 ### P2 — Cải tiến trải nghiệm UX/UI tiếp theo (tùy chọn)
 
 - **QA trình duyệt đầy đủ với dữ liệu Neo4j sống:** Chạy tay trọn luồng `Graph (import arXiv thật) → Spec (freeze) → Compatibility (map & review) → Proposals (compile) → Reports (compare + evolution + replay bundle)` trên desktop, tablet và mobile (`390px`) sau khi giải phóng cổng `8000`.
-- **Cập nhật ảnh chụp màn hình trong `README.md`:** Hai ảnh hiện tại dưới `docs/screenshots/` là bản cũ; có thể chụp lại giao diện Linear × Cursor mới sau khi nối lại Neo4j có bài báo thật.
+- [x] README đã cập nhật ảnh 2D, 3D, Spec, Ops và GIF sáu cảnh tại commit `4c8f278`.

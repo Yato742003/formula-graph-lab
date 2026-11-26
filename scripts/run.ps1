@@ -25,7 +25,9 @@ param(
     [switch]$Stop,
     [switch]$NoDocker,
     [switch]$NoNgrok,
-    [switch]$Restart
+    [switch]$Restart,
+    [switch]$WithSandbox,
+    [ValidateRange(1,65535)][int]$ApiPort = 8000
 )
 
 $ErrorActionPreference = "Continue"
@@ -253,7 +255,7 @@ function Stop-AllServices {
     Get-Process workerd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
     # 3. Giai phong port 8000 va 3000
-    Free-PortProcesses -Port 8000
+    # Backend shutdown uses the recorded process ID above.
     Free-PortProcesses -Port 3000
 
     # 4. Dung Docker Neo4j neu duoc yeu cau
@@ -278,6 +280,11 @@ if ($Stop) {
 if ($Restart) {
     Stop-AllServices
     Start-Sleep -Seconds 2
+}
+
+if ($WithSandbox) { $NoNgrok = $true }
+if (Get-NetTCPConnection -LocalPort $ApiPort -State Listen -ErrorAction SilentlyContinue) {
+    throw "Port $ApiPort is occupied. Select a free port with -ApiPort (for example 8011)."
 }
 
 # --- BANNER ---
@@ -306,7 +313,7 @@ if (-not (Test-Path $EnvFile)) {
     }
 }
 
-$targetGraphUrl = if ($NoNgrok) { "http://localhost:8000" } else { $PublicGraphUrl }
+$targetGraphUrl = if ($NoNgrok) { "http://localhost:$ApiPort" } else { $PublicGraphUrl }
 
 if ($envNeedsInit) {
     Write-Step "ENV" "Khoi tao file .env moi voi cac token bao mat ngau nhien..."
@@ -336,7 +343,7 @@ FGL_PROPOSAL_MAX_OUTPUT_TOKENS=2000
 SERVICE_TOKEN=$randomToken
 SEARCH_CURSOR_SECRET=$cursorSecret
 "@
-    Set-Content -Path $EnvFile -Value $devEnvContent -Encoding UTF8
+    [IO.File]::WriteAllText($EnvFile, $devEnvContent, [Text.UTF8Encoding]::new($false))
     Write-Success "Da tao file .env hoan chinh voi GRAPH_API_URL=$targetGraphUrl."
 } else {
     # Kiem tra bo sung cac bien con thieu
@@ -381,7 +388,7 @@ SEARCH_CURSOR_SECRET=$cursorSecret
         if (-not $hasUpdatedUrl) {
             $newEnvLines = @("GRAPH_API_URL=$targetGraphUrl") + $newEnvLines
         }
-        Set-Content -Path $EnvFile -Value $newEnvLines -Encoding UTF8
+        [IO.File]::WriteAllLines($EnvFile, [string[]]$newEnvLines, [Text.UTF8Encoding]::new($false))
     }
     Write-Success "File .env da san sang voi GRAPH_API_URL=$targetGraphUrl."
 }
@@ -500,9 +507,6 @@ if (-not $NoDocker) {
 # --- 4. KHOI DONG BACKEND (FASTAPI) ---
 Write-Header "4. Khoi dong Backend (FastAPI / Graph API)"
 
-# Giai phong port 8000 neu bi chiem
-Free-PortProcesses -Port 8000
-Start-Sleep -Milliseconds 400
 
 # Neu Neo4j khong chay, tat bien NEO4J_URI de FastAPI khong bi crash luc startup
 if (-not $neo4jReady) {
@@ -516,16 +520,21 @@ $beErrLog = Join-Path $LogDir "backend.stderr.log"
 $appDir = Join-Path $ProjectRoot "services\graph-api"
 
 # ponytail: direct Python execution for exact 1:1 PID tracking, ceiling: local dev runner. upgrade: Docker/Compose if multi-node deployment needed.
-$beProc = Start-Process -FilePath $VenvPython -ArgumentList @("-m", "uvicorn", "app.main:app", "--app-dir", $appDir, "--reload", "--reload-dir", $appDir, "--host", "127.0.0.1", "--port", "8000") -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden -RedirectStandardOutput $beOutLog -RedirectStandardError $beErrLog
+$apiArgs = if ($WithSandbox) {
+    @("scripts/dev_sandbox.py", "--port", "$ApiPort")
+} else {
+    @("-m", "uvicorn", "app.main:app", "--app-dir", $appDir, "--reload", "--reload-dir", $appDir, "--host", "127.0.0.1", "--port", "$ApiPort")
+}
+$beProc = Start-Process -FilePath $VenvPython -ArgumentList $apiArgs -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden -RedirectStandardOutput $beOutLog -RedirectStandardError $beErrLog
 Write-Success "Backend chay an truc tiep qua Python (PID: $($beProc.Id)); log: .logs\backend.*.log"
 
-$beHealthUrls = @("http://127.0.0.1:8000/health", "http://localhost:8000/health")
-$beReady = Wait-ForHttp -Urls $beHealthUrls -TimeoutSeconds 45 -ServiceName "Backend API" -Process $beProc
+$beHealthUrls = @("http://127.0.0.1:$ApiPort/health", "http://localhost:$ApiPort/health")
+$beReady = Wait-ForHttp -Urls $beHealthUrls -TimeoutSeconds $(if ($WithSandbox) { 300 } else { 45 }) -ServiceName "Backend API" -Process $beProc
 if (-not $beReady) {
     Write-ErrorMsg "Backend API chua phan hoi tren port 8000."
     Show-RecentLog -FilePath $beErrLog -LineCount 15
 } else {
-    Write-Success "Backend API da san sang phuc vu tai http://127.0.0.1:8000"
+    Write-Success "Backend API da san sang phuc vu tai http://127.0.0.1:$ApiPort"
 }
 
 # --- 4.5. KHOI DONG NGROK PUBLIC HTTPS TUNNEL ---
@@ -539,7 +548,7 @@ if (-not $NoNgrok) {
     $ngrokErrLog = Join-Path $LogDir "ngrok.stderr.log"
     $hasNgrok = (Get-Command ngrok -ErrorAction SilentlyContinue) -ne $null
     if ($hasNgrok) {
-        $ngrokProc = Start-Process ngrok -ArgumentList "http", "--domain=$NgrokDomain", "8000", "--log=stdout" -PassThru -WindowStyle Hidden -RedirectStandardOutput $ngrokOutLog -RedirectStandardError $ngrokErrLog
+        $ngrokProc = Start-Process ngrok -ArgumentList "http", "--domain=$NgrokDomain", "$ApiPort", "--log=stdout" -PassThru -WindowStyle Hidden -RedirectStandardOutput $ngrokOutLog -RedirectStandardError $ngrokErrLog
         Write-Success "Ngrok tunnel dang chay an (PID: $($ngrokProc.Id)); log: .logs\ngrok.*.log"
         Write-Success "Public Graph API Endpoint: $PublicGraphUrl"
     } else {
@@ -625,7 +634,7 @@ Set-Content -Path $PidFile -Value $pidData -Encoding UTF8
 # --- 6. DASHBOARD TRUY CAP ---
 if (-not $beReady) {
     try {
-        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$ApiPort/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
         if ($resp -and $resp.StatusCode -eq 200) { $beReady = $true }
     } catch { }
 }
@@ -641,10 +650,10 @@ Write-Host "  | Frontend UI        | http://localhost:3000                      
 Write-Host "  | Frontend UI        | http://localhost:3000                            | [Failed/Starting]|" -ForegroundColor Red
 }
 if ($beReady) {
-Write-Host "  | Backend API (Local)| http://localhost:8000                            | [Running]      |" -ForegroundColor Cyan
-Write-Host "  | API Swagger (Local)| http://localhost:8000/docs                       | [Running]      |" -ForegroundColor Cyan
+Write-Host "  | Backend API (Local)| http://localhost:$ApiPort                            | [Running]      |" -ForegroundColor Cyan
+Write-Host "  | API Swagger (Local)| http://localhost:$ApiPort/docs                       | [Running]      |" -ForegroundColor Cyan
 } else {
-Write-Host "  | Backend API (Local)| http://localhost:8000                            | [Failed/Starting]|" -ForegroundColor Red
+Write-Host "  | Backend API (Local)| http://localhost:$ApiPort                            | [Failed/Starting]|" -ForegroundColor Red
 }
 if (-not $NoNgrok) {
 Write-Host "  | Public Graph HTTPS | $PublicGraphUrl        | [Running]      |" -ForegroundColor Magenta
@@ -700,7 +709,7 @@ while ($true) {
                     }
                     "D" {
                         Write-Host "Dang mo Swagger API Docs..." -ForegroundColor Cyan
-                        Start-Process "http://localhost:8000/docs"
+                        Start-Process "http://localhost:$ApiPort/docs"
                     }
                     "G" {
                         Write-Host "Dang mo Public Swagger Docs..." -ForegroundColor Magenta

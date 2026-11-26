@@ -495,6 +495,14 @@ class FormulaCompareResponse(BaseModel):
     canonicalizer_version: str
 
 
+class QuickSymbolicRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    workspace_id: str = Field(min_length=1, max_length=200)
+    target_uuid: UUID
+    formula_b: str = Field(min_length=1, max_length=2048)
+    timeout_ms: int = Field(default=5000, ge=500, le=10000)
+
+
 class SymbolicCheckCreateRequest(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=200, pattern=r".*\S.*")
     target_uuid: str = Field(min_length=1, max_length=200)

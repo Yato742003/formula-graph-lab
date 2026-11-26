@@ -77,6 +77,7 @@ from app.models import (
     FormulaValidationIssue,
     HealthResponse,
     PaperImportRequest,
+    QuickSymbolicRequest,
     ReviewedFormulaContract,
     SymbolicCheckCreateRequest,
     TexEvidenceImportRequest,
@@ -711,6 +712,27 @@ async def create_symbolic_check(
 ) -> CheckResultResponse:
     if not idempotency_key.isascii() or not idempotency_key.strip():
         raise HTTPException(status_code=422, detail="Invalid idempotency key.")
+    return await execute_symbolic(body, idempotency_key, actor, store)
+
+
+@app.post("/v1/checks/symbolic/quick", dependencies=[Depends(require_research_checks_enabled)])
+async def quick_symbolic(
+    body: QuickSymbolicRequest,
+    context=Depends(require_research_service_actor),  # noqa: B008
+    idempotency_key: str = Header(min_length=16, max_length=200, alias="Idempotency-Key"),
+    store: Neo4jEvidenceStore = Depends(require_evidence_store),  # noqa: B008
+):
+    if not idempotency_key.isascii() or not idempotency_key.strip():
+        raise HTTPException(422, detail="Invalid idempotency key.")
+    _, workspace = context
+    worker = configured_worker_principal("verifier", workspace)
+    result = await execute_symbolic(body, idempotency_key, worker, store)
+    payload = result.model_dump(mode="json") if isinstance(result, CheckResultResponse) else result
+    reason = payload.get("reason_code") or payload.get("error_code")
+    return {**payload, "reason_code": reason, "scope": "ad_hoc_check_not_frozen_campaign"}
+
+
+async def execute_symbolic(body, idempotency_key, actor, store):
     actor.require("checks:run", body.workspace_id)
     try:
         image = configured_image()
@@ -721,8 +743,14 @@ async def create_symbolic_check(
     try:
         source = await store.equation_source(
             workspace_id=body.workspace_id,
-            equation_uuid=body.target_uuid,
+            equation_uuid=str(body.target_uuid),
         )
+        quick = isinstance(body, QuickSymbolicRequest)
+        if quick:
+            body = SymbolicCheckCreateRequest(
+                workspace_id=body.workspace_id, target_uuid=str(body.target_uuid),
+                formula_a=source["latex"], formula_b=body.formula_b, timeout_ms=body.timeout_ms,
+            )
         if body.format != "latex" or source.get("latex") != body.formula_a:
             raise ValueError("Check input does not match the target equation source.")
         contract_reviews = await store.equation_contract_reviews(
@@ -739,6 +767,13 @@ async def create_symbolic_check(
             for review in accepted_reviews
         ):
             raise ValueError("Accepted contract scope does not match the source equation.")
+        if quick:
+            required = {c.name for formula in (body.formula_a, body.formula_b)
+                        for c in infer_contracts(parse_formula(formula))}
+            missing = sorted(required - {review.symbol_name for review in accepted_reviews})
+            if missing:
+                return {"outcome": "unknown", "reason_code": "UNRESOLVED_SHAPE",
+                        "missing_symbols": missing}
         review_ids = tuple(review.review_id for review in contract_reviews)
         review_hash = contract_review_state_hash(contract_reviews)
         request_hash = symbolic_request_hash(

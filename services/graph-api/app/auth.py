@@ -183,6 +183,8 @@ async def require_service_claims(
         "/v1/imports", "/v1/evidence/import", "/v1/evidence/import-tex", "/v1/contract-reviews",
     }:
         required_role = "graph_write"
+    elif request.url.path == "/v1/checks/symbolic/quick" and request.method == "POST":
+        required_role = "research_write"
     elif request.url.path.startswith("/v1/research/") and request.method in {"GET", "POST"}:
         required_role = "research_read" if request.method == "GET" else "research_write"
     else:

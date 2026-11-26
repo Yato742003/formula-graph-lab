@@ -3,7 +3,7 @@ SHELL := /usr/bin/env bash
 
 PYTHON ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; elif [ -x .venv/Scripts/python.exe ]; then echo .venv/Scripts/python.exe; else command -v python3 || command -v python; fi)
 
-.PHONY: help setup db-up db-down db-migrate api web verify build build-wasm test-integration test-sandbox benchmark replay
+.PHONY: dev-sandbox help setup db-up db-down db-migrate api web verify build build-wasm test-integration test-sandbox benchmark replay
 
 help: ## Show available cross-platform targets (macOS / Linux / Git Bash)
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -24,6 +24,10 @@ db-migrate: ## Apply Drizzle SQLite migrations to local Cloudflare D1 (Miniflare
 
 api: ## Run FastAPI Graph API locally on 127.0.0.1:8000
 	$(PYTHON) -m uvicorn app.main:app --app-dir services/graph-api --reload --host 127.0.0.1 --port 8000
+
+API_PORT ?= 8000
+dev-sandbox: db-up ## Build a pinned local worker and run the research API
+	$(PYTHON) scripts/dev_sandbox.py --port $(API_PORT)
 
 web: ## Run Vinext (Next.js App Router on Vite + Cloudflare Workers) dev server
 	npm run dev

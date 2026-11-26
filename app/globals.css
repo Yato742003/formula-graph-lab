@@ -7529,12 +7529,271 @@ html {
   }
 }
 
-.tex-import-fields { display: grid; gap: .5rem; flex: 1; min-width: 0; }
-.tex-import-fields textarea { resize: vertical; min-height: 4rem; }
-.import-label button { padding: .4rem; }
-.import-label button[aria-pressed="true"] { text-decoration: underline; }
+.import-strip:has(.tex-import-fields) {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  min-height: auto;
+  padding: 12px 18px;
+}
 
-.inspector-contracts fieldset { min-width: 0; display: grid; gap: .4rem; padding: .5rem; }
-.inspector-contracts label { display: flex; align-items: center; gap: .5rem; }
-.inspector-contracts input, .inspector-contracts select { min-width: 0; max-width: 100%; }
-.inspector-contracts button { padding: .35rem .5rem; text-align: left; }
+.import-strip:has(.tex-import-fields) .import-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.import-label fieldset {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted);
+}
+
+.import-label button {
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.import-label button:hover {
+  color: var(--foreground);
+}
+
+.import-label button[aria-pressed='true'] {
+  background: var(--card);
+  color: var(--foreground);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+  text-decoration: none;
+}
+
+.tex-import-fields {
+  display: grid;
+  gap: 8px;
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.tex-import-fields input[type='file'] {
+  padding: 6px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.tex-import-fields textarea {
+  width: 100%;
+  min-height: 76px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--foreground);
+  font-family: var(--font-geist-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.tex-import-fields textarea:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.inspector-contracts {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.inspector-contracts > h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--foreground);
+}
+
+.inspector-contracts > small {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in oklab, #d97706 32%, var(--border));
+  border-radius: 999px;
+  background: #fffbeb;
+  color: #92400e;
+  font-family: var(--font-geist-mono);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.inspector-contracts fieldset {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 9px;
+  border: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--muted) 42%, var(--card));
+}
+
+.inspector-contracts fieldset > legend {
+  padding: 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--foreground);
+}
+
+.inspector-contracts fieldset > div:first-of-type {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.inspector-contracts fieldset > div:first-of-type > button {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.inspector-contracts fieldset > div:first-of-type > button:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.inspector-contracts label {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+}
+
+.inspector-contracts legend label {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  color: var(--foreground);
+  font-family: var(--font-geist-mono);
+  font-size: 11.5px;
+}
+
+.inspector-contracts input:not([type='checkbox']),
+.inspector-contracts select,
+.inspector-contracts textarea {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 12px;
+}
+
+.inspector-contracts textarea {
+  min-height: 56px;
+  font-family: var(--font-geist-mono);
+  resize: vertical;
+}
+
+.inspector-contracts > button,
+.inspector-contracts fieldset > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 11px;
+  border: 1px solid color-mix(in oklab, var(--primary) 38%, var(--border));
+  border-radius: 7px;
+  background: color-mix(in oklab, var(--primary) 10%, var(--card));
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 650;
+  text-align: center;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+
+.inspector-contracts > button:hover:not(:disabled),
+.inspector-contracts fieldset > button:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--primary) 16%, var(--card));
+  border-color: var(--primary);
+}
+
+.inspector-contracts > button:disabled,
+.inspector-contracts fieldset > button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.inspector-contracts [aria-live='polite'] {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted);
+  font-size: 12px;
+}
+
+.inspector-contracts [aria-live='polite'] strong {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-family: var(--font-geist-mono);
+  font-size: 11px;
+}
+
+.inspector-contracts [aria-live='polite'] pre {
+  margin: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  font-family: var(--font-geist-mono);
+  font-size: 11px;
+  overflow-x: auto;
+}
+
+.inspector-contracts [aria-live='polite'] button {
+  width: fit-content;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.inspector-contracts output {
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
