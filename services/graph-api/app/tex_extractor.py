@@ -445,6 +445,8 @@ def expand_tex_macros(
 
 
 def extract_tex(tex_source: str, title: str | None = None, filename: str | None = None):
+    if "\x00" in tex_source:
+        raise ValueError("LaTeX source must not contain NUL bytes.")
     raw = tex_source.encode("utf-8")
     if not 1 <= len(raw) <= 512 * 1024:
         raise ValueError("LaTeX source must be 1 to 524288 bytes.")

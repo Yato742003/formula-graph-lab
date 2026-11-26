@@ -124,10 +124,14 @@ class SearchCursorCodec:
             value = json.loads(_base64_decode(body))
             if not isinstance(value, dict) or set(value) != {"v", "f", "s", "u"}:
                 raise InvalidSearchCursor("Search cursor payload is invalid.")
-            if value["v"] != _CURSOR_VERSION or value["f"] != fingerprint:
+            if (
+                type(value["v"]) is not int
+                or value["v"] != _CURSOR_VERSION
+                or value["f"] != fingerprint
+            ):
                 raise InvalidSearchCursor("Search cursor does not belong to this query.")
             if (
-                not isinstance(value["s"], int)
+                type(value["s"]) is not int
                 or value["s"] < 0
                 or not isinstance(value["u"], str)
                 or not value["u"]

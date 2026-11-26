@@ -7,7 +7,7 @@ import secrets
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 from pydantic import BaseModel, Field, SecretStr, TypeAdapter, ValidationError
 
 WorkerRole = Literal["proposer", "compiler", "verifier", "experiment", "evolution"]
@@ -50,12 +50,14 @@ def configured_credentials() -> list[WorkerCredential]:
         names = set()
         tokens = set()
         gateway = os.getenv("SERVICE_TOKEN", "")
+        queue_secret = os.getenv("FGL_RESEARCH_QUEUE_SECRET", "")
         for entry in entries:
             token = entry.token.get_secret_value()
             if (
                 entry.identity in names
                 or token in tokens
-                or token == gateway
+                or (gateway and secrets.compare_digest(token, gateway))
+                or (queue_secret and secrets.compare_digest(token, queue_secret))
                 or not token.isascii()
             ):
                 raise ValueError("identity/token collision")
@@ -74,11 +76,17 @@ def configured_credentials() -> list[WorkerCredential]:
 
 
 async def require_worker(
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> WorkerPrincipal:
     entries = configured_credentials()
     scheme, _, token = (authorization or "").partition(" ")
-    if scheme.lower() != "bearer" or not token.isascii() or not 32 <= len(token) <= 256:
+    if (
+        scheme.lower() != "bearer"
+        or not token.isascii()
+        or not 32 <= len(token) <= 256
+        or request.headers.getlist("authorization") != [authorization]
+    ):
         raise HTTPException(status_code=401, detail="Invalid worker credentials.")
     matched = None
     for entry in entries:

@@ -230,8 +230,17 @@ class ProposalGenerateRequest(FrozenInput):
     @field_validator("research_question", mode="before")
     @classmethod
     def validate_research_question(cls, value: Any) -> str:
-        if not isinstance(value, str) or not value.strip() or len(value) > 1000:
-            raise ValueError("A bounded research question is required.")
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value) > 1000
+            or _HTML_TAG.search(value)
+            or any(
+                (ord(ch) < 32 and ch not in "\n\r\t") or ord(ch) == 127
+                for ch in value
+            )
+        ):
+            raise ValueError("A bounded plain-text research question is required.")
         return value.strip()
 
 

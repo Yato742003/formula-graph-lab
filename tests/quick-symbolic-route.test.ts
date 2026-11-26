@@ -18,6 +18,7 @@ vi.mock('cloudflare:workers', () => ({
 }));
 
 import { POST } from '../app/api/checks/symbolic/route';
+import { emitBffTelemetry } from '../lib/server/bff-telemetry';
 
 const VALID_UUID = '11111111-1111-4111-8111-111111111111';
 
@@ -70,11 +71,18 @@ it('signs and forwards derivation chain + include_lean_export to /v1/checks/symb
     expect(parsed.steps).toEqual(['x + (a + b) - b', 'x + a']);
     expect(parsed.include_lean_export).toBe(true);
     expect(typeof parsed.workspace_id).toBe('string');
-    return Response.json({
-      outcome: 'supported',
-      scope: 'ad_hoc_check_not_frozen_campaign',
-      steps: [],
-    });
+    return Response.json(
+      {
+        outcome: 'supported',
+        scope: 'ad_hoc_check_not_frozen_campaign',
+        steps: [],
+      },
+      {
+        headers: {
+          'x-request-id': '22222222-2222-4222-8222-222222222222',
+        },
+      },
+    );
   });
   vi.stubGlobal('fetch', fetcher);
 
@@ -84,5 +92,33 @@ it('signs and forwards derivation chain + include_lean_export to /v1/checks/symb
     include_lean_export: true,
   });
   expect(response.status).toBe(200);
+  expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+  expect(response.headers.get('cache-control')).toBe('no-store');
+  expect(response.headers.get('x-upstream-request-id')).toBe('22222222-2222-4222-8222-222222222222');
   expect(fetcher).toHaveBeenCalledOnce();
+});
+
+it('rejects non-object JSON roots and redacts fgl1 tokens & tex/formula telemetry fields', async () => {
+  mocks.user.mockResolvedValue({ userId: 'user-1' });
+  expect((await submit(null)).status).toBe(400);
+  expect((await submit(['x'])).status).toBe(400);
+  const badRes = await submit(null);
+  expect(badRes.headers.get('x-content-type-options')).toBe('nosniff');
+
+  const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+  emitBffTelemetry('bff_audit_probe', {
+    tex_source: '\\begin{equation}x=1\\end{equation}',
+    formula_b: 'x+1',
+    steps: ['x+1'],
+    research_question: 'secret question',
+    detail: 'leaked fgl1.eyJ2IjoxfQ.sig123456 and Bearer secretToken999',
+  });
+  expect(infoSpy).toHaveBeenCalledOnce();
+  const logged = JSON.parse(String(infoSpy.mock.calls[0][0])) as Record<string, unknown>;
+  expect(logged.tex_source).toBe('[REDACTED]');
+  expect(logged.formula_b).toBe('[REDACTED]');
+  expect(logged.steps).toBe('[REDACTED]');
+  expect(logged.research_question).toBe('[REDACTED]');
+  expect(logged.detail).toBe('leaked fgl1.[REDACTED] and Bearer [REDACTED]');
+  infoSpy.mockRestore();
 });

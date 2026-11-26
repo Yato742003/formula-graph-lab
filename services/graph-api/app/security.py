@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -102,8 +103,15 @@ class RequestBodyLimitMiddleware:
     """Bound streamed bodies before FastAPI's JSON parser or auth dependencies run."""
 
     def __init__(self, app, body_timeout_seconds: float = 10.0):
+        if (
+            isinstance(body_timeout_seconds, bool)
+            or not isinstance(body_timeout_seconds, (int, float))
+            or not math.isfinite(body_timeout_seconds)
+            or not 0.001 <= body_timeout_seconds <= 60.0
+        ):
+            raise ValueError("body_timeout_seconds must be finite and within [0.001, 60.0].")
         self.app = app
-        self.body_timeout_seconds = body_timeout_seconds
+        self.body_timeout_seconds = float(body_timeout_seconds)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -205,8 +213,10 @@ _SENSITIVE_KEYS = {
     "notes",
     "rationale",
     "source_html", "html", "output_json", "input", "content", "source_text",
+    "tex_source", "latex", "source_fragments", "research_question", "formula_b", "steps",
 }
 _BEARER_PATTERN = re.compile(r"Bearer\s+[a-zA-Z0-9_\-\.]+", re.IGNORECASE)
+_FGL1_PATTERN = re.compile(r"\bfgl1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
 _HTML_PATTERN = re.compile(r"</?[a-z][^>]*>", re.IGNORECASE)
 
 
@@ -245,6 +255,7 @@ class SensitiveDataFilter(logging.Filter):
 
     def _sanitize_text(self, text: str) -> str:
         text = _BEARER_PATTERN.sub("Bearer [REDACTED]", text)
+        text = _FGL1_PATTERN.sub("fgl1.[REDACTED]", text)
         for env_var in (
             "SERVICE_TOKEN",
             "GRAPH_API_SERVICE_TOKEN",

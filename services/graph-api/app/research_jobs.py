@@ -154,7 +154,11 @@ def digest(payload: object) -> str:
 
 def configured_queue_key() -> bytes:
     key = os.getenv("FGL_RESEARCH_QUEUE_SECRET", "")
-    if not key.isascii() or not 32 <= len(key) <= 256 or key == os.getenv("SERVICE_TOKEN"):
+    service_token = os.getenv("SERVICE_TOKEN", "")
+    if (
+        not re.fullmatch(r"[\x21-\x7e]{32,256}", key)
+        or (service_token and hmac.compare_digest(key, service_token))
+    ):
         raise ValueError("Independent research queue secret required.")
     if any(hmac.compare_digest(key, c.token.get_secret_value()) for c in configured_credentials()):
         raise ValueError("Queue and worker credentials must differ.")

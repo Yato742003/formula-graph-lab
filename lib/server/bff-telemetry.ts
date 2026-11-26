@@ -14,9 +14,17 @@ const REDACTED_KEYS = new Set([
   'body',
   'html',
   'latex',
+  'texsource',
+  'sourcefragments',
+  'researchquestion',
+  'formulab',
+  'steps',
   'url',
   'canonicalurl',
 ]);
+
+const BEARER_PATTERN = /Bearer\s+[A-Za-z0-9_.-]+/gi;
+const FGL1_PATTERN = /\bfgl1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -50,6 +58,11 @@ function sanitizeTelemetryValue(key: string, value: unknown, depth = 0): unknown
       }
     }
     return out;
+  }
+  if (typeof value === 'string') {
+    return value
+      .replace(BEARER_PATTERN, 'Bearer [REDACTED]')
+      .replace(FGL1_PATTERN, 'fgl1.[REDACTED]');
   }
   return value;
 }
