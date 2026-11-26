@@ -23,6 +23,50 @@ def test_fixed_symbolic_worker_in_real_container():
         assert result["outcome"] == outcome, result
 
 
+def test_symbolic_worker_respects_reviewed_assumptions_in_real_container():
+    pos = run_sandbox(
+        {
+            "formula_a": r"\sqrt{x^2}",
+            "formula_b": "x",
+            "format": "latex",
+            "symbol_assumptions": {"x": {"category": "scalar", "domain": "positive"}},
+        },
+        timeout_ms=5000,
+        image=image(),
+    )
+    assert pos == {
+        "outcome": "supported",
+        "witness": {"method": "sympy_assumptions_simplify", "difference": "0"},
+    }
+
+    real_only = run_sandbox(
+        {
+            "formula_a": r"\sqrt{x^2}",
+            "formula_b": "x",
+            "format": "latex",
+            "symbol_assumptions": {"x": {"category": "scalar", "domain": "real"}},
+        },
+        timeout_ms=5000,
+        image=image(),
+    )
+    assert real_only["outcome"] == "unknown", real_only
+
+    noncomm = run_sandbox(
+        {
+            "formula_a": "A * B",
+            "formula_b": "B * A",
+            "format": "latex",
+            "symbol_assumptions": {
+                "A": {"category": "matrix", "domain": "real"},
+                "B": {"category": "matrix", "domain": "real"},
+            },
+        },
+        timeout_ms=5000,
+        image=image(),
+    )
+    assert noncomm["outcome"] == "unknown", noncomm
+
+
 def test_fixed_numerical_worker_in_real_container():
     result = run_numerical_sandbox({
         "suite_version": SUITE_VERSION,

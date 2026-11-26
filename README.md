@@ -30,7 +30,7 @@ In **Graph**, choose **.tex / LaTeX** to upload a single UTF-8 file or paste dis
 
 Select an equation and open **Batch Review**. Apply a preset or edit individual shape and domain values, select the symbols, enter your rationale, and approve. Each selected symbol gets its own immutable review.
 
-Enter a proposed rewrite under **Quick Verify**. The server loads the source equation from your workspace and uses accepted symbol contracts. An unresolved result can take you back to Batch Review. Every verdict is scoped to an **ad-hoc check · not frozen campaign**.
+Enter a proposed rewrite or switch to **Derivation chain** (up to 8 ordered steps `E_0 ⇒ E_1 ⇒ ... ⇒ E_k`) under **Quick Verify**. The server loads canonical `E_0` from your workspace, maps accepted human `ContractReview` records to explicit SymPy assumptions (keeping matrices non-commutative and branch cuts sound without `force=True`), discharges implied domain obligations (such as `x^2 >= 0` or `x > 0`), pinpoints the exact failing step on refutation, and optionally exports a pinned Mathlib **Lean 4 `DRAFT_SORRY` theorem** verified by an independent **Five-Bin Statement Auditor** (`DECLARATION_FIDELITY`, `DRAFT_ALLOWLIST`, `PROOF_STATUS: FROZEN_UNPROVED`). Every verdict stays scoped to **ad-hoc check · not frozen campaign**.
 
 For local execution, run `powershell -File .\scripts\run.ps1 -WithSandbox` (add `-ApiPort 8011` if port 8000 is occupied). On macOS/Linux use `make dev-sandbox` and `make web` in separate terminals after configuring the local environment. Set `API_PORT` and the BFF's `GRAPH_API_URL` together when changing ports. The launcher builds the worker image, pins its digest, and enables research checks for the API process. It scopes the local verifier to the simulated Sites user.
 
@@ -82,9 +82,9 @@ Four fixed anchor-finding queries × 3 alternating repeats on isolated Neo4j (`k
 
 ### 4. Automated Test & Release-Gate Coverage
 
-- **Offline regression (`make verify` / `scripts/verify-research.ps1`):** `712` Pytest tests + `217` Vitest tests (`33` files, including live `public/wasm/formula-layout.wasm`, `.tex` import, batch contract review & quick symbolic check) + `3` Rust crate tests + Ruff (`0` errors) + Oxlint (`0` errors) + `tsc --noEmit` (`0` errors).
+- **Offline regression (`make verify` / `scripts/verify-research.ps1`):** `728` Pytest tests + `220` Vitest tests (`34` files, including live `public/wasm/formula-layout.wasm`, `.tex` import, batch contract review, SymPy assumptions/domain discharge, multi-step derivation chains & Lean 4 five-bin statement audit) + `3` Rust crate tests + Ruff (`0` errors) + Oxlint (`0` errors) + `tsc --noEmit` (`0` errors).
 - **Live isolated Neo4j integration (`make test-integration` / `scripts/test-integration.ps1`):** `35` integration tests on ephemeral tmpfs `neo4j:5.26-community` (including signed `fgl1` auth replay rejection, double-delivery quarantine, and dead-letter reconciliation).
-- **Adversarial Docker sandbox & clean-container replay (`make test-sandbox` / `scripts/test-sandbox.ps1`):** `7` container boundary tests (controls, OOM kill, wall-clock kill, stdout flood cap, read-only rootfs, network lockdown) + `1` zero-network replay test.
+- **Adversarial Docker sandbox & clean-container replay (`make test-sandbox` / `scripts/test-sandbox.ps1`):** `8` container boundary & assumption-aware SymPy tests (controls, OOM kill, wall-clock kill, stdout flood cap, read-only rootfs, network lockdown, positive vs real radical & non-commutative matrix checks) + `1` zero-network replay test.
 - **Production HTTP/CSP smoke (`tests/production-security-smoke.mjs`):** Verifies per-request SSR CSP script nonces, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and fail-closed anonymous BFF denial.
 
 ---
@@ -216,9 +216,9 @@ Copy [`.env.example`](.env.example) to `.env`:
 
 | Check | macOS / Linux (`Makefile`) | Windows (`PowerShell`) |
 | :--- | :--- | :--- |
-| **Offline Gate** (Ruff + 712 Pytest + Oxlint + `tsc` + 217 Vitest) | `make verify` | `powershell -NoProfile -File .\scripts\verify-research.ps1` |
+| **Offline Gate** (Ruff + 728 Pytest + Oxlint + `tsc` + 220 Vitest) | `make verify` | `powershell -NoProfile -File .\scripts\verify-research.ps1` |
 | **Live Neo4j Integration** (isolated tmpfs Neo4j, 35 tests) | `make test-integration` | `powershell -NoProfile -File .\scripts\test-integration.ps1` |
-| **Docker Sandbox & Clean Replay** (7 isolation + 1 replay) | `make test-sandbox` | `powershell -NoProfile -File .\scripts\test-sandbox.ps1` |
+| **Docker Sandbox & Clean Replay** (8 isolation/SymPy + 1 replay) | `make test-sandbox` | `powershell -NoProfile -File .\scripts\test-sandbox.ps1` |
 | **Empirical Corpus + Sandbox Benchmark** | `make benchmark` | `python scripts/benchmark_evidence.py --sandbox-image <sha256>` |
 | **Offline Bundle Replay** (`--network none`) | `make replay BUNDLE=campaign.json EVOLUTION=1` | `powershell -NoProfile -File .\scripts\replay-bundle.ps1 -Bundle campaign.json -Evolution` |
 | **Production Build & HTTP/CSP Smoke** | `make build` + `node tests/production-security-smoke.mjs http://127.0.0.1:4173` | `npm run build` + `node tests/production-security-smoke.mjs http://127.0.0.1:4173` |

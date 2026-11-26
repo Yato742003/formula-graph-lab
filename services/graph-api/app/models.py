@@ -499,8 +499,33 @@ class QuickSymbolicRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     workspace_id: str = Field(min_length=1, max_length=200)
     target_uuid: UUID
-    formula_b: str = Field(min_length=1, max_length=2048)
+    formula_b: str | None = Field(default=None, min_length=1, max_length=2048)
+    steps: list[str] | None = Field(default=None, min_length=1, max_length=8)
+    include_lean_export: bool = False
     timeout_ms: int = Field(default=5000, ge=500, le=10000)
+
+    @model_validator(mode="after")
+    def validate_target_expressions(self) -> QuickSymbolicRequest:
+        if self.formula_b is None and self.steps is None:
+            raise ValueError("Either formula_b or steps is required.")
+        if self.formula_b is not None and not self.formula_b.strip():
+            raise ValueError("formula_b cannot be blank.")
+        if self.steps is not None:
+            for step in self.steps:
+                if not isinstance(step, str) or not step.strip() or len(step) > 2048:
+                    raise ValueError("Each derivation step must be 1..2048 non-blank chars.")
+            if self.formula_b is not None and self.steps[-1].strip() != self.formula_b.strip():
+                raise ValueError(
+                    "When both formula_b and steps are given, steps[-1] must match formula_b."
+                )
+        return self
+
+    @property
+    def resolved_steps(self) -> list[str]:
+        if self.steps is not None:
+            return list(self.steps)
+        assert self.formula_b is not None
+        return [self.formula_b]
 
 
 class SymbolicCheckCreateRequest(BaseModel):

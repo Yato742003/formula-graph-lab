@@ -7797,3 +7797,184 @@ html {
   font-size: 11px;
   color: var(--muted-foreground);
 }
+
+.quick-verify-mode-bar {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--muted);
+}
+
+.quick-verify-mode-bar button {
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.quick-verify-mode-bar button.is-active {
+  border-color: var(--border);
+  background: var(--card);
+  color: var(--foreground);
+}
+
+.quick-verify-chain-list {
+  display: grid;
+  gap: 7px;
+}
+
+.quick-verify-chain-step {
+  display: grid;
+  gap: 4px;
+  padding: 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: color-mix(in oklab, var(--muted) 36%, var(--card));
+}
+
+.quick-verify-chain-step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.quick-verify-chain-step-head button,
+.quick-verify-add-step {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.quick-verify-lean-toggle {
+  flex-direction: row !important;
+  align-items: center !important;
+  gap: 6px !important;
+  color: var(--foreground) !important;
+  cursor: pointer;
+}
+
+.quick-verify-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.quick-verify-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--foreground);
+  font-family: var(--font-geist-mono);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.quick-verify-pill.is-discharged,
+.quick-verify-pill.is-pass {
+  border-color: color-mix(in oklab, #15803d 35%, var(--border));
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.quick-verify-pill.is-unresolved,
+.quick-verify-pill.is-conditional,
+.quick-verify-pill.is-proof-frozen_unproved {
+  border-color: color-mix(in oklab, #d97706 38%, var(--border));
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.quick-verify-pill.is-contradictory,
+.quick-verify-pill.is-fail,
+.quick-verify-pill.is-proof-audit_failed {
+  border-color: color-mix(in oklab, #dc2626 38%, var(--border));
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.quick-verify-obligations {
+  display: grid;
+  gap: 4px;
+}
+
+.quick-verify-obligation-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.quick-verify-trace {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.quick-verify-trace li {
+  display: grid;
+  gap: 3px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  border-radius: 6px;
+  background: var(--card);
+  font-size: 11px;
+}
+
+.quick-verify-trace li.is-supported {
+  border-left-color: #15803d;
+}
+
+.quick-verify-trace li.is-refuted {
+  border-left-color: #dc2626;
+}
+
+.quick-verify-trace li.is-unknown {
+  border-left-color: #d97706;
+}
+
+.quick-verify-lean-card {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--card);
+}
+
+.quick-verify-lean-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.quick-verify-binder-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10.5px;
+}
+
+.quick-verify-binder-table th,
+.quick-verify-binder-table td {
+  padding: 3px 5px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}

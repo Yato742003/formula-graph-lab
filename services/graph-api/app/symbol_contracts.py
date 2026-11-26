@@ -1306,3 +1306,443 @@ def detect_symbol_shadowing(
                         )
                     )
     return warnings
+
+
+# ── SymPy assumption mapping & symbolic domain obligation discharge ──
+
+
+def _parse_constraint_flags(symbol_name: str, constraints: list[str]) -> set[str]:
+    """Deterministically parse allowlisted scalar domain constraint strings."""
+    flags: set[str] = set()
+    escaped = symbol_name.strip()
+    for raw in constraints:
+        norm = " ".join(raw.strip().lower().split())
+        if not norm:
+            continue
+        compact = norm.replace(" ", "")
+        if norm in {"nonzero", "non-zero", "non_zero", "!= 0", "\\neq 0"} or compact in {
+            f"{escaped.lower()}!=0",
+            f"{escaped.lower()}\\neq0",
+            f"{escaped.lower()}≠0",
+        }:
+            flags.add("nonzero")
+        elif norm in {"positive", "> 0"} or compact in {
+            f"{escaped.lower()}>0",
+            f"0<{escaped.lower()}",
+        }:
+            flags.add("positive")
+        elif norm in {"non_negative", "non-negative", "nonnegative", ">= 0"} or compact in {
+            f"{escaped.lower()}>=0",
+            f"{escaped.lower()}\\ge0",
+            f"{escaped.lower()}\\geq0",
+            f"0<={escaped.lower()}",
+        }:
+            flags.add("non_negative")
+        elif norm in {"negative", "< 0"} or compact in {
+            f"{escaped.lower()}<0",
+            f"0>{escaped.lower()}",
+        }:
+            flags.add("negative")
+        elif norm in {"not_one", "!= 1", "\\neq 1"} or compact in {
+            f"{escaped.lower()}!=1",
+            f"{escaped.lower()}\\neq1",
+            f"{escaped.lower()}≠1",
+        }:
+            flags.add("not_one")
+    return flags
+
+
+def build_symbol_assumptions(
+    reviews: list[ContractReview],
+    *,
+    scope: str | None = None,
+) -> dict[str, dict[str, object]]:
+    """Build allowlisted SymPy symbol assumptions strictly from accepted human reviews."""
+    assumptions: dict[str, dict[str, object]] = {}
+    for review in latest_contract_reviews(reviews):
+        if review.decision != "accepted" or review.reviewed_contract is None:
+            continue
+        if scope is not None and review.scope != scope:
+            continue
+        contract = review.reviewed_contract
+        flags = _parse_constraint_flags(review.symbol_name, contract.constraints)
+        domain = contract.domain
+        if "positive" in flags and domain in {"real", "non_negative"}:
+            domain = "positive"
+        elif "non_negative" in flags and domain == "real":
+            domain = "non_negative"
+        entry: dict[str, object] = {
+            "category": contract.category,
+            "domain": domain,
+        }
+        if "nonzero" in flags:
+            entry["nonzero"] = True
+        if "negative" in flags and domain in {"real", "integer"}:
+            entry["negative"] = True
+        assumptions[review.symbol_name] = entry
+    return assumptions
+
+
+def format_reviewed_assumptions(
+    reviews: list[ContractReview],
+    *,
+    scope: str | None = None,
+) -> list[str]:
+    """Format accepted human contract assumptions for CheckResult audit trails."""
+    formatted: list[str] = []
+    for name, spec in sorted(build_symbol_assumptions(reviews, scope=scope).items()):
+        parts = [f"{name}:{spec['category']}:{spec['domain']}"]
+        if spec.get("nonzero"):
+            parts.append("nonzero")
+        if spec.get("negative"):
+            parts.append("negative")
+        formatted.append(":".join(parts))
+    return formatted
+
+
+def _ast_node_from_dict(data: Mapping[str, object]) -> AstNode:
+    raw_children = data.get("children") or []
+    children = tuple(
+        _ast_node_from_dict(child) for child in raw_children if isinstance(child, Mapping)
+    )
+    raw_attrs = data.get("attributes") or {}
+    attrs = (
+        tuple(sorted((str(k), str(v)) for k, v in raw_attrs.items()))
+        if isinstance(raw_attrs, Mapping)
+        else ()
+    )
+    value = data.get("value")
+    return AstNode(
+        kind=str(data["kind"]),
+        value=str(value) if value is not None else None,
+        children=children,
+        attributes=attrs,
+    )
+
+
+_BUILTIN_MATH_FUNCTIONS = frozenset({"sqrt", "log", "ln", "exp", "sin", "cos", "tan", "abs"})
+
+
+def _ast_symbol_names_with_subscripts(node: AstNode) -> set[str]:
+    """Collect free symbol identifiers including joined subscript names like ``d_k``."""
+    names: set[str] = set()
+    if node.kind == "symbol" and node.value:
+        names.add(node.value)
+        return names
+    if node.kind == "call" and node.children:
+        fn_node = node.children[0]
+        if fn_node.kind == "symbol" and fn_node.value in _BUILTIN_MATH_FUNCTIONS:
+            for arg in node.children[1:]:
+                names.update(_ast_symbol_names_with_subscripts(arg))
+            return names
+    if node.kind == "subscript" and len(node.children) == 2 and node.children[0].kind == "symbol":
+        base = node.children[0].value
+        idx = node.children[1]
+        if base and idx.kind in {"symbol", "number"} and idx.value:
+            names.add(f"{base}_{idx.value}")
+            return names
+    for child in node.children:
+        names.update(_ast_symbol_names_with_subscripts(child))
+    return names
+
+
+def _sympy_check_predicate(
+    predicate: DomainPredicateKind,
+    expr,  # noqa: ANN001 — sympy.Expr
+) -> Literal["proved", "contradicted", "unknown"]:
+    """Decide whether a domain predicate is strictly proved or contradicted by SymPy assumptions.
+
+    Never uses ``force=True`` or numerical sampling; ``None`` always returns ``unknown``.
+    """
+    import sympy
+    from sympy.assumptions import Q, ask
+
+    candidates = [expr]
+    try:
+        simplified = sympy.simplify(expr)
+        if simplified != expr:
+            candidates.append(simplified)
+    except Exception:
+        pass
+
+    def truthy(prop: str, target=None) -> bool:
+        obj_list = [target] if target is not None else candidates
+        return any(getattr(item, prop, None) is True for item in obj_list)
+
+    def ask_true(pred_fn, target=None) -> bool:
+        obj_list = [target] if target is not None else candidates
+        for item in obj_list:
+            try:
+                if ask(pred_fn(item)) is True:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    if predicate == "positive":
+        if truthy("is_positive") or ask_true(Q.positive):
+            return "proved"
+        if (
+            truthy("is_nonpositive")
+            or truthy("is_negative")
+            or truthy("is_zero")
+            or ask_true(Q.nonpositive)
+        ):
+            return "contradicted"
+        return "unknown"
+
+    if predicate == "non_negative":
+        if (
+            truthy("is_nonnegative")
+            or truthy("is_positive")
+            or truthy("is_zero")
+            or ask_true(Q.nonnegative)
+            or ask_true(Q.positive)
+        ):
+            return "proved"
+        if truthy("is_negative") or ask_true(Q.negative):
+            return "contradicted"
+        return "unknown"
+
+    if predicate == "nonzero":
+        if (
+            truthy("is_nonzero")
+            or truthy("is_positive")
+            or truthy("is_negative")
+            or ask_true(Q.nonzero)
+            or ask_true(Q.positive)
+            or ask_true(Q.negative)
+        ):
+            return "proved"
+        if truthy("is_zero") or ask_true(Q.zero):
+            return "contradicted"
+        return "unknown"
+
+    if predicate == "negative":
+        if truthy("is_negative") or ask_true(Q.negative):
+            return "proved"
+        if (
+            truthy("is_nonnegative")
+            or truthy("is_positive")
+            or truthy("is_zero")
+            or ask_true(Q.nonnegative)
+        ):
+            return "contradicted"
+        return "unknown"
+
+    if predicate == "non_positive":
+        if (
+            truthy("is_nonpositive")
+            or truthy("is_negative")
+            or truthy("is_zero")
+            or ask_true(Q.nonpositive)
+        ):
+            return "proved"
+        if truthy("is_positive") or ask_true(Q.positive):
+            return "contradicted"
+        return "unknown"
+
+    if predicate == "zero":
+        if truthy("is_zero") or ask_true(Q.zero):
+            return "proved"
+        if (
+            truthy("is_nonzero")
+            or truthy("is_positive")
+            or truthy("is_negative")
+            or ask_true(Q.nonzero)
+        ):
+            return "contradicted"
+        return "unknown"
+
+    if predicate == "not_one":
+        shifted = sympy.simplify(expr - 1)
+        if (
+            getattr(shifted, "is_nonzero", None) is True
+            or getattr(shifted, "is_positive", None) is True
+            or getattr(shifted, "is_negative", None) is True
+            or ask_true(Q.nonzero, shifted)
+        ):
+            return "proved"
+        if getattr(shifted, "is_zero", None) is True or ask_true(Q.zero, shifted):
+            return "contradicted"
+        return "unknown"
+
+    return "unknown"
+
+
+_CONTRADICTORY_COUNTERPART: dict[DomainPredicateKind, DomainPredicateKind] = {
+    "nonzero": "zero",
+    "zero": "nonzero",
+    "positive": "non_positive",
+    "non_negative": "negative",
+    "negative": "non_negative",
+    "non_positive": "positive",
+    "not_one": "zero",
+}
+
+
+def discharge_domain_obligations_from_reviews(
+    obligations: list[DomainObligation],
+    reviews: list[ContractReview],
+    *,
+    scope: str | None = None,
+) -> list[DomainAssumption]:
+    """Attempt symbolic discharge of domain obligations strictly from human-reviewed contracts.
+
+    Returns ``checker_supported`` ``DomainAssumption`` certificates when SymPy proves an
+    obligation holds for all values satisfying the reviewed contracts, or contradictory
+    assumption pairs when SymPy proves the obligation is impossible under the contracts.
+    Unprovable obligations receive no assumption and remain fail-closed (``unresolved``).
+    """
+    from app.formula_ast import _CONSTANTS, FormulaParseError, ast_to_sympy
+
+    accepted = [
+        review
+        for review in latest_contract_reviews(reviews)
+        if review.decision == "accepted"
+        and review.reviewed_contract is not None
+        and (scope is None or review.scope == scope)
+    ]
+    if not accepted or not obligations:
+        return []
+
+    symbol_assumptions = build_symbol_assumptions(accepted, scope=scope)
+    reviews_by_symbol = {review.symbol_name: review for review in accepted}
+    derived: list[DomainAssumption] = []
+    seen_ids: set[str] = set()
+
+    for obligation in obligations:
+        if obligation.status in {"discharged", "unsupported"}:
+            continue
+        try:
+            expr_node = _ast_node_from_dict(obligation.expression)
+        except (KeyError, TypeError, ValueError):
+            continue
+        expr_symbols = _ast_symbol_names_with_subscripts(expr_node) - _CONSTANTS
+        # Fail closed unless every free symbol in the obligation has an accepted human review.
+        if not expr_symbols or not expr_symbols.issubset(reviews_by_symbol):
+            continue
+        # Direct constraint check for not_one on single symbol (SymPy assumptions lack != 1).
+        if (
+            obligation.predicate == "not_one"
+            and len(expr_symbols) == 1
+            and expr_node.kind == "symbol"
+        ):
+            sym_name = next(iter(expr_symbols))
+            rev = reviews_by_symbol[sym_name]
+            if rev.reviewed_contract and "not_one" in _parse_constraint_flags(
+                sym_name, rev.reviewed_contract.constraints,
+            ):
+                digest = hashlib.sha256(
+                    f"sympy-discharge.v1:not_one:{obligation.expression_hash}:{rev.review_id}".encode()
+                ).hexdigest()
+                aid = f"sympy_discharge_{digest[:16]}"
+                if aid not in seen_ids:
+                    seen_ids.add(aid)
+                    derived.append(
+                        domain_assumption(
+                            assumption_id=aid,
+                            predicate="not_one",
+                            expression=expr_node,
+                            origin="checker_supported",
+                            acceptance="accepted",
+                            evidence=[f"review:{rev.review_id}", f"constraint:{sym_name}:not_one"],
+                        )
+                    )
+                continue
+
+        try:
+            sym_expr = ast_to_sympy(expr_node, symbol_assumptions=symbol_assumptions)
+        except FormulaParseError:
+            continue
+
+        verdict = _sympy_check_predicate(obligation.predicate, sym_expr)
+        used_review_ids = sorted(reviews_by_symbol[s].review_id for s in expr_symbols)
+        if verdict == "proved":
+            digest = hashlib.sha256(
+                (
+                    f"sympy-discharge.v1:{obligation.predicate}:{obligation.expression_hash}:"
+                    + ",".join(used_review_ids)
+                ).encode()
+            ).hexdigest()
+            aid = f"sympy_discharge_{digest[:16]}"
+            if aid not in seen_ids:
+                seen_ids.add(aid)
+                derived.append(
+                    domain_assumption(
+                        assumption_id=aid,
+                        predicate=obligation.predicate,
+                        expression=expr_node,
+                        origin="checker_supported",
+                        acceptance="accepted",
+                        evidence=[
+                            f"sympy:{obligation.predicate}:{sym_expr}",
+                            *(f"review:{rid}" for rid in used_review_ids),
+                        ],
+                    )
+                )
+        elif verdict == "contradicted":
+            counterpart = _CONTRADICTORY_COUNTERPART[obligation.predicate]
+            digest = hashlib.sha256(
+                (
+                    f"sympy-contradict.v1:{obligation.predicate}:{obligation.expression_hash}:"
+                    + ",".join(used_review_ids)
+                ).encode()
+            ).hexdigest()
+            pair_a = f"sympy_req_{digest[:14]}"
+            pair_b = f"sympy_contra_{digest[:14]}"
+            if pair_a not in seen_ids:
+                seen_ids.add(pair_a)
+                # Register incompatible pair so domain assessment reports contradictory.
+                req_pred: DomainPredicateKind = (
+                    "nonzero" if obligation.predicate == "not_one" else obligation.predicate
+                )
+                derived.append(
+                    domain_assumption(
+                        assumption_id=pair_a,
+                        predicate=req_pred,
+                        expression=expr_node,
+                        origin="checker_supported",
+                        acceptance="accepted",
+                        evidence=[f"obligation:{obligation.obligation_id}"],
+                    )
+                )
+                derived.append(
+                    domain_assumption(
+                        assumption_id=pair_b,
+                        predicate=counterpart,
+                        expression=expr_node,
+                        origin="checker_supported",
+                        acceptance="accepted",
+                        evidence=[
+                            f"sympy:contradicted:{obligation.predicate}:{sym_expr}",
+                            *(f"review:{rid}" for rid in used_review_ids),
+                        ],
+                    )
+                )
+    return derived
+
+
+def summarize_domain_obligations(assessment: DomainAssessment) -> list[dict[str, object]]:
+    """Serialize domain obligations into a compact, auditable summary list."""
+    from contextlib import suppress
+
+    from app.formula_ast import FormulaParseError, ast_to_sympy
+
+    summary: list[dict[str, object]] = []
+    for item in assessment.obligations:
+        expr_text = item.location
+        with suppress(FormulaParseError, KeyError, TypeError, ValueError):
+            expr_text = str(ast_to_sympy(_ast_node_from_dict(item.expression)))
+        summary.append(
+            {
+                "obligation_id": item.obligation_id,
+                "predicate": item.predicate,
+                "expression": expr_text,
+                "location": item.location,
+                "status": item.status,
+                "discharged_by": list(item.discharged_by),
+                "conditions": list(item.conditions),
+            }
+        )
+    return summary

@@ -29,6 +29,9 @@ from app.symbol_contracts import (
     SymbolContract,
     apply_contract_reviews,
     assess_domain_obligations,
+    build_symbol_assumptions,
+    discharge_domain_obligations_from_reviews,
+    format_reviewed_assumptions,
     infer_contracts,
     infer_domain_obligations,
     infer_expression_shape,
@@ -233,10 +236,28 @@ def run_symbolic_check(
             error_code="UNRESOLVED_SHAPE",
         )
 
-    domain_a = assess_domain_obligations(infer_domain_obligations(contracts_a, parsed_a))
-    domain_b = assess_domain_obligations(infer_domain_obligations(contracts_b, parsed_b))
+    obligations_a = infer_domain_obligations(contracts_a, parsed_a)
+    obligations_b = infer_domain_obligations(contracts_b, parsed_b)
+    discharged_a = discharge_domain_obligations_from_reviews(
+        obligations_a, reviews, scope=contract_review_scope,
+    )
+    discharged_b = discharge_domain_obligations_from_reviews(
+        obligations_b, reviews, scope=contract_review_scope,
+    )
+    domain_a = assess_domain_obligations(obligations_a, discharged_a)
+    domain_b = assess_domain_obligations(obligations_b, discharged_b)
     domain_status = _combined_domain_status(domain_a.status, domain_b.status)
+    applied_assumptions = (
+        format_reviewed_assumptions(reviews, scope=contract_review_scope) if reviews else []
+    )
     if domain_status in {"unresolved", "conditional", "contradictory", "unsupported"}:
+        domain_error = (
+            "CONTRADICTORY_DOMAIN"
+            if domain_status == "contradictory"
+            else "UNRESOLVED_DOMAIN"
+            if domain_status != "unsupported"
+            else None
+        )
         return _result(
             base,
             started,
@@ -245,15 +266,22 @@ def run_symbolic_check(
             parse="supported",
             type_status="well_typed",
             domain=domain_status,
-            error_code="UNRESOLVED_DOMAIN" if domain_status != "unsupported" else None,
+            assumptions=applied_assumptions,
+            error_code=domain_error,
         )
 
+    symbol_assumptions = (
+        build_symbol_assumptions(reviews, scope=contract_review_scope) if reviews else {}
+    )
+    worker_payload: dict[str, object] = {
+        "formula_a": formula_a,
+        "formula_b": formula_b,
+        "format": source_format,
+    }
+    if symbol_assumptions:
+        worker_payload["symbol_assumptions"] = symbol_assumptions
     worker = (worker_runner or _run_worker_payload)(
-        {
-            "formula_a": formula_a,
-            "formula_b": formula_b,
-            "format": source_format,
-        },
+        worker_payload,
         timeout_ms=timeout_ms,
     )
     outcome = worker.get("outcome")
@@ -270,6 +298,7 @@ def run_symbolic_check(
         parse="supported",
         type_status="well_typed",
         domain="discharged",
+        assumptions=applied_assumptions,
         witness=worker.get("witness") if isinstance(worker.get("witness"), dict) else None,
         counterexample=(
             worker.get("counterexample")
@@ -293,6 +322,7 @@ def _result(
     domain: Literal[
         "discharged", "conditional", "unresolved", "contradictory", "unsupported",
     ],
+    assumptions: list[str] | None = None,
     witness: dict[str, object] | None = None,
     counterexample: dict[str, object] | None = None,
     error_code: str | None = None,
@@ -303,6 +333,7 @@ def _result(
             "duration_ms": max(0, round((time.monotonic() - started) * 1_000)),
         },
         input_hashes=input_hashes,
+        assumptions=assumptions or [],
         outcome=outcome,
         vector=VerificationVector(
             parse=parse,

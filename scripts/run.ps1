@@ -600,7 +600,7 @@ if (-not $feReady) {
     $feErrLog = Join-Path $LogDir "frontend.stderr.log"
 
     # ponytail: direct Node execution with --unhandled-rejections=warn to prevent transient Miniflare/workerd socket ECONNRESET aborts during heavy optimizer runs, ceiling: local dev server. upgrade: production multi-worker deployment if serving external traffic.
-    $nodeArgs = @("--unhandled-rejections=warn", $vinextCli, "dev")
+    $nodeArgs = @("--unhandled-rejections=warn", $vinextCli, "dev", "--port", "3000")
     $feProc = Start-Process -FilePath "node" -ArgumentList $nodeArgs -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden -RedirectStandardOutput $feOutLog -RedirectStandardError $feErrLog
     $fePid = $feProc.Id
     Write-Success "Frontend chay an truc tiep qua Node (PID: $fePid); log: .logs\frontend.*.log"

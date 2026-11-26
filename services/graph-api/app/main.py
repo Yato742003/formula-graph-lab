@@ -44,6 +44,7 @@ from app.extractor import PaperExtractionError, extract_paper
 from app.fetcher import MAX_HTML_BYTES, PaperFetchError, fetch_paper_html
 from app.formula_ast import FormulaParseError, parse_formula
 from app.graph_store import GraphitiResearchStore
+from app.lean_formalizer import generate_lean4_export
 from app.lineage import (
     LineageAssertionCreateRequest,
     LineageAssertionRecord,
@@ -164,11 +165,15 @@ from app.security import (
 from app.symbol_contracts import (
     ContractReview,
     ReviewedContractValue,
+    apply_contract_reviews,
     assess_domain_obligations,
     contract_review_state_hash,
+    discharge_domain_obligations_from_reviews,
+    format_reviewed_assumptions,
     infer_contracts,
     infer_domain_obligations,
     infer_expression_shape,
+    summarize_domain_obligations,
 )
 from app.verification import (
     CheckResult,
@@ -715,6 +720,54 @@ async def create_symbolic_check(
     return await execute_symbolic(body, idempotency_key, actor, store)
 
 
+def _assess_pair_domains(
+    formula_a: str,
+    formula_b: str,
+    accepted_reviews: list[ContractReview],
+    target_uuid: str,
+) -> tuple[str, list[dict[str, object]], list]:
+    try:
+        parsed_a = parse_formula(formula_a)
+        parsed_b = parse_formula(formula_b)
+    except FormulaParseError:
+        return "unsupported", [], []
+    inferred_a = infer_contracts(parsed_a)
+    inferred_b = infer_contracts(parsed_b)
+    names_a = {c.name for c in inferred_a}
+    names_b = {c.name for c in inferred_b}
+    contracts_a = apply_contract_reviews(
+        inferred_a,
+        [r for r in accepted_reviews if r.symbol_name in names_a],
+        scope=target_uuid,
+    )
+    contracts_b = apply_contract_reviews(
+        inferred_b,
+        [r for r in accepted_reviews if r.symbol_name in names_b],
+        scope=target_uuid,
+    )
+    obs_a = infer_domain_obligations(contracts_a, parsed_a)
+    obs_b = infer_domain_obligations(contracts_b, parsed_b)
+    discharged_a = discharge_domain_obligations_from_reviews(
+        obs_a, accepted_reviews, scope=target_uuid,
+    )
+    discharged_b = discharge_domain_obligations_from_reviews(
+        obs_b, accepted_reviews, scope=target_uuid,
+    )
+    dom_a = assess_domain_obligations(obs_a, discharged_a)
+    dom_b = assess_domain_obligations(obs_b, discharged_b)
+    priority = ["contradictory", "unsupported", "unresolved", "conditional", "discharged"]
+    status = min((dom_a.status, dom_b.status), key=priority.index)
+    combined_obs = list(
+        {o.obligation_id: o for o in (*dom_a.obligations, *dom_b.obligations)}.values()
+    )
+    seen_a = {o.obligation_id for o in dom_a.obligations}
+    summaries = summarize_domain_obligations(dom_a) + [
+        item for item in summarize_domain_obligations(dom_b)
+        if item["obligation_id"] not in seen_a
+    ]
+    return status, summaries, combined_obs
+
+
 @app.post("/v1/checks/symbolic/quick", dependencies=[Depends(require_research_checks_enabled)])
 async def quick_symbolic(
     body: QuickSymbolicRequest,
@@ -726,10 +779,254 @@ async def quick_symbolic(
         raise HTTPException(422, detail="Invalid idempotency key.")
     _, workspace = context
     worker = configured_worker_principal("verifier", workspace)
+    if body.steps is not None:
+        return await execute_symbolic_chain(body, idempotency_key, worker, store)
     result = await execute_symbolic(body, idempotency_key, worker, store)
     payload = result.model_dump(mode="json") if isinstance(result, CheckResultResponse) else result
     reason = payload.get("reason_code") or payload.get("error_code")
-    return {**payload, "reason_code": reason, "scope": "ad_hoc_check_not_frozen_campaign"}
+    enriched: dict[str, object] = {
+        **payload,
+        "reason_code": reason,
+        "scope": "ad_hoc_check_not_frozen_campaign",
+    }
+    if isinstance(result, CheckResultResponse):
+        try:
+            source = await store.equation_source(
+                workspace_id=body.workspace_id, equation_uuid=str(body.target_uuid),
+            )
+            reviews = await store.equation_contract_reviews(
+                workspace_id=body.workspace_id, equation_uuid=str(body.target_uuid),
+            )
+            accepted = [
+                r for r in reviews
+                if r.decision == "accepted" and r.reviewed_contract is not None
+            ]
+            assert body.formula_b is not None
+            dom_status, dom_summary, dom_obs = _assess_pair_domains(
+                source["latex"], body.formula_b, accepted, str(body.target_uuid),
+            )
+            enriched["domain_status"] = dom_status
+            enriched["domain_obligations"] = dom_summary
+            enriched["applied_assumptions"] = format_reviewed_assumptions(
+                accepted, scope=str(body.target_uuid),
+            )
+            if body.include_lean_export:
+                lean_exp = generate_lean4_export(
+                    source_formula=source["latex"],
+                    target_formula=body.formula_b,
+                    contract_reviews=accepted,
+                    domain_obligations=dom_obs,
+                    source_equation_uuid=str(body.target_uuid),
+                    contract_review_hash=result.contract_review_hash,
+                    scope=str(body.target_uuid),
+                )
+                enriched["lean_export"] = lean_exp.model_dump(mode="json")
+        except Exception:
+            pass
+    return enriched
+
+
+async def execute_symbolic_chain(
+    body: QuickSymbolicRequest,
+    idempotency_key: str,
+    actor,
+    store: Neo4jEvidenceStore,
+) -> dict[str, object]:
+    actor.require("checks:run", body.workspace_id)
+    try:
+        image = configured_image()
+        queue = ResearchQueue(store, configured_queue_key())
+        profile = capture_execution_profile(image, "symbolic", body.timeout_ms)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail="Research sandbox is not configured.") from exc
+    try:
+        source = await store.equation_source(
+            workspace_id=body.workspace_id,
+            equation_uuid=str(body.target_uuid),
+        )
+        contract_reviews = await store.equation_contract_reviews(
+            workspace_id=body.workspace_id,
+            equation_uuid=str(body.target_uuid),
+        )
+        analysis_scope = source.get("section_id") or source.get("equation_id")
+        accepted_reviews = [
+            review for review in contract_reviews
+            if review.decision == "accepted" and review.reviewed_contract is not None
+        ]
+        if any(
+            review.reviewed_contract.scope not in (None, analysis_scope)
+            for review in accepted_reviews
+        ):
+            raise ValueError("Accepted contract scope does not match the source equation.")
+        source_latex = source["latex"]
+        chain_targets = body.resolved_steps
+        all_formulas = [source_latex, *chain_targets]
+        required: set[str] = set()
+        for idx, expr in enumerate(all_formulas):
+            try:
+                parsed = parse_formula(expr)
+            except FormulaParseError as exc:
+                return {
+                    "outcome": "unsupported",
+                    "reason_code": exc.code,
+                    "failed_step_index": idx,
+                    "source_formula": source_latex,
+                    "steps": [],
+                    "duration_ms": 0,
+                    "scope": "ad_hoc_check_not_frozen_campaign",
+                }
+            builtins = {"sqrt", "log", "ln", "exp", "sin", "cos", "tan", "abs"}
+            required.update(
+                c.name for c in infer_contracts(parsed)
+                if not (c.category == "function" and c.name in builtins)
+            )
+        missing = sorted(required - {review.symbol_name for review in accepted_reviews})
+        if missing:
+            return {
+                "outcome": "unknown",
+                "reason_code": "UNRESOLVED_SHAPE",
+                "missing_symbols": missing,
+                "source_formula": source_latex,
+                "steps": [],
+                "duration_ms": 0,
+                "scope": "ad_hoc_check_not_frozen_campaign",
+            }
+
+        review_ids = tuple(review.review_id for review in contract_reviews)
+        review_hash = contract_review_state_hash(contract_reviews)
+        target_str = str(body.target_uuid)
+        chain_request_hash = hashlib.sha256(
+            json.dumps(
+                [
+                    "symbolic-chain.v1",
+                    source_latex,
+                    chain_targets,
+                    body.include_lean_export,
+                    body.timeout_ms,
+                    image,
+                    review_hash if contract_reviews else None,
+                    profile.model_dump(mode="json"),
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        queue_payload: dict[str, object] = {
+            "formula_a": source_latex,
+            "formula_b": chain_targets[-1],
+            "format": "latex",
+            "timeout_ms": body.timeout_ms,
+            "contract_review_ids": review_ids,
+            "contract_review_hash": review_hash,
+        }
+        ticket = await queue.admit(
+            actor,
+            workspace_id=body.workspace_id,
+            target_uuid=target_str,
+            idempotency_key=idempotency_key,
+            request_hash=chain_request_hash,
+            payload=queue_payload,
+            image=image,
+            execution_profile=profile,
+        )
+        if ticket.result is not None:
+            replayed = json.loads(ticket.result)
+            if isinstance(replayed, dict):
+                return {**replayed, "replayed": True}
+            raise JobRejected("JOB_RESULT_MISMATCH")
+
+        await queue.claim(ticket, actor, queue_payload, image)
+        step_results: list[dict[str, object]] = []
+        all_domain_summaries: list[dict[str, object]] = []
+        seen_obligation_ids: set[str] = set()
+        all_domain_obs: list = []
+        total_duration_ms = 0
+        final_outcome = "supported"
+        final_reason: str | None = None
+        failed_step_index: int | None = None
+
+        for step_idx in range(1, len(all_formulas)):
+            from_expr = all_formulas[step_idx - 1]
+            to_expr = all_formulas[step_idx]
+            check_res = await run_in_threadpool(
+                run_symbolic_check,
+                from_expr,
+                to_expr,
+                source_format="latex",
+                timeout_ms=body.timeout_ms,
+                worker_runner=partial(
+                    run_sandbox,
+                    image=image,
+                    execution_profile=ticket.envelope.execution_profile,
+                ),
+                contract_reviews=accepted_reviews,
+                contract_review_scope=target_str,
+            )
+            dom_status, dom_summary, dom_obs = _assess_pair_domains(
+                from_expr, to_expr, accepted_reviews, target_str,
+            )
+            for item in dom_summary:
+                oid = str(item["obligation_id"])
+                if oid not in seen_obligation_ids:
+                    seen_obligation_ids.add(oid)
+                    all_domain_summaries.append(item)
+            all_domain_obs.extend(dom_obs)
+            total_duration_ms += check_res.duration_ms
+            step_results.append(
+                {
+                    "step_index": step_idx,
+                    "from_formula": from_expr,
+                    "to_formula": to_expr,
+                    "outcome": check_res.outcome,
+                    "error_code": check_res.error_code,
+                    "domain_status": dom_status,
+                    "domain_obligations": dom_summary,
+                    "duration_ms": check_res.duration_ms,
+                    "witness": check_res.witness,
+                    "counterexample": check_res.counterexample,
+                }
+            )
+            if check_res.outcome != "supported":
+                final_outcome = check_res.outcome
+                final_reason = check_res.error_code
+                failed_step_index = step_idx
+                break
+
+        response: dict[str, object] = {
+            "outcome": final_outcome,
+            "reason_code": final_reason,
+            "failed_step_index": failed_step_index,
+            "source_formula": source_latex,
+            "steps": step_results,
+            "duration_ms": total_duration_ms,
+            "applied_assumptions": format_reviewed_assumptions(accepted_reviews, scope=target_str),
+            "domain_obligations": all_domain_summaries,
+            "scope": "ad_hoc_check_not_frozen_campaign",
+        }
+        if body.include_lean_export:
+            lean_exp = generate_lean4_export(
+                source_formula=source_latex,
+                target_formula=chain_targets[-1],
+                derivation_steps=chain_targets,
+                contract_reviews=accepted_reviews,
+                domain_obligations=all_domain_obs,
+                source_equation_uuid=target_str,
+                contract_review_hash=review_hash,
+                scope=target_str,
+            )
+            response["lean_export"] = lean_exp.model_dump(mode="json")
+        await queue.finish(
+            ticket,
+            json.dumps(response, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+        )
+        return response
+    except JobRejected as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (Neo4jError, ServiceUnavailable, OSError) as exc:
+        raise HTTPException(status_code=503, detail="Check result storage failed.") from exc
 
 
 async def execute_symbolic(body, idempotency_key, actor, store):
@@ -768,8 +1065,12 @@ async def execute_symbolic(body, idempotency_key, actor, store):
         ):
             raise ValueError("Accepted contract scope does not match the source equation.")
         if quick:
-            required = {c.name for formula in (body.formula_a, body.formula_b)
-                        for c in infer_contracts(parse_formula(formula))}
+            builtins = {"sqrt", "log", "ln", "exp", "sin", "cos", "tan", "abs"}
+            required = {
+                c.name for formula in (body.formula_a, body.formula_b)
+                for c in infer_contracts(parse_formula(formula))
+                if not (c.category == "function" and c.name in builtins)
+            }
             missing = sorted(required - {review.symbol_name for review in accepted_reviews})
             if missing:
                 return {"outcome": "unknown", "reason_code": "UNRESOLVED_SHAPE",

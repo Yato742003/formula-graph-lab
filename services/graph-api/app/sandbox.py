@@ -247,6 +247,10 @@ def validate_worker_result(output: bytes) -> dict[str, object]:
         return invalid
     if result in (
         {"outcome": "supported", "witness": {"method": "sympy_simplify", "difference": "0"}},
+        {
+            "outcome": "supported",
+            "witness": {"method": "sympy_assumptions_simplify", "difference": "0"},
+        },
         {"outcome": "unknown", "witness": {"method": "sympy_inconclusive"}},
     ):
         return result

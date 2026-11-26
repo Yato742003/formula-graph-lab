@@ -1187,13 +1187,74 @@ def compute_canonical_hash(root: AstNode) -> str:
     return hashlib.sha256(json_bytes).hexdigest()
 
 
-def ast_to_sympy(node: AstNode):  # noqa: ANN201 — returns sympy.Expr
+def _sympy_symbol_for(
+    name: str,
+    *,
+    default_commutative: bool,
+    symbol_assumptions: dict[str, dict[str, object]] | None,
+):  # noqa: ANN201 — returns sympy.Symbol
+    """Construct a SymPy Symbol using only allowlisted human-reviewed contracts.
+
+    Per SymPy domain safety rules: an unconstrained symbol defaults to complex
+    and preserves its caller-provided commutativity. Assumptions are attached
+    only when explicitly present in ``symbol_assumptions``.
+    """
+    import sympy
+
+    if not symbol_assumptions or name not in symbol_assumptions:
+        return sympy.Symbol(name, commutative=default_commutative)
+    spec = symbol_assumptions[name]
+    category = spec.get("category")
+    domain = spec.get("domain")
+    nonzero = bool(spec.get("nonzero", False))
+    negative = bool(spec.get("negative", False))
+    if category in {"vector", "matrix", "tensor"}:
+        return sympy.Symbol(name, commutative=False)
+    if category not in {"scalar", "index"}:
+        return sympy.Symbol(name, commutative=default_commutative)
+    kwargs: dict[str, bool] = {"commutative": True}
+    if domain == "positive":
+        kwargs["real"] = True
+        kwargs["positive"] = True
+    elif domain == "non_negative":
+        kwargs["real"] = True
+        kwargs["nonnegative"] = True
+        if nonzero:
+            kwargs["positive"] = True
+    elif domain == "integer":
+        kwargs["integer"] = True
+        kwargs["real"] = True
+        if nonzero:
+            kwargs["nonzero"] = True
+        if negative:
+            kwargs["negative"] = True
+    elif domain == "real":
+        kwargs["real"] = True
+        if negative:
+            kwargs["negative"] = True
+        elif nonzero:
+            kwargs["nonzero"] = True
+    elif domain == "complex":
+        kwargs["complex"] = True
+        if nonzero:
+            kwargs["nonzero"] = True
+    return sympy.Symbol(name, **kwargs)
+
+
+def ast_to_sympy(
+    node: AstNode,
+    *,
+    symbol_assumptions: dict[str, dict[str, object]] | None = None,
+):  # noqa: ANN201 — returns sympy.Expr
     """Convert an ``AstNode`` tree to a SymPy expression.
 
     Raises ``FormulaParseError`` with code ``SYMPY_UNSUPPORTED`` for node kinds
     that cannot be represented in SymPy.
     """
     import sympy
+
+    def conv(child: AstNode):  # noqa: ANN202
+        return ast_to_sympy(child, symbol_assumptions=symbol_assumptions)
 
     if node.kind == "number":
         return sympy.Number(node.value)
@@ -1202,18 +1263,22 @@ def ast_to_sympy(node: AstNode):  # noqa: ANN201 — returns sympy.Expr
         if node.value in _CONSTANTS:
             mapping = {"pi": sympy.pi, "infty": sympy.oo, "infinity": sympy.oo}
             return mapping.get(node.value, sympy.Symbol(node.value))
-        return sympy.Symbol(node.value, commutative=_is_provably_scalar(node))
+        return _sympy_symbol_for(
+            node.value or "x",
+            default_commutative=_is_provably_scalar(node),
+            symbol_assumptions=symbol_assumptions,
+        )
 
     if node.kind == "add":
-        return sympy.Add(*(ast_to_sympy(c) for c in node.children))
+        return sympy.Add(*(conv(c) for c in node.children))
 
     if node.kind == "multiply":
-        return sympy.Mul(*(ast_to_sympy(c) for c in node.children))
+        return sympy.Mul(*(conv(c) for c in node.children))
 
     if node.kind == "divide":
         if len(node.children) != 2:
             raise FormulaParseError("SYMPY_UNSUPPORTED", "Division requires two operands.")
-        return ast_to_sympy(node.children[0]) / ast_to_sympy(node.children[1])
+        return conv(node.children[0]) / conv(node.children[1])
 
     if node.kind == "power":
         if len(node.children) != 2:
@@ -1223,23 +1288,23 @@ def ast_to_sympy(node: AstNode):  # noqa: ANN201 — returns sympy.Expr
                 "SYMPY_UNSUPPORTED",
                 "Symbolic transpose requires confirmed matrix contracts.",
             )
-        return sympy.Pow(ast_to_sympy(node.children[0]), ast_to_sympy(node.children[1]))
+        return sympy.Pow(conv(node.children[0]), conv(node.children[1]))
 
     if node.kind == "negate":
-        return -ast_to_sympy(node.children[0])
+        return -conv(node.children[0])
 
     if node.kind == "equals":
         if len(node.children) != 2:
             raise FormulaParseError("SYMPY_UNSUPPORTED", "Equality requires two sides.")
-        lhs = ast_to_sympy(node.children[0])
-        rhs = ast_to_sympy(node.children[1])
+        lhs = conv(node.children[0])
+        rhs = conv(node.children[1])
         return sympy.Eq(lhs, rhs)
 
     if node.kind == "call":
         if not node.children:
             raise FormulaParseError("SYMPY_UNSUPPORTED", "Function call with no children.")
         func_node = node.children[0]
-        args = [ast_to_sympy(c) for c in node.children[1:]]
+        args = [conv(c) for c in node.children[1:]]
         name = func_node.value or "f"
         builtin = {
             "sin": sympy.sin,
@@ -1249,6 +1314,7 @@ def ast_to_sympy(node: AstNode):  # noqa: ANN201 — returns sympy.Expr
             "log": sympy.log,
             "ln": sympy.ln,
             "sqrt": sympy.sqrt,
+            "abs": sympy.Abs,
             "det": sympy.Function("det"),
             "tr": sympy.Function("tr"),
         }
@@ -1262,10 +1328,10 @@ def ast_to_sympy(node: AstNode):  # noqa: ANN201 — returns sympy.Expr
     if node.kind == "sum":
         binder = node.attribute("binder")
         if binder and len(node.children) >= 3:
-            var = sympy.Symbol(binder)
-            lower = ast_to_sympy(node.children[0])
-            upper = ast_to_sympy(node.children[1])
-            body = ast_to_sympy(node.children[2])
+            var = sympy.Symbol(binder, integer=True, real=True)
+            lower = conv(node.children[0])
+            upper = conv(node.children[1])
+            body = conv(node.children[2])
             # Extract the starting value from an equality like `i=1`.
             if isinstance(lower, sympy.Eq):
                 lower = lower.rhs
@@ -1277,10 +1343,10 @@ def ast_to_sympy(node: AstNode):  # noqa: ANN201 — returns sympy.Expr
     if node.kind == "product":
         binder = node.attribute("binder")
         if binder and len(node.children) >= 3:
-            var = sympy.Symbol(binder)
-            lower = ast_to_sympy(node.children[0])
-            upper = ast_to_sympy(node.children[1])
-            body = ast_to_sympy(node.children[2])
+            var = sympy.Symbol(binder, integer=True, real=True)
+            lower = conv(node.children[0])
+            upper = conv(node.children[1])
+            body = conv(node.children[2])
             if isinstance(lower, sympy.Eq):
                 lower = lower.rhs
             return sympy.Product(body, (var, lower, upper))
@@ -1296,32 +1362,47 @@ def ast_to_sympy(node: AstNode):  # noqa: ANN201 — returns sympy.Expr
         if len(node.children) >= 2:
             _collect_index_names(node.children[1], idx_parts)
         indexed_name = f"{name}_{'_'.join(idx_parts)}" if idx_parts else name
+        if symbol_assumptions:
+            if indexed_name in symbol_assumptions:
+                return _sympy_symbol_for(
+                    indexed_name,
+                    default_commutative=True,
+                    symbol_assumptions=symbol_assumptions,
+                )
+            if name in symbol_assumptions and symbol_assumptions[name].get("category") in {
+                "scalar", "index",
+            }:
+                return _sympy_symbol_for(
+                    name,
+                    default_commutative=True,
+                    symbol_assumptions={indexed_name: symbol_assumptions[name]},
+                )
         return sympy.Symbol(indexed_name)
 
     if node.kind == "sequence":
         # Return a tuple of converted children.
-        return sympy.Tuple(*(ast_to_sympy(c) for c in node.children))
+        return sympy.Tuple(*(conv(c) for c in node.children))
 
     if node.kind == "style":
         if node.children:
-            return ast_to_sympy(node.children[0])
+            return conv(node.children[0])
         raise FormulaParseError("SYMPY_UNSUPPORTED", "Empty style node.")
 
     if node.kind == "distribution":
         # Treat distributions as named functions.
         if node.children:
             name = node.children[0].value or "D"
-            args = [ast_to_sympy(c) for c in node.children[1:]]
+            args = [conv(c) for c in node.children[1:]]
             return sympy.Function(name)(*args)
         raise FormulaParseError("SYMPY_UNSUPPORTED", "Empty distribution node.")
 
     if node.kind == "integral":
         binder = node.attribute("binder")
         if binder and len(node.children) >= 3:
-            var = sympy.Symbol(binder)
-            lower = ast_to_sympy(node.children[0])
-            upper = ast_to_sympy(node.children[1])
-            body = ast_to_sympy(node.children[2])
+            var = sympy.Symbol(binder, real=True)
+            lower = conv(node.children[0])
+            upper = conv(node.children[1])
+            body = conv(node.children[2])
             return sympy.Integral(body, (var, lower, upper))
         raise FormulaParseError(
             "SYMPY_UNSUPPORTED", "Integral binder requires lower, upper, and body.",
