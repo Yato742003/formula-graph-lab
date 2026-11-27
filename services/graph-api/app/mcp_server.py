@@ -27,6 +27,7 @@ import os
 import sys
 from datetime import UTC, datetime
 from functools import partial
+from pathlib import Path
 from typing import Annotated, Literal
 
 from mcp.server.fastmcp import FastMCP
@@ -71,6 +72,18 @@ SERVER_INSTRUCTIONS = (
 
 ResponseFormat = Literal["json", "markdown"]
 MAX_CHAIN_STEPS = 8
+_ALLOWLISTED_ENV_FILE_KEYS = frozenset(
+    {
+        "NEO4J_URI",
+        "NEO4J_USER",
+        "NEO4J_PASSWORD",
+        "NEO4J_DATABASE",
+        "SEARCH_CURSOR_SECRET",
+        "FGL_SANDBOX_IMAGE",
+        "FGL_MCP_WORKSPACE_ID",
+        "FGL_MCP_ALLOW_LOCAL_SUBPROCESS",
+    }
+)
 _DETERMINISTIC_REVIEW_TIME = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 _READ_ONLY_LOCAL = ToolAnnotations(
     readOnlyHint=True,
@@ -100,6 +113,35 @@ class SymbolContractInput(BaseModel):
 
 def _truthy_env(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_allowlisted_env_file(env_file: str | Path) -> list[str]:
+    """Load strictly allowlisted keys from a local ``.env`` file without overwriting existing env.
+
+    Never imports unrelated application secrets such as ``SERVICE_TOKEN``,
+    ``FGL_RESEARCH_QUEUE_SECRET``, or ``OPENAI_API_KEY``.
+    """
+    path = Path(env_file)
+    if not path.is_file():
+        return []
+    loaded: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key not in _ALLOWLISTED_ENV_FILE_KEYS:
+            continue
+        cleaned = value.strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+            cleaned = cleaned[1:-1]
+        if cleaned and key not in os.environ:
+            os.environ[key] = cleaned
+            loaded.append(key)
+    return loaded
 
 
 def _build_caller_reviews(
@@ -1154,11 +1196,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "FGL_SANDBOX_IMAGE is unset (otherwise fails closed at preflight_only)."
         ),
     )
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help=(
+            "Optional path to a local .env file; loads ONLY allowlisted Neo4j/MCP keys "
+            "without overwriting explicit environment variables or exposing API secrets."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if args.env_file:
+        _load_allowlisted_env_file(args.env_file)
     server = create_mcp_server(
         host=args.host,
         port=args.port,

@@ -406,3 +406,47 @@ def test_mcp_server_cli_help_exits_zero():
     assert proc.returncode == 0
     assert "streamable-http" in proc.stdout
     assert "--allow-local-subprocess" in proc.stdout
+    assert "--env-file" in proc.stdout
+
+
+def test_load_allowlisted_env_file_filters_secrets_and_respects_explicit_env(tmp_path, monkeypatch):
+    from app.mcp_server import _load_allowlisted_env_file
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "# comment",
+                'NEO4J_URI="bolt://127.0.0.1:7687"',
+                "NEO4J_USER=neo4j",
+                "NEO4J_PASSWORD=local-pass",
+                "SERVICE_TOKEN=must-never-be-loaded",
+                "OPENAI_API_KEY=sk-must-never-be-loaded",
+                "FGL_RESEARCH_QUEUE_SECRET=must-never-be-loaded",
+                "FGL_MCP_WORKSPACE_ID=ws_from_file",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    for key in (
+        "NEO4J_URI",
+        "NEO4J_USER",
+        "NEO4J_PASSWORD",
+        "SERVICE_TOKEN",
+        "OPENAI_API_KEY",
+        "FGL_RESEARCH_QUEUE_SECRET",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("FGL_MCP_WORKSPACE_ID", "ws_explicit_override")
+
+    loaded = _load_allowlisted_env_file(env_file)
+    assert set(loaded) == {"NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD"}
+    assert monkeypatch._setitem is not None
+    import os
+
+    assert os.environ["NEO4J_URI"] == "bolt://127.0.0.1:7687"
+    assert os.environ["NEO4J_PASSWORD"] == "local-pass"
+    assert os.environ["FGL_MCP_WORKSPACE_ID"] == "ws_explicit_override"
+    assert "SERVICE_TOKEN" not in os.environ
+    assert "OPENAI_API_KEY" not in os.environ
+    assert "FGL_RESEARCH_QUEUE_SECRET" not in os.environ

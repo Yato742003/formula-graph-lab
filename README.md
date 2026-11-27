@@ -19,8 +19,8 @@
 | 2D Unified Formula Graph (Rust/WASM Worker) | 3D Scientific Observatory (`InstancedMesh` · 360° Orbit) |
 | :---: | :---: |
 | ![FormulaGraph Lab 2D Graph Viewport](docs/screenshots/evidence-graph-2d.jpg) | ![FormulaGraph Lab 3D Scientific Observatory](docs/screenshots/evidence-graph-3d.jpg) |
-| **Visual Problem Spec Builder (G1)** | **`/ops` Dead-Letter & Reconciliation Ledger** |
-| ![FormulaGraph Lab Problem Spec Gate](docs/screenshots/research-problem-spec.png) | ![FormulaGraph Lab Ops Dead-Letter Ledger](docs/screenshots/ops-dead-letter-ledger.png) |
+| **Visual Problem Spec Builder (G1)** | **`/ops` P50/P95/P99 Latency & Dead-Letter Telemetry** |
+| ![FormulaGraph Lab Problem Spec Gate](docs/screenshots/research-problem-spec.png) | ![FormulaGraph Lab Ops Latency and Dead-Letter Telemetry](docs/screenshots/ops-latency-telemetry.png) |
 
 ---
 
@@ -82,7 +82,7 @@ Four fixed anchor-finding queries × 3 alternating repeats on isolated Neo4j (`k
 
 ### 4. Automated Test & Release-Gate Coverage
 
-- **Offline regression (`make verify` / `scripts/verify-research.ps1`):** `794` Pytest tests (including `Hypothesis` PBT invariants, Threat Model P1 adversarial/sharp-edge regression, `fgl-mcp` 7-tool protocol + 10-question XML eval suite, `WorkspaceTelemetryTracker` P50/P95/P99 tenant-isolation tests, and Neo4j transient retention guard tests) + `230` Vitest tests (`35` files, including live `public/wasm/formula-layout.wasm`, `.tex` import, batch contract review, SymPy assumptions/domain discharge, multi-step derivation chains, Lean 4 five-bin audit, `/ops` latency/BFF-RTT telemetry, and `fast-check` BFF PBT invariants) + `6` Rust crate tests (including `proptest` 2D 0-overlap/containment & 3D constellation invariants) + Ruff (`0` errors) + Oxlint (`0` errors) + `tsc --noEmit` (`0` errors).
+- **Offline regression (`make verify` / `scripts/verify-research.ps1`):** `795` Pytest tests (including `Hypothesis` PBT invariants, Threat Model P1 adversarial/sharp-edge regression, `fgl-mcp` 7-tool protocol + `--env-file` secret-allowlist + 10-question XML eval suite, `WorkspaceTelemetryTracker` P50/P95/P99 tenant-isolation tests, and Neo4j transient retention guard tests) + `230` Vitest tests (`35` files, including live `public/wasm/formula-layout.wasm`, `.tex` import, batch contract review, SymPy assumptions/domain discharge, multi-step derivation chains, Lean 4 five-bin audit, `/ops` latency/BFF-RTT telemetry, and `fast-check` BFF PBT invariants) + `6` Rust crate tests (including `proptest` 2D 0-overlap/containment & 3D constellation invariants) + Ruff (`0` errors) + Oxlint (`0` errors) + `tsc --noEmit` (`0` errors).
 - **Live isolated Neo4j integration (`make test-integration` / `scripts/test-integration.ps1`):** `35` integration tests on ephemeral tmpfs `neo4j:5.26-community` (including signed `fgl1` auth replay rejection, double-delivery quarantine, and dead-letter reconciliation).
 - **Adversarial Docker sandbox & clean-container replay (`make test-sandbox` / `scripts/test-sandbox.ps1`):** `8` container boundary & assumption-aware SymPy tests (controls, OOM kill, wall-clock kill, stdout flood cap, read-only rootfs, network lockdown, positive vs real radical & non-commutative matrix checks) + `1` zero-network replay test.
 - **Isolated Disaster-Recovery Backup & Restore Drill (`make drill-backup-restore` / `scripts/drill-backup-restore.ps1`):** Automated end-to-end drill on isolated local Cloudflare D1 (`wrangler d1 export --no-data` + `--no-schema` → destroy → restore, **RTO `2,983 ms`**, 4/4 table & cross-store `source_sha256` parity) and Docker `neo4j:5.26-community` (`prune_expired_transient_records` → `neo4j-admin database dump` → destroy volume → `database load`, **RTO `14,676 ms`**, 100% evidence/review/check/search parity). Recorded in [`reports/backup-restore-drill-receipt.json`](reports/backup-restore-drill-receipt.json).
@@ -125,12 +125,21 @@ Expose FormulaGraph Lab's deterministic verification engines directly to IDE cod
   "mcpServers": {
     "formula-graph-lab": {
       "command": "python",
-      "args": ["-m", "app.mcp_server", "--transport", "stdio", "--allow-local-subprocess"],
-      "cwd": "services/graph-api"
+      "args": [
+        "-m", "app.mcp_server",
+        "--transport", "stdio",
+        "--allow-local-subprocess",
+        "--env-file", ".env"
+      ],
+      "env": {
+        "PYTHONPATH": "services/graph-api",
+        "FGL_MCP_WORKSPACE_ID": "<your-workspace-id>"
+      }
     }
   }
 }
 ```
+> `--env-file` reads only allowlisted Neo4j/MCP variables (`NEO4J_*`, `SEARCH_CURSOR_SECRET`, `FGL_SANDBOX_IMAGE`, `FGL_MCP_*`) and never imports `SERVICE_TOKEN`, `OPENAI_API_KEY`, or `FGL_RESEARCH_QUEUE_SECRET`, keeping IDE `mcp_config.json` free of plaintext passwords.
 
 ---
 
@@ -235,7 +244,7 @@ Copy [`.env.example`](.env.example) to `.env`:
 
 | Check | macOS / Linux (`Makefile`) | Windows (`PowerShell`) |
 | :--- | :--- | :--- |
-| **Offline Gate** (Ruff + 794 Pytest/Hypothesis + Oxlint + `tsc` + 230 Vitest/fast-check + 6 Rust/proptest) | `make verify` | `powershell -NoProfile -File .\scripts\verify-research.ps1` |
+| **Offline Gate** (Ruff + 795 Pytest/Hypothesis + Oxlint + `tsc` + 230 Vitest/fast-check + 6 Rust/proptest) | `make verify` | `powershell -NoProfile -File .\scripts\verify-research.ps1` |
 | **Live Neo4j Integration** (isolated tmpfs Neo4j, 35 tests) | `make test-integration` | `powershell -NoProfile -File .\scripts\test-integration.ps1` |
 | **Docker Sandbox & Clean Replay** (8 isolation/SymPy + 1 replay) | `make test-sandbox` | `powershell -NoProfile -File .\scripts\test-sandbox.ps1` |
 | **Isolated D1 + Neo4j Backup & Restore Drill** | `make drill-backup-restore` | `powershell -NoProfile -File .\scripts\drill-backup-restore.ps1` |

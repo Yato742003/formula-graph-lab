@@ -67,5 +67,7 @@ Tham chiếu chi tiết: [`FGL602_FGL603_HARDENING.md`](FGL602_FGL603_HARDENING.
 
 ### P2 — Cải tiến trải nghiệm UX/UI tiếp theo (tùy chọn)
 
-- **QA trình duyệt đầy đủ với dữ liệu Neo4j sống:** Chạy tay trọn luồng `Graph (import arXiv thật) → Spec (freeze) → Compatibility (map & review) → Proposals (compile) → Reports (compare + evolution + replay bundle)` trên desktop, tablet và mobile (`390px`) sau khi giải phóng cổng `8000`.
-- [x] README đã cập nhật ảnh 2D, 3D, Spec, Ops và GIF sáu cảnh tại commit `4c8f278`.
+- [x] **QA trình duyệt đầy đủ với dữ liệu Neo4j sống & Docker Sandbox (`2026-11-27`):** Đã kiểm chứng toàn diện trên `http://localhost:3000` nối `FastAPI :8011` (`Dockerfile.sandbox`) + `Neo4j 5.26`:
+  - **Desktop `1440×900` (`0` lỗi console, `0` HTTP `>= 400`, `0px` tràn ngang):** trọn luồng `.tex` (`\newcommand{\inv}` bung đúng sang `\frac{1}{x}`) → `Batch Review` (`x: positive`) → `Quick Verify` chuỗi 2 bước (`supported · 3641 ms`, `discharged`, `ad-hoc check · not frozen campaign`) + xuất **Lean 4 `DRAFT_SORRY`** (`fgl_chain_9ce3bde72b`, `FROZEN_UNPROVED`, `DECLARATION_FIDELITY: PASS`) → đi qua đủ `/spec`, `/compatibility`, `/proposals`, `/reports` → `/ops` hiển thị **65 mẫu thực**, `P50 171.5 ms`, `P95 2846.6 ms`, `P99 3658.4 ms`, `Error-Free Rate 100.0%`, `live BFF RTT 42.0 ms` và bảng 12 route ([`ops-latency-telemetry.png`](../docs/screenshots/ops-latency-telemetry.png)).
+  - **Mobile `390×844` (`0` lỗi console, `0` HTTP `>= 400`):** phát hiện và vá ngay lỗi tràn ngang `21.6px` của chuỗi `workspace_id` trên `/ops` (`overflowWrap: anywhere`); ghi nhận còn `63.2px` tràn ngang nhẹ ở thanh công cụ `/graph` trên màn `390px` (tùy chọn tinh chỉnh sau).
+- [x] README đã cập nhật ảnh 2D, 3D, Spec, `/ops` latency + dead-letter telemetry và GIF sáu cảnh.

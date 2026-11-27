@@ -540,10 +540,10 @@ export function OpsDashboard() {
                 : 'Workspace queue telemetry available'}
             </div>
             {data && (
-              <div style={{ fontSize: '11px', color: 'var(--muted-foreground)' }}>
+              <div style={{ fontSize: '11px', color: 'var(--muted-foreground)', overflowWrap: 'anywhere' }}>
                 Checked at {new Date(data.checked_at).toLocaleTimeString()}
                 {data.workspace_id && (
-                  <> &bull; Workspace: <code>{data.workspace_id}</code></>
+                  <> &bull; Workspace: <code style={{ overflowWrap: 'anywhere', wordBreak: 'break-all' }}>{data.workspace_id}</code></>
                 )}
               </div>
             )}
