@@ -447,4 +447,132 @@ describe('OpsDashboard', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('dead-letter ledger is invalid');
     expect(screen.getByText('Operations telemetry unavailable')).toBeTruthy();
   });
+
+  it('renders Workspace HTTP Latency P50/P95/P99 telemetry, route breakdown, and live BFF RTT header', async () => {
+    const populatedPayload = {
+      ...mockDashboardData,
+      http_telemetry: {
+        scope: 'process_memory_window',
+        window_seconds: 900,
+        max_samples_per_workspace: 2000,
+        sample_count: 42,
+        request_count: 42,
+        success_count: 40,
+        error_4xx_count: 1,
+        error_5xx_count: 1,
+        error_rate_pct: 4.76,
+        error_free_rate_pct: 95.24,
+        p50_ms: 18.4,
+        p95_ms: 82.6,
+        p99_ms: 141.2,
+        max_ms: 165.0,
+        routes: [
+          {
+            method: 'POST',
+            route: '/v1/checks/symbolic/quick',
+            request_count: 12,
+            error_count: 1,
+            error_rate_pct: 8.33,
+            p50_ms: 42.0,
+            p95_ms: 112.5,
+            p99_ms: 141.2,
+            max_ms: 165.0,
+          },
+          {
+            method: 'GET',
+            route: '/v1/research/ops/dashboard',
+            request_count: 30,
+            error_count: 1,
+            error_rate_pct: 3.33,
+            p50_ms: 11.2,
+            p95_ms: 28.4,
+            p99_ms: 35.1,
+            max_ms: 40.0,
+          },
+        ],
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json(populatedPayload, {
+          headers: { 'x-bff-duration-ms': '24.7' },
+        }),
+      ),
+    );
+
+    render(<OpsDashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Workspace HTTP Latency & Reliability/i)).toBeTruthy();
+      expect(screen.getByText('18.4 ms')).toBeTruthy();
+      expect(screen.getByText('82.6 ms')).toBeTruthy();
+      expect(screen.getAllByText('141.2 ms').length).toBeGreaterThanOrEqual(2);
+      expect(screen.getByText('95.2%')).toBeTruthy();
+      expect(screen.getByText('1 / 1')).toBeTruthy();
+      expect(screen.getAllByText('24.7 ms').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText('/v1/checks/symbolic/quick')).toBeTruthy();
+      expect(screen.getByText('/v1/research/ops/dashboard')).toBeTruthy();
+    });
+
+    const routeTable = screen.getByRole('table', { name: 'Workspace HTTP route latency breakdown' });
+    expect(routeTable.style.tableLayout).toBe('fixed');
+    expect(routeTable.querySelectorAll('colgroup col')).toHaveLength(7);
+  });
+
+  it('renders an honest empty latency state when sample_count is 0 instead of fake zeros', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({
+          ...mockDashboardData,
+          http_telemetry: {
+            scope: 'process_memory_window',
+            window_seconds: 900,
+            max_samples_per_workspace: 2000,
+            sample_count: 0,
+            request_count: 0,
+            success_count: 0,
+            error_4xx_count: 0,
+            error_5xx_count: 0,
+            error_rate_pct: null,
+            error_free_rate_pct: null,
+            p50_ms: null,
+            p95_ms: null,
+            p99_ms: null,
+            max_ms: null,
+            routes: [],
+          },
+        }),
+      ),
+    );
+
+    render(<OpsDashboard />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/No workspace requests recorded in the active 15-minute window yet/i),
+      ).toBeTruthy();
+    });
+    expect(screen.queryByRole('table', { name: 'Workspace HTTP route latency breakdown' })).toBeNull();
+  });
+
+  it('rejects malformed http_telemetry payloads fail-closed', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({
+          ...mockDashboardData,
+          http_telemetry: {
+            scope: 'invalid_scope',
+            p50_ms: -10,
+          },
+        }),
+      ),
+    );
+
+    render(<OpsDashboard />);
+    expect((await screen.findByRole('alert')).textContent).toContain('HTTP latency telemetry is invalid');
+    expect(screen.getByText('Operations telemetry unavailable')).toBeTruthy();
+  });
 });

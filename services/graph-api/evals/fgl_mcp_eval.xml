@@ -1,0 +1,42 @@
+<evaluation>
+  <qa_pair>
+    <question>Extract the display equations from the LaTeX document `\newcommand{\inv}[1]{\frac{1}{#1}}\section{Scaling}\begin{equation}\inv{d_k} + \inv{d_k}\end{equation}` using fgl_extract_tex. What is the expanded `latex` string of equation E1?</question>
+    <answer>\frac{1}{d_k} + \frac{1}{d_k}</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Using fgl_extract_tex on the LaTeX document `\newcommand{\bad}{\bad}\begin{equation}\bad\end{equation}`, what exact warning string is recorded in `metadata_warnings`?</question>
+    <answer>macro_cycle_detected</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Call fgl_analyze_formula on `\sum_{i=1}^{n} x_i` and separately on `\sum_{j=1}^{n} x_j`. Are their alpha-canonical `syntax_hash` values identical? Answer `true` or `false`.</question>
+    <answer>true</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Call fgl_check_compatibility on `A B` with contracts `A: matrix shape [3, 4]` and `B: matrix shape [5, 2]`. What is the `shape_status` value returned?</question>
+    <answer>ill_typed</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Call fgl_check_compatibility on `\log(x) + \frac{1}{x}` with contract `x: scalar domain=real` (no positivity or nonzero constraint). What is the `domain_status` value returned?</question>
+    <answer>unresolved</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Call fgl_check_compatibility on `\log(x) + \frac{1}{x}` with contract `x: scalar domain=positive constraints=["x > 0"]`. What is the `domain_status` value returned?</question>
+    <answer>discharged</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Run fgl_verify_derivation in local_bounded_subprocess mode on source_latex=`A B` and target_latex=`B A` with contracts `A: matrix shape [2, 2]` and `B: matrix shape [2, 2]`. Because matrices are non-commutative, what is the conservative `outcome` value returned (never `supported`)?</question>
+    <answer>unknown</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Run fgl_verify_derivation in local_bounded_subprocess mode on source_latex=`(x + 1)^2` with steps=`["x^2 + 2 x + 1", "x^2 + 3 x + 1"]` and contract `x: scalar domain=real`. What is the 0-based `failed_step_index` returned?</question>
+    <answer>1</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Call fgl_export_lean4_draft with source_latex=`\log(x^2)`, target_latex=`2 \log(x)`, and contract `x: scalar domain=positive constraints=["x > 0"]`. What is the `audit.proof_status` value returned?</question>
+    <answer>FROZEN_UNPROVED</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Call fgl_audit_lean4_statement on `theorem sneaky (x : ℝ) (h_x_pos : 0 &lt; x) (h_extra : x = 1) : Real.log (x ^ 2) = 2 * Real.log x := by sorry` with source_latex=`\log(x^2)`, target_latex=`2 \log(x)`, and contract `x: scalar domain=positive constraints=["x > 0"]`. What is the `declaration_fidelity` verdict returned?</question>
+    <answer>FAIL</answer>
+  </qa_pair>
+</evaluation>

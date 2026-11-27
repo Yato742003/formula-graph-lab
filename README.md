@@ -82,9 +82,10 @@ Four fixed anchor-finding queries × 3 alternating repeats on isolated Neo4j (`k
 
 ### 4. Automated Test & Release-Gate Coverage
 
-- **Offline regression (`make verify` / `scripts/verify-research.ps1`):** `751` Pytest tests (including `Hypothesis` PBT invariants on TeX macro expansion, AST alpha-canonicalization, domain discharge, Lean 4 audit & Threat Model P1 adversarial/sharp-edge regression) + `227` Vitest tests (`35` files, including live `public/wasm/formula-layout.wasm`, `.tex` import, batch contract review, SymPy assumptions/domain discharge, multi-step derivation chains, Lean 4 five-bin statement audit & `fast-check` BFF/provenance/stream PBT invariants) + `6` Rust crate tests (including `proptest` 2D 0-overlap/containment & 3D constellation invariants, `0` runtime crate bloat on `64.5 KB` WASM) + Ruff (`0` errors) + Oxlint (`0` errors) + `tsc --noEmit` (`0` errors).
+- **Offline regression (`make verify` / `scripts/verify-research.ps1`):** `794` Pytest tests (including `Hypothesis` PBT invariants, Threat Model P1 adversarial/sharp-edge regression, `fgl-mcp` 7-tool protocol + 10-question XML eval suite, `WorkspaceTelemetryTracker` P50/P95/P99 tenant-isolation tests, and Neo4j transient retention guard tests) + `230` Vitest tests (`35` files, including live `public/wasm/formula-layout.wasm`, `.tex` import, batch contract review, SymPy assumptions/domain discharge, multi-step derivation chains, Lean 4 five-bin audit, `/ops` latency/BFF-RTT telemetry, and `fast-check` BFF PBT invariants) + `6` Rust crate tests (including `proptest` 2D 0-overlap/containment & 3D constellation invariants) + Ruff (`0` errors) + Oxlint (`0` errors) + `tsc --noEmit` (`0` errors).
 - **Live isolated Neo4j integration (`make test-integration` / `scripts/test-integration.ps1`):** `35` integration tests on ephemeral tmpfs `neo4j:5.26-community` (including signed `fgl1` auth replay rejection, double-delivery quarantine, and dead-letter reconciliation).
 - **Adversarial Docker sandbox & clean-container replay (`make test-sandbox` / `scripts/test-sandbox.ps1`):** `8` container boundary & assumption-aware SymPy tests (controls, OOM kill, wall-clock kill, stdout flood cap, read-only rootfs, network lockdown, positive vs real radical & non-commutative matrix checks) + `1` zero-network replay test.
+- **Isolated Disaster-Recovery Backup & Restore Drill (`make drill-backup-restore` / `scripts/drill-backup-restore.ps1`):** Automated end-to-end drill on isolated local Cloudflare D1 (`wrangler d1 export --no-data` + `--no-schema` → destroy → restore, **RTO `2,983 ms`**, 4/4 table & cross-store `source_sha256` parity) and Docker `neo4j:5.26-community` (`prune_expired_transient_records` → `neo4j-admin database dump` → destroy volume → `database load`, **RTO `14,676 ms`**, 100% evidence/review/check/search parity). Recorded in [`reports/backup-restore-drill-receipt.json`](reports/backup-restore-drill-receipt.json).
 - **Production HTTP/CSP smoke (`tests/production-security-smoke.mjs`):** Verifies per-request SSR CSP script nonces, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and fail-closed anonymous BFF denial.
 
 ---
@@ -108,10 +109,28 @@ Four fixed anchor-finding queries × 3 alternating repeats on isolated Neo4j (`k
   - Numerical feature-map fixture suite (`float32`/`float64`, causal perturbation checks) for compiled candidate transforms.
   - CPU-only synthetic Performer/Linear-Attention pilot (`attention-mashup-cpu-synthetic.v1`) with locked holdout confirmation, Pareto finalist freeze, and zero-network deterministic bundle replay (`synthetic_operator_only_no_product_claim`).
 
-### 4. Defense-in-Depth Sandbox, Telemetry Correlation & Dead-Letter Recovery
+### 4. Defense-in-Depth Sandbox, Telemetry Correlation, Latency Observability & Dead-Letter Recovery
 - **Execution Profile Pinning (`sandbox-policy.v2`)**: Captures image digest (`sha256:...`), RAM, CPU, PID, and timeout bounds at enqueue time and aborts immediately on `EXECUTION_PROFILE_DRIFT`.
-- **End-to-End Request Correlation (FGL-603)**: BFF routes propagate `x-request-id` ↔ `x-upstream-request-id` with secret/note redaction across Next.js BFF logs and FastAPI JSON telemetry.
+- **End-to-End Request Correlation & `/ops` P50/P95/P99 Telemetry**: BFF routes propagate `x-request-id` ↔ `x-upstream-request-id` plus `x-bff-duration-ms` round-trip timing; FastAPI maintains a bounded, tenant-partitioned 15-minute sliding window (`WorkspaceTelemetryTracker`) surfacing honest per-route `P50 / P95 / P99` latency, `4xx / 5xx` counts, and error-free rate on `/ops` (rendering an explicit empty state rather than fake zeros when `sample_count == 0`).
 - **Controlled Dead-Letter Reconciliation (`/ops`)**: Distinguishes `prior_state = queued` vs `running` on expired/crashed jobs; enforces hard safety invariants (**no auto-retry on uncertain `running` jobs**, **no refund of `reserved_ms`**, **never promotes campaign winners**).
+
+### 5. Agent-Native MCP Server (`fgl-mcp`)
+Expose FormulaGraph Lab's deterministic verification engines directly to IDE coding agents (Claude Desktop, Cursor, Codex, Antigravity) over **`stdio`** (default) or **`streamable-http`** (`--transport streamable-http --host 127.0.0.1 --port 8765`), installed via `pip install -e "./services/graph-api[mcp]"`:
+- **7 Read-Only Scientific Tools:** `fgl_extract_tex`, `fgl_analyze_formula`, `fgl_check_compatibility`, `fgl_verify_derivation` (single rewrite & multi-step chains up to 8 steps), `fgl_export_lean4_draft`, `fgl_audit_lean4_statement` (five-bin protocol, pairs with `lean-lsp-mcp`), and `fgl_search_evidence` (optional read-only workspace-scoped Neo4j search).
+- **2 MCP Resources & 10-Question Eval Suite:** `fgl://policy/epistemic-boundaries`, `fgl://schema/contract-presets`, and [`services/graph-api/evals/fgl_mcp_eval.xml`](services/graph-api/evals/fgl_mcp_eval.xml).
+- **Fail-Closed Symbolic Execution:** Runs inside pinned Docker sandbox (`FGL_SANDBOX_IMAGE=sha256:...`) when configured; otherwise stops at AST + contract + SymPy domain preflight (`preflight_only`) unless explicitly opted into `--allow-local-subprocess` (or `FGL_MCP_ALLOW_LOCAL_SUBPROCESS=true`).
+
+```json
+{
+  "mcpServers": {
+    "formula-graph-lab": {
+      "command": "python",
+      "args": ["-m", "app.mcp_server", "--transport", "stdio", "--allow-local-subprocess"],
+      "cwd": "services/graph-api"
+    }
+  }
+}
+```
 
 ---
 
@@ -216,9 +235,11 @@ Copy [`.env.example`](.env.example) to `.env`:
 
 | Check | macOS / Linux (`Makefile`) | Windows (`PowerShell`) |
 | :--- | :--- | :--- |
-| **Offline Gate** (Ruff + 751 Pytest/Hypothesis + Oxlint + `tsc` + 227 Vitest/fast-check + 6 Rust/proptest) | `make verify` | `powershell -NoProfile -File .\scripts\verify-research.ps1` |
+| **Offline Gate** (Ruff + 794 Pytest/Hypothesis + Oxlint + `tsc` + 230 Vitest/fast-check + 6 Rust/proptest) | `make verify` | `powershell -NoProfile -File .\scripts\verify-research.ps1` |
 | **Live Neo4j Integration** (isolated tmpfs Neo4j, 35 tests) | `make test-integration` | `powershell -NoProfile -File .\scripts\test-integration.ps1` |
 | **Docker Sandbox & Clean Replay** (8 isolation/SymPy + 1 replay) | `make test-sandbox` | `powershell -NoProfile -File .\scripts\test-sandbox.ps1` |
+| **Isolated D1 + Neo4j Backup & Restore Drill** | `make drill-backup-restore` | `powershell -NoProfile -File .\scripts\drill-backup-restore.ps1` |
+| **MCP Server (`fgl-mcp`)** | `make mcp` | `python -m app.mcp_server --transport stdio` (from `services/graph-api`) |
 | **Empirical Corpus + Sandbox Benchmark** | `make benchmark` | `python scripts/benchmark_evidence.py --sandbox-image <sha256>` |
 | **Offline Bundle Replay** (`--network none`) | `make replay BUNDLE=campaign.json EVOLUTION=1` | `powershell -NoProfile -File .\scripts\replay-bundle.ps1 -Bundle campaign.json -Evolution` |
 | **Production Build & HTTP/CSP Smoke** | `make build` + `node tests/production-security-smoke.mjs http://127.0.0.1:4173` | `npm run build` + `node tests/production-security-smoke.mjs http://127.0.0.1:4173` |
@@ -232,7 +253,8 @@ Copy [`.env.example`](.env.example) to `.env`:
 - [**`docs/PHASE5_COMPLETION.md`**](./docs/PHASE5_COMPLETION.md) — Phase 5 handoff: bounded evolution, locked holdout, retrieval A/B & replay
 - [**`reports/FGL602_FGL603_HARDENING.md`**](./reports/FGL602_FGL603_HARDENING.md) — Sprint 6 security hardening, execution profiles & FGL-603 telemetry/DLQ verification
 - [**`reports/PLAYBOOK3_SECURITY_SUPPLY_CHAIN_AUDIT.md`**](./reports/PLAYBOOK3_SECURITY_SUPPLY_CHAIN_AUDIT.md) — Playbook 3 differential security review, sharp-edges matrix, supply-chain audit & Threat Model P1 verification
-- [**`reports/REMAINING_WORK.md`**](./reports/REMAINING_WORK.md) — Known scope limits & pre-production deployment checklist (staging multi-tenant ingress verification, external append-only audit sink, D1/Neo4j backup drill, and upstream Debian base-image CVE tracking)
+- [**`reports/BACKUP_RESTORE_DRILL_RUNBOOK.md`**](./reports/BACKUP_RESTORE_DRILL_RUNBOOK.md) — Retention policy (`retention-policy.v1`), RPO/RTO targets, key ownership matrix & measured D1/Neo4j drill receipt ([`reports/backup-restore-drill-receipt.json`](./reports/backup-restore-drill-receipt.json))
+- [**`reports/REMAINING_WORK.md`**](./reports/REMAINING_WORK.md) — Known scope limits & pre-production deployment checklist (staging multi-tenant ingress verification, external append-only audit sink, remote production D1/Neo4j cutover drill, and upstream Debian base-image CVE tracking)
 
 ---
 

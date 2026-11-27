@@ -1,6 +1,6 @@
 'use client';
 
-import { Activity, AlertTriangle, CheckCircle2, Cpu, HardDrive, Layers, Lock, RefreshCw, ShieldCheck } from 'lucide-react';
+import { Activity, AlertTriangle, CheckCircle2, Cpu, Gauge, HardDrive, Layers, Lock, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 export type DeadLetterPriorState = 'queued' | 'running' | 'unknown';
@@ -93,12 +93,43 @@ interface Subsystems {
   };
 }
 
+export interface HttpRouteTelemetry {
+  method: string;
+  route: string;
+  request_count: number;
+  error_count: number;
+  error_rate_pct: number;
+  p50_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+  max_ms: number;
+}
+
+export interface HttpTelemetrySnapshot {
+  scope: 'process_memory_window';
+  window_seconds: number;
+  max_samples_per_workspace: number;
+  sample_count: number;
+  request_count: number;
+  success_count: number;
+  error_4xx_count: number;
+  error_5xx_count: number;
+  error_rate_pct: number | null;
+  error_free_rate_pct: number | null;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  p99_ms: number | null;
+  max_ms: number | null;
+  routes: HttpRouteTelemetry[];
+}
+
 interface OpsDashboardData {
   status: 'ok' | 'degraded';
   workspace_id?: string;
   actor_id?: string;
   checked_at: string;
   subsystems?: Subsystems;
+  http_telemetry?: HttpTelemetrySnapshot;
   dead_letters?: DeadLetterJob[];
   quotas?: {
     status?: string;
@@ -179,6 +210,68 @@ function reconciliationDotColor(status: DeadLetterReconciliationStatus): string 
   }
 }
 
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function isNullableNonNegativeNumber(value: unknown): value is number | null {
+  return value === null || isNonNegativeNumber(value);
+}
+
+function isHttpRouteTelemetry(value: unknown): value is HttpRouteTelemetry {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const row = value as Record<string, unknown>;
+  return (
+    isNonEmptyString(row.method) &&
+    isNonEmptyString(row.route) &&
+    isNonNegativeNumber(row.request_count) &&
+    isNonNegativeNumber(row.error_count) &&
+    isNonNegativeNumber(row.error_rate_pct) &&
+    isNonNegativeNumber(row.p50_ms) &&
+    isNonNegativeNumber(row.p95_ms) &&
+    isNonNegativeNumber(row.p99_ms) &&
+    isNonNegativeNumber(row.max_ms)
+  );
+}
+
+function isHttpTelemetrySnapshot(value: unknown): value is HttpTelemetrySnapshot {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const snap = value as Record<string, unknown>;
+  return (
+    snap.scope === 'process_memory_window' &&
+    isNonNegativeNumber(snap.window_seconds) &&
+    isNonNegativeNumber(snap.max_samples_per_workspace) &&
+    isNonNegativeNumber(snap.sample_count) &&
+    isNonNegativeNumber(snap.request_count) &&
+    isNonNegativeNumber(snap.success_count) &&
+    isNonNegativeNumber(snap.error_4xx_count) &&
+    isNonNegativeNumber(snap.error_5xx_count) &&
+    isNullableNonNegativeNumber(snap.error_rate_pct) &&
+    isNullableNonNegativeNumber(snap.error_free_rate_pct) &&
+    isNullableNonNegativeNumber(snap.p50_ms) &&
+    isNullableNonNegativeNumber(snap.p95_ms) &&
+    isNullableNonNegativeNumber(snap.p99_ms) &&
+    isNullableNonNegativeNumber(snap.max_ms) &&
+    Array.isArray(snap.routes) &&
+    snap.routes.every(isHttpRouteTelemetry)
+  );
+}
+
+function parseBffDurationHeader(headerValue: string | null): number | null {
+  if (!headerValue) return null;
+  const parsed = Number(headerValue);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function formatLatencyMs(value: number | null): string {
+  if (value === null) return '—';
+  return `${value.toFixed(1)} ms`;
+}
+
 function parseDashboard(value: unknown): OpsDashboardData {
   if (!value || typeof value !== 'object' ||
       !['ok', 'degraded'].includes((value as OpsDashboardData).status) ||
@@ -208,6 +301,9 @@ function parseDashboard(value: unknown): OpsDashboardData {
       }
     }
   }
+  if (data.http_telemetry !== undefined && !isHttpTelemetrySnapshot(data.http_telemetry)) {
+    throw new Error('Operations HTTP latency telemetry is invalid.');
+  }
   if (data.dead_letters !== undefined) {
     if (!Array.isArray(data.dead_letters) || !data.dead_letters.every(isDeadLetterJob)) {
       throw new Error('Operations dead-letter ledger is invalid.');
@@ -222,6 +318,7 @@ function pillClass(status: string) {
 
 export function OpsDashboard() {
   const [data, setData] = useState<OpsDashboardData | null>(null);
+  const [bffDurationMs, setBffDurationMs] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [recovering, setRecovering] = useState(false);
@@ -241,7 +338,9 @@ export function OpsDashboard() {
       if (!response.ok) {
         throw new Error(`Failed to load ops telemetry: HTTP ${response.status}`);
       }
+      const headerMs = parseBffDurationHeader(response.headers.get('x-bff-duration-ms'));
       const json = parseDashboard(await response.json());
+      setBffDurationMs(headerMs);
       setData(json);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error loading operations data');
@@ -257,10 +356,12 @@ export function OpsDashboard() {
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`Failed to load ops telemetry: HTTP ${response.status}`);
-        return parseDashboard(await response.json());
+        const headerMs = parseBffDurationHeader(response.headers.get('x-bff-duration-ms'));
+        return { headerMs, json: parseDashboard(await response.json()) };
       })
-      .then((json) => {
+      .then(({ headerMs, json }) => {
         if (active) {
+          setBffDurationMs(headerMs);
           setData(json);
           setLoading(false);
         }
@@ -377,6 +478,8 @@ export function OpsDashboard() {
   const finishedJobs = workerSub?.finished_jobs ?? metrics?.finished ?? 0;
   const stuckJobs = workerSub?.stuck_jobs ?? metrics?.stuck ?? 0;
   const deadLetters = data?.dead_letters ?? [];
+  const httpTelemetry = data?.http_telemetry;
+  const maxRouteP99 = httpTelemetry?.routes.reduce((acc, row) => Math.max(acc, row.p99_ms), 0) ?? 0;
   const deadLetterPendingCount =
     metrics?.dead_letter_pending ??
     deadLetters.filter((job) => job.reconciliation_status === 'pending').length;
@@ -448,7 +551,12 @@ export function OpsDashboard() {
         </div>
 
         {data && (
-          <div style={{ display: 'flex', gap: '16px', fontSize: '11px', color: 'var(--muted-foreground)' }}>
+          <div style={{ display: 'flex', gap: '16px', alignItems: 'center', fontSize: '11px', color: 'var(--muted-foreground)' }}>
+            {bffDurationMs !== null && (
+              <div style={{ fontFamily: 'var(--font-geist-mono, monospace)', fontVariantNumeric: 'tabular-nums' }}>
+                BFF RTT: <strong style={{ color: 'var(--foreground)' }}>{bffDurationMs.toFixed(1)} ms</strong>
+              </div>
+            )}
             <div>
               Status: <span style={{ fontWeight: 700, color: isDegraded ? '#d97706' : '#059669' }}>{(data.status || 'OK').toUpperCase()}</span>
             </div>
@@ -735,6 +843,254 @@ export function OpsDashboard() {
             </dl>
           </article>
         </div>
+      )}
+
+      {/* Workspace HTTP Latency & Reliability (P50 / P95 / P99) */}
+      {data && httpTelemetry && (
+        <section
+          className="ops-card"
+          aria-labelledby="http-latency-heading"
+          style={{ marginTop: '16px', padding: '16px', gap: '12px' }}
+        >
+          <div className="ops-card-header" style={{ flexWrap: 'wrap', gap: '8px' }}>
+            <h2 id="http-latency-heading" className="ops-card-title">
+              <Gauge size={15} style={{ color: 'var(--primary)' }} aria-hidden="true" />
+              Workspace HTTP Latency &amp; Reliability (P50 / P95 / P99)
+            </h2>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                flexWrap: 'wrap',
+                fontSize: '11px',
+                fontFamily: 'var(--font-geist-mono, monospace)',
+                fontVariantNumeric: 'tabular-nums',
+                color: 'var(--muted-foreground)',
+              }}
+            >
+              <span>
+                scope: <strong style={{ color: 'var(--foreground)' }}>{httpTelemetry.scope}</strong>
+              </span>
+              <span>
+                window: <strong style={{ color: 'var(--foreground)' }}>{Math.round(httpTelemetry.window_seconds / 60)}m</strong>
+              </span>
+              <span>
+                samples: <strong style={{ color: 'var(--foreground)' }}>{httpTelemetry.sample_count}</strong>
+              </span>
+              {bffDurationMs !== null && (
+                <span>
+                  live BFF RTT: <strong style={{ color: 'var(--foreground)' }}>{bffDurationMs.toFixed(1)} ms</strong>
+                </span>
+              )}
+            </div>
+          </div>
+
+          {httpTelemetry.sample_count === 0 ? (
+            <div
+              style={{
+                padding: '12px',
+                borderRadius: '6px',
+                border: '1px dashed var(--border)',
+                fontSize: '12px',
+                color: 'var(--muted-foreground)',
+              }}
+            >
+              <strong style={{ color: 'var(--foreground)' }}>
+                No workspace requests recorded in the active {Math.round(httpTelemetry.window_seconds / 60)}-minute window yet.
+              </strong>{' '}
+              Percentiles stay empty (—) until authenticated requests complete for this workspace.
+            </div>
+          ) : (
+            <>
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+                  gap: '8px',
+                  fontVariantNumeric: 'tabular-nums',
+                }}
+              >
+                <div style={{ background: 'var(--accent)', padding: '8px 10px', borderRadius: '6px' }}>
+                  <div style={{ fontSize: '10px', color: 'var(--muted-foreground)' }}>P50 Latency</div>
+                  <div style={{ fontSize: '14px', fontWeight: 700, fontFamily: 'var(--font-geist-mono, monospace)' }}>
+                    {formatLatencyMs(httpTelemetry.p50_ms)}
+                  </div>
+                </div>
+                <div style={{ background: 'var(--accent)', padding: '8px 10px', borderRadius: '6px' }}>
+                  <div style={{ fontSize: '10px', color: 'var(--muted-foreground)' }}>P95 Latency</div>
+                  <div style={{ fontSize: '14px', fontWeight: 700, fontFamily: 'var(--font-geist-mono, monospace)' }}>
+                    {formatLatencyMs(httpTelemetry.p95_ms)}
+                  </div>
+                </div>
+                <div style={{ background: 'var(--accent)', padding: '8px 10px', borderRadius: '6px' }}>
+                  <div style={{ fontSize: '10px', color: 'var(--muted-foreground)' }}>P99 Latency</div>
+                  <div
+                    style={{
+                      fontSize: '14px',
+                      fontWeight: 700,
+                      fontFamily: 'var(--font-geist-mono, monospace)',
+                      color: (httpTelemetry.p99_ms ?? 0) > 1000 ? '#d97706' : 'var(--foreground)',
+                    }}
+                  >
+                    {formatLatencyMs(httpTelemetry.p99_ms)}
+                  </div>
+                </div>
+                <div style={{ background: 'var(--accent)', padding: '8px 10px', borderRadius: '6px' }}>
+                  <div style={{ fontSize: '10px', color: 'var(--muted-foreground)' }}>Error-Free Rate</div>
+                  <div
+                    style={{
+                      fontSize: '14px',
+                      fontWeight: 700,
+                      fontFamily: 'var(--font-geist-mono, monospace)',
+                      color:
+                        (httpTelemetry.error_free_rate_pct ?? 100) < 95
+                          ? '#b91c1c'
+                          : '#059669',
+                    }}
+                  >
+                    {httpTelemetry.error_free_rate_pct !== null
+                      ? `${httpTelemetry.error_free_rate_pct.toFixed(1)}%`
+                      : '—'}
+                  </div>
+                </div>
+                <div style={{ background: 'var(--accent)', padding: '8px 10px', borderRadius: '6px' }}>
+                  <div style={{ fontSize: '10px', color: 'var(--muted-foreground)' }}>4xx / 5xx Errors</div>
+                  <div
+                    style={{
+                      fontSize: '14px',
+                      fontWeight: 700,
+                      fontFamily: 'var(--font-geist-mono, monospace)',
+                      color: httpTelemetry.error_5xx_count > 0 ? '#b91c1c' : 'var(--foreground)',
+                    }}
+                  >
+                    {httpTelemetry.error_4xx_count} / {httpTelemetry.error_5xx_count}
+                  </div>
+                </div>
+              </div>
+
+              {httpTelemetry.routes.length > 0 && (
+                <div style={{ overflowX: 'auto' }}>
+                  <table
+                    aria-label="Workspace HTTP route latency breakdown"
+                    style={{
+                      width: '100%',
+                      minWidth: '720px',
+                      tableLayout: 'fixed',
+                      borderCollapse: 'collapse',
+                      fontSize: '12px',
+                      fontVariantNumeric: 'tabular-nums',
+                    }}
+                  >
+                    <colgroup>
+                      <col style={{ width: '9%' }} />
+                      <col style={{ width: '35%' }} />
+                      <col style={{ width: '10%' }} />
+                      <col style={{ width: '10%' }} />
+                      <col style={{ width: '10%' }} />
+                      <col style={{ width: '10%' }} />
+                      <col style={{ width: '16%' }} />
+                    </colgroup>
+                    <thead>
+                      <tr
+                        style={{
+                          borderBottom: '1px solid var(--border)',
+                          color: 'var(--muted-foreground)',
+                          fontSize: '11px',
+                          textAlign: 'left',
+                        }}
+                      >
+                        <th style={{ padding: '6px 8px', fontWeight: 600 }}>Method</th>
+                        <th style={{ padding: '6px 8px', fontWeight: 600 }}>Route</th>
+                        <th style={{ padding: '6px 8px', fontWeight: 600, textAlign: 'right' }}>Reqs</th>
+                        <th style={{ padding: '6px 8px', fontWeight: 600, textAlign: 'right' }}>Err %</th>
+                        <th style={{ padding: '6px 8px', fontWeight: 600, textAlign: 'right' }}>P50</th>
+                        <th style={{ padding: '6px 8px', fontWeight: 600, textAlign: 'right' }}>P95</th>
+                        <th style={{ padding: '6px 8px', fontWeight: 600, textAlign: 'right' }}>P99 Profile</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {httpTelemetry.routes.map((row) => {
+                        const pctWidth =
+                          maxRouteP99 > 0 ? Math.min(100, Math.max(4, Math.round((row.p99_ms / maxRouteP99) * 100))) : 0;
+                        return (
+                          <tr
+                            key={`${row.method}:${row.route}`}
+                            style={{
+                              borderBottom: '1px solid color-mix(in oklab, var(--border) 60%, transparent)',
+                            }}
+                          >
+                            <td
+                              style={{
+                                padding: '6px 8px',
+                                fontFamily: 'var(--font-geist-mono, monospace)',
+                                fontWeight: 600,
+                              }}
+                            >
+                              {row.method}
+                            </td>
+                            <td
+                              title={row.route}
+                              style={{
+                                padding: '6px 8px',
+                                fontFamily: 'var(--font-geist-mono, monospace)',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {row.route}
+                            </td>
+                            <td style={{ padding: '6px 8px', textAlign: 'right', fontFamily: 'var(--font-geist-mono, monospace)' }}>
+                              {row.request_count}
+                            </td>
+                            <td
+                              style={{
+                                padding: '6px 8px',
+                                textAlign: 'right',
+                                fontFamily: 'var(--font-geist-mono, monospace)',
+                                color: row.error_count > 0 ? '#b91c1c' : 'var(--muted-foreground)',
+                              }}
+                            >
+                              {row.error_rate_pct.toFixed(1)}%
+                            </td>
+                            <td style={{ padding: '6px 8px', textAlign: 'right', fontFamily: 'var(--font-geist-mono, monospace)' }}>
+                              {row.p50_ms.toFixed(1)} ms
+                            </td>
+                            <td style={{ padding: '6px 8px', textAlign: 'right', fontFamily: 'var(--font-geist-mono, monospace)' }}>
+                              {row.p95_ms.toFixed(1)} ms
+                            </td>
+                            <td style={{ padding: '6px 8px', textAlign: 'right', fontFamily: 'var(--font-geist-mono, monospace)' }}>
+                              <div style={{ fontWeight: 600 }}>{row.p99_ms.toFixed(1)} ms</div>
+                              <div
+                                aria-hidden="true"
+                                style={{
+                                  height: '4px',
+                                  marginTop: '3px',
+                                  borderRadius: '2px',
+                                  background: 'var(--accent)',
+                                  overflow: 'hidden',
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    width: `${pctWidth}%`,
+                                    height: '100%',
+                                    background: row.p99_ms > 1000 ? '#d97706' : 'var(--primary)',
+                                  }}
+                                />
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+        </section>
       )}
 
       {/* Dead-Letter & Reconciliation Ledger */}

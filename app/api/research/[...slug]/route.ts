@@ -8,7 +8,13 @@ import { assertDeclaredLengthWithinLimit, PayloadTooLargeError, readTextLimited 
 import { resolveGraphApiConfiguration, workspaceIdentifierForUser } from '@/lib/server/paper-import';
 import { env } from 'cloudflare:workers';
 
-function json(body: unknown, status: number, requestId: string, upstreamRequestId?: string) {
+function json(
+  body: unknown,
+  status: number,
+  requestId: string,
+  upstreamRequestId?: string,
+  durationMs?: number,
+) {
   const headers: Record<string, string> = {
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
@@ -17,12 +23,17 @@ function json(body: unknown, status: number, requestId: string, upstreamRequestI
   if (upstreamRequestId) {
     headers['x-upstream-request-id'] = upstreamRequestId;
   }
+  if (durationMs !== undefined && Number.isFinite(durationMs) && durationMs >= 0) {
+    headers['x-bff-duration-ms'] = durationMs.toFixed(1);
+  }
   return Response.json(body, { status, headers });
 }
 
 type Context = { params: Promise<{ slug: string[] }> };
 
 async function forward(request: Request, { params }: Context) {
+  const startedAt = performance.now();
+  const elapsedMs = () => Number((performance.now() - startedAt).toFixed(1));
   const bffRequestId = newBffRequestId();
   const user = await getChatGPTUser();
   if (!user) return json({ code: 'AUTH_REQUIRED' }, 401, bffRequestId);
@@ -175,21 +186,23 @@ async function forward(request: Request, { params }: Context) {
       return json({ code: 'WORKSPACE_NOT_FOUND' }, 404, bffRequestId);
     }
   } catch {
+    const durationMs = elapsedMs();
     emitBffTelemetry('bff_research_proxy', {
       bff_request_id: bffRequestId,
       workspace_id: workspaceId,
       collection,
       method: request.method,
       status: 503,
+      duration_ms: durationMs,
       code: 'DATABASE_UNAVAILABLE',
     });
-    return json({ code: 'DATABASE_UNAVAILABLE' }, 503, bffRequestId);
+    return json({ code: 'DATABASE_UNAVAILABLE' }, 503, bffRequestId, undefined, durationMs);
   }
   const configuration = resolveGraphApiConfiguration({
     GRAPH_API_URL: env.GRAPH_API_URL,
     GRAPH_API_SERVICE_TOKEN: env.GRAPH_API_SERVICE_TOKEN,
   }, !import.meta.env.DEV || env.APP_ENV !== 'development');
-  if (!configuration) return json({ code: 'GRAPH_API_NOT_CONFIGURED' }, 503, bffRequestId);
+  if (!configuration) return json({ code: 'GRAPH_API_NOT_CONFIGURED' }, 503, bffRequestId, undefined, elapsedMs());
   const upstreamBody = isCompile
     ? JSON.stringify({ ...writeInput, workspace_id: workspaceId })
     : body;
@@ -208,6 +221,7 @@ async function forward(request: Request, { params }: Context) {
     upstreamRequestId = safeUpstreamRequestId(response.headers);
     if (response.status < 200 || response.status >= 300 && response.status < 400) {
       await response.body?.cancel();
+      const durationMs = elapsedMs();
       emitBffTelemetry('bff_research_proxy', {
         bff_request_id: bffRequestId,
         upstream_request_id: upstreamRequestId,
@@ -215,9 +229,10 @@ async function forward(request: Request, { params }: Context) {
         collection,
         method,
         status: 502,
+        duration_ms: durationMs,
         code: 'UPSTREAM_INVALID_RESPONSE',
       });
-      return json({ code: 'UPSTREAM_INVALID_RESPONSE' }, 502, bffRequestId, upstreamRequestId);
+      return json({ code: 'UPSTREAM_INVALID_RESPONSE' }, 502, bffRequestId, upstreamRequestId, durationMs);
     }
     assertDeclaredLengthWithinLimit(response.headers, 4 * 1024 * 1024);
     const data = JSON.parse(await readTextLimited(response.body, 4 * 1024 * 1024)) as Record<string, unknown>;
@@ -227,6 +242,7 @@ async function forward(request: Request, { params }: Context) {
     const nestedDecision = payloadObj.decision as Record<string, unknown> | undefined;
     const nestedProposal = payloadObj.proposal as Record<string, unknown> | undefined;
     const nestedResult = payloadObj.result as Record<string, unknown> | undefined;
+    const durationMs = elapsedMs();
     emitBffTelemetry('bff_research_proxy', {
       bff_request_id: bffRequestId,
       upstream_request_id: upstreamRequestId,
@@ -234,6 +250,7 @@ async function forward(request: Request, { params }: Context) {
       collection,
       method,
       status: response.status,
+      duration_ms: durationMs,
       spec_id:
         (collection === 'problems' && identifier && !['compare', 'readiness'].includes(identifier)
           ? identifier
@@ -254,9 +271,10 @@ async function forward(request: Request, { params }: Context) {
       reconciliation_id: payloadObj.reconciliation_id,
       replayed: typeof payloadObj.replayed === 'boolean' ? payloadObj.replayed : undefined,
     });
-    return json(data, response.status, bffRequestId, upstreamRequestId);
+    return json(data, response.status, bffRequestId, upstreamRequestId, durationMs);
   } catch (error) {
     const code = error instanceof PayloadTooLargeError ? 'UPSTREAM_RESPONSE_TOO_LARGE' : 'UPSTREAM_UNAVAILABLE';
+    const durationMs = elapsedMs();
     emitBffTelemetry('bff_research_proxy', {
       bff_request_id: bffRequestId,
       upstream_request_id: upstreamRequestId,
@@ -264,9 +282,10 @@ async function forward(request: Request, { params }: Context) {
       collection,
       method,
       status: 502,
+      duration_ms: durationMs,
       code,
     });
-    return json({ code }, 502, bffRequestId, upstreamRequestId);
+    return json({ code }, 502, bffRequestId, upstreamRequestId, durationMs);
   }
 }
 

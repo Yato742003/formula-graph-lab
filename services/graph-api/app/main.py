@@ -91,7 +91,12 @@ from app.numerical_verification import (
     make_numerical_fixture_receipt,
     run_candidate_numerical_fixture,
 )
-from app.observability import RequestTelemetryMiddleware, configure_telemetry, emit_event
+from app.observability import (
+    RequestTelemetryMiddleware,
+    configure_telemetry,
+    emit_event,
+    workspace_telemetry,
+)
 from app.openai_proposal_provider import (
     OpenAIProposalConfig,
     ProposalProviderError,
@@ -1277,6 +1282,7 @@ async def ops_dashboard(
         "workspace_id": workspace_id,
         "checked_at": datetime.now(UTC).isoformat(),
         "dead_letters": dead_letters,
+        "http_telemetry": workspace_telemetry.snapshot(workspace_id),
         "subsystems": {
             "import": {
                 "status": "configured",

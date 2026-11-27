@@ -19,7 +19,13 @@ import {
 
 const MAX_REQUEST_BYTES = 4 * 1024;
 
-function json(body: unknown, status: number, requestId: string, upstreamRequestId?: string) {
+function json(
+  body: unknown,
+  status: number,
+  requestId: string,
+  upstreamRequestId?: string,
+  durationMs?: number,
+) {
   const headers: Record<string, string> = {
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
@@ -28,10 +34,15 @@ function json(body: unknown, status: number, requestId: string, upstreamRequestI
   if (upstreamRequestId) {
     headers['x-upstream-request-id'] = upstreamRequestId;
   }
+  if (durationMs !== undefined && Number.isFinite(durationMs) && durationMs >= 0) {
+    headers['x-bff-duration-ms'] = durationMs.toFixed(1);
+  }
   return Response.json(body, { status, headers });
 }
 
 export async function handleImport(request: Request, localTex: boolean) {
+  const startedAt = performance.now();
+  const elapsedMs = () => Number((performance.now() - startedAt).toFixed(1));
   const bffRequestId = newBffRequestId();
   const user = await getChatGPTUser();
   if (!user) return json({ code: 'AUTH_REQUIRED' }, 401, bffRequestId);
@@ -99,24 +110,28 @@ export async function handleImport(request: Request, localTex: boolean) {
     !import.meta.env.DEV || env.APP_ENV !== 'development',
   );
   if (!graphConfiguration) {
+    const durationMs = elapsedMs();
     emitBffTelemetry(event, {
       bff_request_id: bffRequestId,
       status: 503,
+      duration_ms: durationMs,
       code: 'GRAPH_API_NOT_CONFIGURED',
     });
-    return json({ code: 'GRAPH_API_NOT_CONFIGURED' }, 503, bffRequestId);
+    return json({ code: 'GRAPH_API_NOT_CONFIGURED' }, 503, bffRequestId, undefined, durationMs);
   }
 
   let repository: D1ImportRepository;
   try {
     repository = new D1ImportRepository(getD1());
   } catch {
+    const durationMs = elapsedMs();
     emitBffTelemetry(event, {
       bff_request_id: bffRequestId,
       status: 503,
+      duration_ms: durationMs,
       code: 'DATABASE_UNAVAILABLE',
     });
-    return json({ code: 'DATABASE_UNAVAILABLE' }, 503, bffRequestId);
+    return json({ code: 'DATABASE_UNAVAILABLE' }, 503, bffRequestId, undefined, durationMs);
   }
 
   let upstreamRequestId: string | undefined;
@@ -130,11 +145,12 @@ export async function handleImport(request: Request, localTex: boolean) {
       bffRequestId,
     });
     upstreamRequestId = graphClient.lastUpstreamRequestId;
-    return json(result, 200, bffRequestId, upstreamRequestId);
+    return json(result, 200, bffRequestId, upstreamRequestId, elapsedMs());
   } catch (error) {
+    const durationMs = elapsedMs();
     if (error instanceof ImportWorkflowError) {
-      return json({ code: error.code }, error.status, bffRequestId, upstreamRequestId);
+      return json({ code: error.code }, error.status, bffRequestId, upstreamRequestId, durationMs);
     }
-    return json({ code: 'IMPORT_FAILED' }, 503, bffRequestId, upstreamRequestId);
+    return json({ code: 'IMPORT_FAILED' }, 503, bffRequestId, upstreamRequestId, durationMs);
   }
 }

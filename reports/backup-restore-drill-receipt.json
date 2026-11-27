@@ -1,0 +1,72 @@
+{
+    "schema_version":  "backup-restore-drill-receipt.v1",
+    "status":  "passed",
+    "scope":  "isolated_local_d1_and_docker_neo4j",
+    "remote_production_drill_completed":  false,
+    "executed_at":  "2026-11-27T06:27:02Z",
+    "total_drill_duration_ms":  66600,
+    "targets":  {
+                    "rpo_minutes":  15,
+                    "rto_minutes":  30,
+                    "retention_policy_version":  "retention-policy.v1"
+                },
+    "cloudflare_d1":  {
+                          "status":  "passed",
+                          "database_name":  "site-creator-d1",
+                          "backup_tool":  "wrangler d1 export --local (--no-data + --no-schema)",
+                          "restore_tool":  "wrangler d1 execute --local --file (schema then data)",
+                          "backup_bytes":  3762,
+                          "schema_backup_sha256":  "626fde7c2f5984ba3fb17e792675c17a98259b48eb092a77630efbbbc94c78e5",
+                          "data_backup_sha256":  "d957693f369c988116e2e41e44d9f5855cb94096ca428af79a5d28ac02a9e6e1",
+                          "backup_duration_ms":  2900,
+                          "restore_rto_ms":  2983,
+                          "table_counts_source":  {
+                                                      "papers":  1,
+                                                      "import_jobs":  1,
+                                                      "workspaces":  1,
+                                                      "hypotheses":  1
+                                                  },
+                          "table_counts_restored":  {
+                                                        "papers":  1,
+                                                        "import_jobs":  1,
+                                                        "workspaces":  1,
+                                                        "hypotheses":  1
+                                                    },
+                          "cross_store_source_sha256_match":  true
+                      },
+    "neo4j":  {
+                  "status":  "passed",
+                  "image":  "neo4j:5.26-community",
+                  "backup_tool":  "neo4j-admin database dump",
+                  "restore_tool":  "neo4j-admin database load --overwrite-destination=true",
+                  "backup_bytes":  42127,
+                  "backup_sha256":  "53556e32c07cfdee8231109b7a09f332c0ec3af9e6419f77bfc6e94331347f37",
+                  "backup_duration_ms":  4401,
+                  "restore_rto_ms":  14676,
+                  "workspace_id":  "ws_backup_restore_drill_v1",
+                  "paper_id":  "tex_927dac1fad8f",
+                  "source_sha256":  "927dac1fad8f5dfbdd54b449c167c09c2b259f0594fd450fbbd73c7da25dbe08",
+                  "equation_uuid":  "cfded346-37ef-5830-9c09-5e0406e9ce84",
+                  "review_hash":  "ac706ba26701559dd6b237a0d7e059a02138c8e97605fade7862e4731ee7367e",
+                  "check_id":  "338ce4b4-bb49-55ad-9065-efd40cbc3b2b",
+                  "check_outcome":  "supported",
+                  "restored_search_hits":  3,
+                  "pruned_transient":  {
+                                           "deleted_service_nonces":  1,
+                                           "deleted_workspace_rates":  1
+                                       },
+                  "label_counts_restored":  {
+                                                "CheckResult":  1,
+                                                "ContractReview":  1,
+                                                "Episodic":  3,
+                                                "Evidence":  9,
+                                                "EvidenceImport":  1,
+                                                "FormulaAnalysisVersion":  3,
+                                                "ResearchWorkspaceLock":  1,
+                                                "Saga":  1,
+                                                "ServiceRequestNonce":  1
+                                            },
+                  "protected_labels_intact":  true,
+                  "parity_verified":  true
+              }
+}

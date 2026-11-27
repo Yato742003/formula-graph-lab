@@ -3,7 +3,7 @@ SHELL := /usr/bin/env bash
 
 PYTHON ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; elif [ -x .venv/Scripts/python.exe ]; then echo .venv/Scripts/python.exe; else command -v python3 || command -v python; fi)
 
-.PHONY: dev-sandbox help setup db-up db-down db-migrate api web verify build build-wasm test-integration test-sandbox benchmark replay
+.PHONY: dev-sandbox help setup db-up db-down db-migrate api web mcp verify build build-wasm test-integration test-sandbox benchmark replay drill-backup-restore
 
 help: ## Show available cross-platform targets (macOS / Linux / Git Bash)
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -31,6 +31,9 @@ dev-sandbox: db-up ## Build a pinned local worker and run the research API
 
 web: ## Run Vinext (Next.js App Router on Vite + Cloudflare Workers) dev server
 	npm run dev
+
+mcp: ## Run FormulaGraph Lab MCP server (fgl-mcp) over stdio (set FGL_SANDBOX_IMAGE or --allow-local-subprocess)
+	cd services/graph-api && $(abspath $(PYTHON)) -m app.mcp_server --transport stdio
 
 verify: ## Run full offline verification gate (Ruff, Pytest, Oxlint, TypeScript, Vitest, Rust proptest)
 	cd services/graph-api && $(abspath $(PYTHON)) -m ruff check app tests
@@ -88,3 +91,6 @@ replay: ## Replay an exported bundle offline in a locked-down container (usage: 
 		--security-opt no-new-privileges --memory 256m --cpus 1 --pids-limit 64 \
 		--user 65534:65534 --mount "type=bind,source=$$ABS_BUNDLE,target=/bundle.json,readonly" \
 		"$$TAG" python -m "$$MOD" /bundle.json
+
+drill-backup-restore: ## Run isolated local Cloudflare D1 + Docker Neo4j 5.26 backup/restore drill -> reports/backup-restore-drill-receipt.json
+	powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/drill-backup-restore.ps1

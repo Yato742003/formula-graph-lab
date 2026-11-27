@@ -12,12 +12,16 @@ export const equationUuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
 
 export async function inspectorRequest(request: Request, path: string, event: string, limit: number,
   parse?: (body: Record<string, unknown>) => object) {
+  const startedAt = performance.now();
+  const elapsedMs = () => Number((performance.now() - startedAt).toFixed(1));
   const id = newBffRequestId();
   const respond = (data: unknown, status: number, upstreamRequestId?: string) => {
+    const durationMs = elapsedMs();
     const headers: Record<string, string> = {
       'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
       'x-request-id': id,
+      'x-bff-duration-ms': durationMs.toFixed(1),
     };
     if (upstreamRequestId) {
       headers['x-upstream-request-id'] = upstreamRequestId;
@@ -65,6 +69,7 @@ export async function inspectorRequest(request: Request, path: string, event: st
       upstream_request_id: upstreamRequestId,
       workspace_id: workspace,
       status: response.status,
+      duration_ms: elapsedMs(),
     });
     if (!response.ok) {
       await response.body?.cancel();
