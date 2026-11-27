@@ -103,3 +103,33 @@ it('runs multi-step derivation chains and renders domain discharge + Lean 4 five
   expect(screen.getByText('DRAFT_ALLOWLIST: PASS')).toBeTruthy();
   expect(screen.getByText('FROZEN_UNPROVED')).toBeTruthy();
 });
+
+it('runs Auto-Check exploratory mode with amber warning and disables Lean 4 export', async () => {
+  const review = vi.fn();
+  vi.stubGlobal('fetch', async (_: string, init: RequestInit) => {
+    expect(JSON.parse(init.body as string)).toEqual({
+      target_uuid: 'eq-auto',
+      formula_b: 'y = x',
+      allow_auto_inferred: true,
+    });
+    return Response.json({
+      outcome: 'supported',
+      scope: 'ad_hoc_check_not_frozen_campaign',
+      epistemic_track: 'auto_inferred_exploratory',
+      persisted: false,
+      duration_ms: 85,
+      inferred_assumptions: [
+        { symbol: 'x', category: 'scalar', domain: 'positive', source: 'lacast_prose_context' },
+      ],
+    });
+  });
+  render(<QuickVerifyPanel equation="eq-auto" onReview={review} />);
+  fireEvent.click(screen.getByText('Auto-Check (Context-Inferred)'));
+  fireEvent.change(screen.getByLabelText('Proposed rewrite'), { target: { value: 'y = x' } });
+  fireEvent.click(screen.getByText('Verify in Sandbox'));
+
+  expect(await screen.findByText(/AUTO-INFERRED CONTEXT/)).toBeTruthy();
+  expect(screen.getByText(/lacast_prose_context/)).toBeTruthy();
+  fireEvent.click(screen.getByText('Review & Lock in Batch Review'));
+  expect(review).toHaveBeenCalledOnce();
+});

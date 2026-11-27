@@ -31,6 +31,8 @@ class ExtractedEquation(BaseModel):
     anchor: str
     anchor_is_source: bool = True
     latex: str
+    presentation_mathml: str | None = None
+    content_mathml: str | None = None
     source_fragments: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     equation_number: str | None = None
@@ -502,10 +504,15 @@ class QuickSymbolicRequest(BaseModel):
     formula_b: str | None = Field(default=None, min_length=1, max_length=2048)
     steps: list[str] | None = Field(default=None, min_length=1, max_length=8)
     include_lean_export: bool = False
+    allow_auto_inferred: bool = False
     timeout_ms: int = Field(default=5000, ge=500, le=10000)
 
     @model_validator(mode="after")
     def validate_target_expressions(self) -> QuickSymbolicRequest:
+        if self.allow_auto_inferred and self.include_lean_export:
+            raise ValueError(
+                "Lean 4 export requires human-certified contracts (allow_auto_inferred=False)."
+            )
         if self.formula_b is None and self.steps is None:
             raise ValueError("Either formula_b or steps is required.")
         if self.formula_b is not None and not self.formula_b.strip():

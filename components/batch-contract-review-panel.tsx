@@ -4,13 +4,26 @@ import { useEffect, useRef, useState } from 'react';
 import QuickVerifyPanel from './quick-verify-panel';
 import type { ReviewedContractInput } from '@/lib/server/contract-review';
 
+type ContextHint = {
+  symbol: string;
+  category?: ReviewedContractInput['category'] | null;
+  domain?: ReviewedContractInput['domain'] | null;
+  shape?: (string | number)[] | null;
+  constraints?: string[];
+  semantic_role?: string | null;
+  evidence_span?: string | null;
+  confidence?: number;
+};
+
 type Entry = {
   symbol: string;
   inferred: ReviewedContractInput & { inference_confidence: number };
   latest_review: {decision: string; reviewed_contract: ReviewedContractInput | null} | null;
+  context_hint?: ContextHint | null;
+  w3c_intent?: string | null;
 };
 type Row = {symbol: string; value: ReviewedContractInput; shape: string; selected: boolean;
-  approved: boolean; confidence: number};
+  approved: boolean; confidence: number; contextHint: ContextHint | null; w3cIntent: string | null};
 const categories = ['scalar', 'vector', 'matrix', 'tensor', 'function', 'distribution', 'index'];
 const domains = ['real', 'positive', 'non_negative', 'complex', 'integer'];
 
@@ -31,14 +44,15 @@ export default function BatchContractReviewPanel({equation}: {equation: string})
           {signal: controller.signal});
         if (!response.ok) throw new Error();
         const data = await response.json() as {items: Entry[]};
-        const next = data.items.map(({symbol, inferred, latest_review}) => {
+        const next = data.items.map(({symbol, inferred, latest_review, context_hint, w3c_intent}) => {
           const approved = latest_review?.decision === 'accepted';
           const value = approved && latest_review.reviewed_contract ? latest_review.reviewed_contract : {
             name: symbol, category: inferred.category, domain: inferred.domain, shape: inferred.shape,
             constraints: inferred.constraints, ...(inferred.scope ? {scope: inferred.scope} : {}),
           };
           return {symbol, value, shape: value.shape?.join(', ') ?? '', selected: false,
-            approved, confidence: inferred.inference_confidence};
+            approved, confidence: inferred.inference_confidence,
+            contextHint: context_hint ?? null, w3cIntent: w3c_intent ?? null};
         });
         if (!controller.signal.aborted) { setRows(next); setNotice(next.length ? '' : 'No symbols in this equation.'); }
       } catch { if (!controller.signal.aborted) {setRows([]); setNotice('Could not load symbol contracts.');} }
@@ -48,8 +62,26 @@ export default function BatchContractReviewPanel({equation}: {equation: string})
   }, [equation, open, revision]);
 
   const count = rows.filter(row => row.selected).length;
+  const hasContextHints = rows.some(row => Boolean(row.contextHint));
   function update(index: number, changes: Partial<Row>) {
     setRows(current => current.map((row, i) => i === index ? {...row, ...changes} : row));
+  }
+  function applyContextHints() {
+    setRows(current => current.map(row => {
+      const hint = row.contextHint;
+      if (!hint) return row;
+      const category = (hint.category && hint.category !== 'unknown' ? hint.category : row.value.category);
+      const domain = hint.domain ?? row.value.domain;
+      const shapeStr = hint.shape && hint.shape.length > 0 ? hint.shape.join(', ') : (category === 'scalar' ? '' : row.shape);
+      const constraints = hint.constraints && hint.constraints.length > 0 ? hint.constraints : row.value.constraints;
+      return {
+        ...row,
+        selected: true,
+        approved: false,
+        shape: shapeStr,
+        value: {...row.value, category, domain, constraints, shape: hint.shape ?? null},
+      };
+    }));
   }
   function preset(name: string) {
     setRows(current => current.map(row => {
@@ -87,10 +119,23 @@ export default function BatchContractReviewPanel({equation}: {equation: string})
     {open && <fieldset disabled={busy}>
       <legend>Symbol contracts</legend>
       <div>{['Scalar reals','Positive scalars','Attention Q/K/V','Probability weights'].map(name =>
-        <button type="button" key={name} onClick={() => preset(name)}>{name}</button>)}</div>
+        <button type="button" key={name} onClick={() => preset(name)}>{name}</button>)}
+        {hasContextHints && (
+          <button type="button" onClick={applyContextHints}>Apply Context Hints</button>
+        )}
+      </div>
       {rows.map((row, i) => <fieldset key={row.symbol}><legend>
         <label><input type="checkbox" checked={row.selected} onChange={e => update(i, {selected: e.target.checked})}/>
           {row.symbol}</label> · {row.approved ? 'Reviewed' : 'Draft · ' + row.confidence.toFixed(2)}</legend>
+        {(row.contextHint || row.w3cIntent) && (
+          <div className="batch-review-hint">
+            {row.contextHint && (
+              <span>LaCASt: {row.contextHint.category ?? 'infer'}/{row.contextHint.domain ?? 'real'}
+                {row.contextHint.evidence_span ? ` — "${row.contextHint.evidence_span.slice(0, 72)}"` : ''}</span>
+            )}
+            {row.w3cIntent && <code>intent: {row.w3cIntent}</code>}
+          </div>
+        )}
         {(['category','domain'] as const).map(field => <label key={field}>{field}
           <select value={row.value[field]} onChange={e => update(i, {approved: false,
             value: {...row.value, [field]: e.target.value}})}>

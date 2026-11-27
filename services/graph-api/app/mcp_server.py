@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import sys
+from contextlib import suppress
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -34,12 +35,14 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.context_disambiguator import disambiguate_equation_context, synthesize_exploratory_reviews
 from app.evidence_store import Neo4jEvidenceStore
 from app.formula_ast import FormulaFormat, FormulaParseError, ast_node_count, parse_formula
 from app.lean_formalizer import audit_lean4_declaration, generate_lean4_export
 from app.models import EvidenceSearchRequest
 from app.sandbox import configured_image, run_sandbox
 from app.search import EvidenceSearchService, SearchCursorCodec
+from app.slt_opt import annotate_w3c_intent, build_slt
 from app.symbol_contracts import (
     ContractReview,
     ReviewedContractValue,
@@ -495,22 +498,51 @@ def create_mcp_server(
             bool,
             Field(default=False, description="Include full recursive AST node dictionary."),
         ] = False,
+        preceding_text: Annotated[
+            str | None,
+            Field(
+                default=None,
+                max_length=4_000,
+                description="Optional prose before equation for LaCASt disambiguation.",
+            ),
+        ] = None,
+        following_text: Annotated[
+            str | None,
+            Field(
+                default=None,
+                max_length=4_000,
+                description="Optional prose after equation for LaCASt disambiguation.",
+            ),
+        ] = None,
         response_format: Annotated[
             ResponseFormat,
             Field(default="json", description="Output format: 'json' or 'markdown'."),
         ] = "json",
     ) -> str:
+        slt = build_slt(
+            formula,
+            presentation_mathml=formula if source_format == "mathml" else None,
+        )
         try:
             parsed = parse_formula(formula, source_format=source_format)
         except FormulaParseError as exc:
-            return _error_payload(
-                "fgl_analyze_formula",
-                exc.code,
-                str(exc),
-                hint="Check LaTeX syntax, balanced braces, and supported mathematical operators.",
-                response_format=response_format,
-            )
+            err_payload: dict[str, object] = {
+                "tool": "fgl_analyze_formula",
+                "status": "error",
+                "error_code": exc.code,
+                "message": str(exc),
+                "hint": "Check LaTeX syntax, balanced braces, and supported operators.",
+                "slt": slt.to_dict(),
+            }
+            return _format_output(err_payload, response_format)
         contracts = infer_contracts(parsed)
+        context_disambiguation = disambiguate_equation_context(
+            parsed,
+            preceding_text=preceding_text,
+            following_text=following_text,
+            equation_latex=formula if source_format == "latex" else "",
+        )
+        w3c_intents = annotate_w3c_intent(parsed, contracts, context_disambiguation.hints)
         result_shape, shape_errors = infer_expression_shape(contracts, parsed)
         obligations = infer_domain_obligations(contracts, parsed)
         assessment = assess_domain_obligations(obligations)
@@ -521,6 +553,9 @@ def create_mcp_server(
             "syntax_hash": parsed.syntax_hash,
             "syntax_hash_version": parsed.syntax_hash_version,
             "canonicalizer_version": parsed.canonicalizer_version,
+            "slt": slt.to_dict(),
+            "w3c_intents": w3c_intents,
+            "context_disambiguation": context_disambiguation.to_dict(),
             "ast_node_count": ast_node_count(parsed.root),
             "free_variables": list(parsed.free_variables),
             "bound_variables": list(parsed.bound_variables),
@@ -696,11 +731,45 @@ def create_mcp_server(
                 description="Also emit an audited Lean 4 DRAFT_SORRY skeleton for the derivation.",
             ),
         ] = False,
+        allow_auto_inferred: Annotated[
+            bool,
+            Field(
+                default=False,
+                description=(
+                    "Enable Dual-Track Track 1 exploratory verification using LaCASt prose context "
+                    "draft contracts when caller contracts are omitted. Disables Lean 4 export."
+                ),
+            ),
+        ] = False,
+        preceding_text: Annotated[
+            str | None,
+            Field(
+                default=None,
+                max_length=4_000,
+                description="Optional preceding prose for context inference.",
+            ),
+        ] = None,
+        following_text: Annotated[
+            str | None,
+            Field(
+                default=None,
+                max_length=4_000,
+                description="Optional following prose for context inference.",
+            ),
+        ] = None,
         response_format: Annotated[
             ResponseFormat,
             Field(default="json", description="Output format: 'json' or 'markdown'."),
         ] = "json",
     ) -> str:
+        if allow_auto_inferred and include_lean_export:
+            return _error_payload(
+                "fgl_verify_derivation",
+                "LEAN_REQUIRES_CERTIFIED_CONTRACTS",
+                "Lean 4 statement export is disabled when allow_auto_inferred=True.",
+                hint="Provide reviewed contracts with allow_auto_inferred=False to export Lean 4.",
+                response_format=response_format,
+            )
         if steps is None and not target_latex:
             return _error_payload(
                 "fgl_verify_derivation",
@@ -741,6 +810,23 @@ def create_mcp_server(
                 response_format=response_format,
             )
 
+        chain_all = [source_latex.strip(), *chain_targets]
+        inferred_meta: list[dict[str, object]] = []
+        epistemic_track = "caller_supplied_contracts"
+        if allow_auto_inferred:
+            parsed_all = []
+            for expr in chain_all:
+                with suppress(FormulaParseError):
+                    parsed_all.append(parse_formula(expr))
+            reviews, inferred_meta = synthesize_exploratory_reviews(
+                parsed_all,
+                preceding_text=preceding_text,
+                following_text=following_text,
+                existing_accepted=reviews,
+                scope=scope,
+            )
+            epistemic_track = "auto_inferred_exploratory"
+
         exec_mode, sandbox_image = _resolve_symbolic_executor(
             allow_local_subprocess=allow_local_subprocess,
         )
@@ -757,7 +843,6 @@ def create_mcp_server(
                     "error_code": "SANDBOX_NOT_CONFIGURED",
                 }
 
-        chain_all = [source_latex.strip(), *chain_targets]
         step_results: list[dict[str, object]] = []
         failed_step_index: int | None = None
         all_domain_statuses: list[str] = []
@@ -845,7 +930,13 @@ def create_mcp_server(
             "tool": "fgl_verify_derivation",
             "status": "ok",
             "scope": "ad_hoc_check_not_frozen_campaign",
-            "contract_provenance": "mcp_caller_supplied_assumptions",
+            "epistemic_track": epistemic_track,
+            "contract_provenance": (
+                "lacast_auto_inferred_exploratory"
+                if allow_auto_inferred
+                else "mcp_caller_supplied_assumptions"
+            ),
+            "inferred_assumptions": inferred_meta,
             "contract_review_hash": review_hash,
             "execution_mode": exec_mode,
             "execution_image": sandbox_image,

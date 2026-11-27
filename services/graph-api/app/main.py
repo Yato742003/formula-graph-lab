@@ -28,6 +28,7 @@ from app.compatibility import (
     CompatibilityReviewCreateRequest,
     PortMappingCreateRequest,
 )
+from app.context_disambiguator import disambiguate_equation_context, synthesize_exploratory_reviews
 from app.enrichment import EnrichmentNeedsReconciliation
 from app.evidence import build_evidence_graph
 from app.evidence_store import EvidenceSnapshotDataError, Neo4jEvidenceStore
@@ -167,6 +168,7 @@ from app.security import (
     normalize_arxiv_html_url,
     worker_execution_limits,
 )
+from app.slt_opt import annotate_w3c_intent
 from app.symbol_contracts import (
     ContractReview,
     ReviewedContractValue,
@@ -562,10 +564,27 @@ async def read_equation_contracts(
         raise HTTPException(404, detail="Equation not found.") from exc
     except (Neo4jError, OSError) as exc:
         raise HTTPException(503, detail="Contract storage unavailable.") from exc
+    ctx = disambiguate_equation_context(
+        parsed,
+        preceding_text=source.get("preceding_text"),
+        following_text=source.get("following_text"),
+        equation_latex=source["latex"],
+    )
+    intents = annotate_w3c_intent(parsed, drafts, ctx.hints)
+    symbol_intents = intents.get("symbol_intents", {}) if isinstance(intents, dict) else {}
     latest = {review.symbol_name: review.model_dump(mode="json") for review in reviews}
-    return {"items": [{"symbol": item.name,
-                       "inferred": {**item.model_dump(), "status": "inferred_draft"},
-                       "latest_review": latest.get(item.name)} for item in drafts]}
+    return {
+        "items": [
+            {
+                "symbol": item.name,
+                "inferred": {**item.model_dump(), "status": "inferred_draft"},
+                "latest_review": latest.get(item.name),
+                "context_hint": ctx.hints[item.name].to_dict() if item.name in ctx.hints else None,
+                "w3c_intent": symbol_intents.get(item.name),
+            }
+            for item in drafts
+        ]
+    }
 
 
 @app.post("/v1/research/contract-reviews/batch")
@@ -773,6 +792,209 @@ def _assess_pair_domains(
     return status, summaries, combined_obs
 
 
+async def _execute_exploratory_symbolic(
+    body: QuickSymbolicRequest,
+    actor,
+    store: Neo4jEvidenceStore,
+) -> dict[str, object]:
+    """Dual-Track Track 1: bounded sandbox check using LaCASt context-inferred drafts.
+
+    Never writes CheckResult authority receipts to Neo4j and never enables Lean 4 export.
+    """
+    actor.require("checks:run", body.workspace_id)
+    try:
+        image = configured_image()
+        profile = capture_execution_profile(image, "symbolic", body.timeout_ms)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail="Research sandbox is not configured.") from exc
+
+    target_str = str(body.target_uuid)
+    try:
+        source = await store.equation_source(
+            workspace_id=body.workspace_id,
+            equation_uuid=target_str,
+        )
+        contract_reviews = await store.equation_contract_reviews(
+            workspace_id=body.workspace_id,
+            equation_uuid=target_str,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (Neo4jError, ServiceUnavailable, OSError) as exc:
+        raise HTTPException(status_code=503, detail="Check source lookup failed.") from exc
+
+    analysis_scope = source.get("section_id") or source.get("equation_id")
+    accepted_reviews = [
+        review
+        for review in contract_reviews
+        if review.decision == "accepted" and review.reviewed_contract is not None
+    ]
+    if any(
+        review.reviewed_contract.scope not in (None, analysis_scope)
+        for review in accepted_reviews
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Accepted contract scope does not match source.",
+        )
+
+    source_latex = source["latex"]
+    chain_targets = body.resolved_steps
+    all_formulas = [source_latex, *chain_targets]
+    parsed_list = []
+    for idx, expr in enumerate(all_formulas):
+        try:
+            parsed_list.append(parse_formula(expr))
+        except FormulaParseError as exc:
+            base_err: dict[str, object] = {
+                "outcome": "unsupported",
+                "reason_code": exc.code,
+                "error_code": exc.code,
+                "duration_ms": 0,
+                "scope": "ad_hoc_check_not_frozen_campaign",
+                "epistemic_track": "auto_inferred_exploratory",
+                "inferred_assumptions": [],
+                "persisted": False,
+            }
+            if body.steps is not None:
+                base_err["failed_step_index"] = idx
+                base_err["source_formula"] = source_latex
+                base_err["steps"] = []
+            return base_err
+
+    # Re-scope preserved human reviews so apply_contract_reviews matches target_str consistently.
+    scoped_accepted = [
+        review.model_copy(
+            update={
+                "scope": target_str,
+                "reviewed_contract": review.reviewed_contract.model_copy(
+                    update={"scope": target_str}
+                ),
+            }
+        )
+        for review in accepted_reviews
+        if review.reviewed_contract is not None
+    ]
+    merged_reviews, inferred_meta = synthesize_exploratory_reviews(
+        parsed_list,
+        preceding_text=source.get("preceding_text"),
+        following_text=source.get("following_text"),
+        existing_accepted=scoped_accepted,
+        scope=target_str,
+    )
+
+    if body.steps is None:
+        target_formula = chain_targets[0]
+        check_res = await run_in_threadpool(
+            run_symbolic_check,
+            source_latex,
+            target_formula,
+            source_format="latex",
+            timeout_ms=body.timeout_ms,
+            worker_runner=partial(
+                run_sandbox,
+                image=image,
+                execution_profile=profile,
+            ),
+            contract_reviews=merged_reviews,
+            contract_review_scope=target_str,
+        )
+        dom_status, dom_summary, _ = _assess_pair_domains(
+            source_latex, target_formula, merged_reviews, target_str,
+        )
+        return {
+            "outcome": check_res.outcome,
+            "reason_code": check_res.error_code,
+            "error_code": check_res.error_code,
+            "duration_ms": check_res.duration_ms,
+            "witness": check_res.witness,
+            "counterexample": check_res.counterexample,
+            "domain_status": dom_status,
+            "domain_obligations": dom_summary,
+            "applied_assumptions": format_reviewed_assumptions(merged_reviews, scope=target_str),
+            "scope": "ad_hoc_check_not_frozen_campaign",
+            "epistemic_track": "auto_inferred_exploratory",
+            "inferred_assumptions": inferred_meta,
+            "persisted": False,
+        }
+
+    step_results: list[dict[str, object]] = []
+    all_domain_summaries: list[dict[str, object]] = []
+    seen_obligation_ids: set[str] = set()
+    domain_statuses: list[str] = []
+    total_duration_ms = 0
+    final_outcome = "supported"
+    final_reason: str | None = None
+    failed_step_index: int | None = None
+
+    for step_idx in range(1, len(all_formulas)):
+        from_expr = all_formulas[step_idx - 1]
+        to_expr = all_formulas[step_idx]
+        check_res = await run_in_threadpool(
+            run_symbolic_check,
+            from_expr,
+            to_expr,
+            source_format="latex",
+            timeout_ms=body.timeout_ms,
+            worker_runner=partial(
+                run_sandbox,
+                image=image,
+                execution_profile=profile,
+            ),
+            contract_reviews=merged_reviews,
+            contract_review_scope=target_str,
+        )
+        dom_status, dom_summary, _ = _assess_pair_domains(
+            from_expr, to_expr, merged_reviews, target_str,
+        )
+        domain_statuses.append(dom_status)
+        for item in dom_summary:
+            oid = str(item["obligation_id"])
+            if oid not in seen_obligation_ids:
+                seen_obligation_ids.add(oid)
+                all_domain_summaries.append(item)
+        total_duration_ms += check_res.duration_ms
+        step_results.append(
+            {
+                "step_index": step_idx,
+                "from_formula": from_expr,
+                "to_formula": to_expr,
+                "outcome": check_res.outcome,
+                "error_code": check_res.error_code,
+                "domain_status": dom_status,
+                "domain_obligations": dom_summary,
+                "duration_ms": check_res.duration_ms,
+                "witness": check_res.witness,
+                "counterexample": check_res.counterexample,
+            }
+        )
+        if check_res.outcome != "supported":
+            final_outcome = check_res.outcome
+            final_reason = check_res.error_code
+            failed_step_index = step_idx
+            break
+
+    priority = ["contradictory", "unsupported", "unresolved", "conditional", "discharged"]
+    overall_dom = (
+        min(domain_statuses, key=priority.index) if domain_statuses else "discharged"
+    )
+    return {
+        "outcome": final_outcome,
+        "reason_code": final_reason,
+        "failed_step_index": failed_step_index,
+        "source_formula": source_latex,
+        "steps": step_results,
+        "duration_ms": total_duration_ms,
+        "applied_assumptions": format_reviewed_assumptions(merged_reviews, scope=target_str),
+        "domain_status": overall_dom,
+        "domain_obligations": all_domain_summaries,
+        "scope": "ad_hoc_check_not_frozen_campaign",
+        "epistemic_track": "auto_inferred_exploratory",
+        "inferred_assumptions": inferred_meta,
+        "persisted": False,
+    }
+
+
 @app.post("/v1/checks/symbolic/quick", dependencies=[Depends(require_research_checks_enabled)])
 async def quick_symbolic(
     body: QuickSymbolicRequest,
@@ -784,6 +1006,8 @@ async def quick_symbolic(
         raise HTTPException(422, detail="Invalid idempotency key.")
     _, workspace = context
     worker = configured_worker_principal("verifier", workspace)
+    if body.allow_auto_inferred:
+        return await _execute_exploratory_symbolic(body, worker, store)
     if body.steps is not None:
         return await execute_symbolic_chain(body, idempotency_key, worker, store)
     result = await execute_symbolic(body, idempotency_key, worker, store)
@@ -793,6 +1017,7 @@ async def quick_symbolic(
         **payload,
         "reason_code": reason,
         "scope": "ad_hoc_check_not_frozen_campaign",
+        "epistemic_track": "human_certified",
     }
     if isinstance(result, CheckResultResponse):
         try:
@@ -880,7 +1105,9 @@ async def execute_symbolic_chain(
                     "duration_ms": 0,
                     "scope": "ad_hoc_check_not_frozen_campaign",
                 }
-            builtins = {"sqrt", "log", "ln", "exp", "sin", "cos", "tan", "abs"}
+            builtins = {
+                "sqrt", "log", "ln", "exp", "sin", "cos", "tan", "abs", "floor", "ceil", "round",
+            }
             required.update(
                 c.name for c in infer_contracts(parsed)
                 if not (c.category == "function" and c.name in builtins)
@@ -895,6 +1122,7 @@ async def execute_symbolic_chain(
                 "steps": [],
                 "duration_ms": 0,
                 "scope": "ad_hoc_check_not_frozen_campaign",
+                "epistemic_track": "human_certified",
             }
 
         review_ids = tuple(review.review_id for review in contract_reviews)
@@ -1008,6 +1236,7 @@ async def execute_symbolic_chain(
             "applied_assumptions": format_reviewed_assumptions(accepted_reviews, scope=target_str),
             "domain_obligations": all_domain_summaries,
             "scope": "ad_hoc_check_not_frozen_campaign",
+            "epistemic_track": "human_certified",
         }
         if body.include_lean_export:
             lean_exp = generate_lean4_export(
@@ -1070,7 +1299,9 @@ async def execute_symbolic(body, idempotency_key, actor, store):
         ):
             raise ValueError("Accepted contract scope does not match the source equation.")
         if quick:
-            builtins = {"sqrt", "log", "ln", "exp", "sin", "cos", "tan", "abs"}
+            builtins = {
+                "sqrt", "log", "ln", "exp", "sin", "cos", "tan", "abs", "floor", "ceil", "round",
+            }
             required = {
                 c.name for formula in (body.formula_a, body.formula_b)
                 for c in infer_contracts(parse_formula(formula))

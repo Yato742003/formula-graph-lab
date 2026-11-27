@@ -7,11 +7,13 @@ from datetime import datetime
 from uuid import NAMESPACE_URL, uuid5
 
 from app.analysis_versions import make_analysis_version
+from app.context_disambiguator import disambiguate_equation_context
 from app.episodes import ResearchEpisode, build_paper_episodes
 from app.formula_ast import AstNode, FormulaParseError, ParsedFormula, parse_formula
 from app.models import ExtractedEquation, ExtractedPaper
 from app.ontology import RelationContract
 from app.semantic_identity import CORE_OPERATOR_VERSIONS, build_semantic_identity
+from app.slt_opt import annotate_w3c_intent, build_slt
 from app.symbol_contracts import (
     ReviewedContractValue,
     SymbolContract,
@@ -188,26 +190,49 @@ def analyze_equation(
     operator_versions: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, object], ParsedFormula | None, list[SymbolContract]]:
     """Return bounded, deterministic analysis without rejecting an entire import."""
+    slt = build_slt(
+        equation.latex,
+        presentation_mathml=equation.presentation_mathml,
+    )
     try:
         parsed = parse_formula(equation.latex)
     except FormulaParseError as exc:
-        return (
-            {
-                "status": "unsupported",
-                "error": {
-                    "code": exc.code,
-                    "message": str(exc),
-                    "position": exc.position,
+        parsed = None
+        if equation.content_mathml:
+            try:
+                parsed = parse_formula(equation.content_mathml, source_format="mathml")
+            except FormulaParseError:
+                parsed = None
+        if parsed is None:
+            return (
+                {
+                    "status": "unsupported",
+                    "error": {
+                        "code": exc.code,
+                        "message": str(exc),
+                        "position": exc.position,
+                    },
+                    "slt": slt.to_dict(),
                 },
-            },
-            None,
-            [],
-        )
+                None,
+                [],
+            )
 
     contracts = infer_contracts(
         parsed,
         section_id=equation.section_id,
         extraction_confidence=equation.confidence,
+    )
+    context_disambiguation = disambiguate_equation_context(
+        parsed,
+        preceding_text=equation.preceding_text,
+        following_text=equation.following_text,
+        equation_latex=equation.latex,
+    )
+    w3c_intents = annotate_w3c_intent(
+        parsed,
+        contracts,
+        context_disambiguation.hints,
     )
     result_shape, shape_errors = infer_expression_shape(contracts, parsed)
     domain_assessment = assess_domain_obligations(
@@ -252,6 +277,9 @@ def analyze_equation(
         {
             "status": status,
             "ast": parsed.root.to_dict(),
+            "slt": slt.to_dict(),
+            "w3c_intents": w3c_intents,
+            "context_disambiguation": context_disambiguation.to_dict(),
             "syntax_hash": parsed.syntax_hash,
             "syntax_hash_version": parsed.syntax_hash_version,
             "canonicalizer_version": parsed.canonicalizer_version,

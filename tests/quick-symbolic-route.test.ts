@@ -58,6 +58,9 @@ it('rejects unauthenticated, cross-origin, spoofed, and malformed chain requests
   expect((await submit({ target_uuid: VALID_UUID, formula_b: 'b', steps: ['a'] })).status).toBe(400);
   // Non-boolean include_lean_export
   expect((await submit({ target_uuid: VALID_UUID, steps: ['a'], include_lean_export: 'yes' })).status).toBe(400);
+  // Exploratory auto-inferred mode cannot combine with Lean 4 export
+  expect((await submit({ target_uuid: VALID_UUID, formula_b: 'a', allow_auto_inferred: true, include_lean_export: true })).status).toBe(400);
+  expect((await submit({ target_uuid: VALID_UUID, formula_b: 'a', allow_auto_inferred: 'yes' })).status).toBe(400);
 });
 
 it('signs and forwards derivation chain + include_lean_export to /v1/checks/symbolic/quick', async () => {

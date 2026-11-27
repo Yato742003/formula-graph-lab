@@ -196,7 +196,7 @@ _INLINE_CASE_CONDITION_RE = re.compile(r"^\s*(if|for|when)\s+\$([^$]+)\$\s*\Z")
 _CASE_LEADING_KEYWORDS = frozenset({"if", "for", "when"})
 _CASE_DEFAULT_KEYWORDS = frozenset({"else", "otherwise"})
 _DOMAIN_SPACE_NAMES = frozenset({"R", "Z", "C", "N"})
-_CONSTANTS = {"pi", "infty", "infinity"}
+_CONSTANTS = {"pi", "infty", "infinity", "ellipsis"}
 
 
 def parse_formula(source: str, source_format: FormulaFormat = "latex") -> ParsedFormula:
@@ -227,8 +227,10 @@ def _tokenize_latex(source: str) -> list[_Token]:
     # ponytail: ignore one terminal period/comma after a closing delimiter,
     # ceiling: other trailing prose punctuation remains unsupported,
     # upgrade: a supported paper corpus requires more terminal punctuation.
-    if len(text) > 1 and text[-1] in ".," and text[-2] in "})]":
-        text = text[:-1].rstrip()
+    if len(text) > 1 and text[-1] in ".,":
+        prefix = text[:-1].rstrip()
+        if prefix.endswith(("}", ")", "]", r"\rfloor", r"\rceil", r"\|")):
+            text = prefix
     for left, right in (("\\[", "\\]"), ("$$", "$$"), ("$", "$")):
         if text.startswith(left) and text.endswith(right) and len(text) >= len(left) + len(right):
             text = text[len(left) : len(text) - len(right)].strip()
@@ -237,7 +239,7 @@ def _tokenize_latex(source: str) -> list[_Token]:
     index = 0
     while index < len(text):
         character = text[index]
-        if character.isspace():
+        if character.isspace() or character == "~":
             index += 1
             continue
         if character == "\\":
@@ -261,6 +263,12 @@ def _tokenize_latex(source: str) -> list[_Token]:
                 continue
             if command == "|":
                 tokens.append(_Token("delimiter", "\\|", start))
+                continue
+            if command in {"dots", "ldots", "cdots"}:
+                tokens.append(_Token("identifier", "ellipsis", start))
+                continue
+            if command in {"lfloor", "rfloor", "lceil", "rceil"}:
+                tokens.append(_Token("delimiter", f"\\{command}", start))
                 continue
             if command == "text":
                 inline = _try_consume_inline_case_text(text, index, start)
@@ -309,6 +317,10 @@ def _tokenize_latex(source: str) -> list[_Token]:
                 )
             else:
                 tokens.append(_Token("identifier", command, start))
+            continue
+        if text.startswith("...", index):
+            tokens.append(_Token("identifier", "ellipsis", index))
+            index += 3
             continue
         if character.isdigit() or (
             character == "." and index + 1 < len(text) and text[index + 1].isdigit()
@@ -415,6 +427,12 @@ class _FormulaParser:
         return self.tokens[self.index]
 
     def parse(self) -> AstNode:
+        if (
+            self._peek_text_word() == "where"
+            and self.index + 4 < len(self.tokens)
+            and self.tokens[self.index + 4].kind != "eof"
+        ):
+            self.index += 4
         expressions = [self._expression(0, frozenset())]
         while self.current.value == "," and self.index + 1 < len(self.tokens):
             if self.tokens[self.index + 1].kind == "eof":
@@ -599,6 +617,27 @@ class _FormulaParser:
             inner = self._expression(0, frozenset({"|"}))
             self._expect("|")
             fn = self._node("symbol", "abs", attributes=(("role", "function"),))
+            return self._node("call", children=(fn, inner))
+        if token.value == "\\lfloor":
+            inner = self._expression(0, frozenset({"\\rfloor", "\\rceil"}))
+            if self.current.value == "\\rfloor":
+                self._advance()
+                fn_name = "floor"
+            elif self.current.value == "\\rceil":
+                self._advance()
+                fn_name = "round"
+            else:
+                raise FormulaParseError(
+                    "UNCLOSED_GROUP",
+                    "Expected '\\rfloor' or '\\rceil'.",
+                    self.current.position,
+                )
+            fn = self._node("symbol", fn_name, attributes=(("role", "function"),))
+            return self._node("call", children=(fn, inner))
+        if token.value == "\\lceil":
+            inner = self._expression(0, frozenset({"\\rceil"}))
+            self._expect("\\rceil")
+            fn = self._node("symbol", "ceil", attributes=(("role", "function"),))
             return self._node("call", children=(fn, inner))
         if token.kind == "begin_cases":
             return self._parse_cases(token.position)
@@ -824,7 +863,7 @@ class _FormulaParser:
                 depth += 1
             elif token.value == "}":
                 depth -= 1
-            elif depth == 1:
+            elif depth >= 1:
                 parts.append(token.value)
         name = "".join(parts).strip()
         if not name:
@@ -936,6 +975,8 @@ class _FormulaParser:
             "{",
             "[",
             "\\|",
+            "\\lfloor",
+            "\\lceil",
         }
 
 
@@ -1230,6 +1271,106 @@ def _mathml_to_latex(source: str) -> str:
         raise FormulaParseError("MALFORMED_MATHML", "MathML could not be parsed.") from exc
     count = 0
 
+    def _apply_to_latex(children: list[etree._Element], depth: int) -> str:
+        if not children:
+            raise FormulaParseError(
+                "MALFORMED_MATHML",
+                "Content MathML <apply> requires an operator.",
+            )
+        op_el = children[0]
+        op_tag = etree.QName(op_el).localname
+        args = children[1:]
+        if op_tag == "ci":
+            fn_name = "".join(op_el.itertext()).strip()
+            if not fn_name:
+                raise FormulaParseError(
+                    "EMPTY_MATHML_TOKEN",
+                    "Content MathML <ci> operator is empty.",
+                )
+            rendered_args = ", ".join(convert(arg, depth + 1) for arg in args)
+            return f"\\operatorname{{{fn_name}}}({rendered_args})"
+        if op_tag == "csymbol":
+            csym = "".join(op_el.itertext()).strip() or op_el.get("cd") or "op"
+            if csym == "transpose" and len(args) == 1:
+                return f"({convert(args[0], depth + 1)})^{{T}}"
+            rendered_args = ", ".join(convert(arg, depth + 1) for arg in args)
+            return f"\\operatorname{{{csym}}}({rendered_args})"
+        rel_ops = {
+            "eq": "=",
+            "neq": "\\neq",
+            "lt": "<",
+            "leq": "\\leq",
+            "gt": ">",
+            "geq": "\\geq",
+            "in": "\\in",
+        }
+        if op_tag in rel_ops and len(args) == 2:
+            lhs = convert(args[0], depth + 1)
+            rhs = convert(args[1], depth + 1)
+            return f"{lhs} {rel_ops[op_tag]} {rhs}"
+        if op_tag == "plus":
+            if len(args) < 2:
+                return convert(args[0], depth + 1) if args else "0"
+            return "(" + " + ".join(convert(arg, depth + 1) for arg in args) + ")"
+        if op_tag == "minus":
+            if len(args) == 1:
+                return f"-({convert(args[0], depth + 1)})"
+            if len(args) == 2:
+                return f"({convert(args[0], depth + 1)} - ({convert(args[1], depth + 1)}))"
+        if op_tag == "times" and len(args) >= 2:
+            parts = []
+            for arg in args:
+                rendered = convert(arg, depth + 1)
+                has_kids = any(isinstance(c.tag, str) for c in arg)
+                if has_kids and etree.QName(arg).localname == "apply":
+                    op_in = next(
+                        (etree.QName(c).localname for c in arg if isinstance(c.tag, str)),
+                        "",
+                    )
+                    if op_in in {"plus", "minus"}:
+                        rendered = f"({rendered})"
+                parts.append(rendered)
+            return " * ".join(parts)
+        if op_tag == "divide" and len(args) == 2:
+            return f"\\frac{{{convert(args[0], depth + 1)}}}{{{convert(args[1], depth + 1)}}}"
+        if op_tag == "power" and len(args) == 2:
+            return f"{{{convert(args[0], depth + 1)}}}^{{{convert(args[1], depth + 1)}}}"
+        if op_tag == "root":
+            radicands = [arg for arg in args if etree.QName(arg).localname != "degree"]
+            degrees = [arg for arg in args if etree.QName(arg).localname == "degree"]
+            if len(radicands) == 1 and not degrees:
+                return f"\\sqrt{{{convert(radicands[0], depth + 1)}}}"
+            if len(radicands) == 1 and len(degrees) == 1:
+                deg_kids = [c for c in degrees[0] if isinstance(c.tag, str)]
+                deg_target = deg_kids[0] if deg_kids else degrees[0]
+                deg_expr = convert(deg_target, depth + 1)
+                if deg_expr == "2":
+                    return f"\\sqrt{{{convert(radicands[0], depth + 1)}}}"
+                return f"({convert(radicands[0], depth + 1)})^{{\\frac{{1}}{{{deg_expr}}}}}"
+        if op_tag == "log":
+            bases = [arg for arg in args if etree.QName(arg).localname == "logbase"]
+            vals = [arg for arg in args if etree.QName(arg).localname != "logbase"]
+            if len(vals) == 1 and not bases:
+                return f"\\log({convert(vals[0], depth + 1)})"
+            if len(vals) == 1 and len(bases) == 1:
+                base_kids = [c for c in bases[0] if isinstance(c.tag, str)]
+                base_target = base_kids[0] if base_kids else bases[0]
+                base_expr = convert(base_target, depth + 1)
+                return f"\\log_{{{base_expr}}}{{{convert(vals[0], depth + 1)}}}"
+        if op_tag == "abs" and len(args) == 1:
+            return f"|{convert(args[0], depth + 1)}|"
+        if op_tag == "floor" and len(args) == 1:
+            return f"\\lfloor {convert(args[0], depth + 1)} \\rfloor"
+        if op_tag == "ceiling" and len(args) == 1:
+            return f"\\lceil {convert(args[0], depth + 1)} \\rceil"
+        unary_fns = {"exp", "ln", "sin", "cos", "tan", "sinh", "cosh", "tanh"}
+        if op_tag in unary_fns and len(args) == 1:
+            return f"\\{op_tag}({convert(args[0], depth + 1)})"
+        raise FormulaParseError(
+            "UNSUPPORTED_MATHML",
+            f"Unsupported Content MathML operator <{op_tag}>.",
+        )
+
     def convert(element: etree._Element, depth: int = 0) -> str:
         nonlocal count
         count += 1
@@ -1237,9 +1378,59 @@ def _mathml_to_latex(source: str) -> str:
             raise FormulaParseError("MATHML_TOO_COMPLEX", "MathML exceeds parser limits.")
         tag = etree.QName(element).localname
         children = [child for child in element if isinstance(child.tag, str)]
-        if tag in {"math", "mrow", "semantics"}:
-            usable = children[:1] if tag == "semantics" else children
-            return " ".join(convert(child, depth + 1) for child in usable)
+        if tag in {"math", "mrow"}:
+            return " ".join(convert(child, depth + 1) for child in children)
+        if tag == "semantics":
+            if not children:
+                return ""
+            try:
+                return convert(children[0], depth + 1)
+            except FormulaParseError:
+                content_ann = [
+                    c
+                    for c in children
+                    if etree.QName(c).localname == "annotation-xml"
+                    and (c.get("encoding") or "").lower() == "mathml-content"
+                ]
+                for ann in content_ann:
+                    ann_kids = [k for k in ann if isinstance(k.tag, str)]
+                    if ann_kids:
+                        return " ".join(convert(k, depth + 1) for k in ann_kids)
+                raise
+        if tag == "annotation-xml":
+            return " ".join(convert(child, depth + 1) for child in children)
+        if tag == "apply":
+            return _apply_to_latex(children, depth)
+        if tag in {"ci", "cn"}:
+            if children:
+                return " ".join(convert(child, depth + 1) for child in children)
+            value = "".join(element.itertext()).strip()
+            if not value:
+                raise FormulaParseError("EMPTY_MATHML_TOKEN", "Content MathML token is empty.")
+            return value
+        if tag == "pi":
+            return "\\pi"
+        if tag == "infinity":
+            return "\\infty"
+        if tag == "exponentiale":
+            return "e"
+        if tag == "piecewise":
+            rows: list[str] = []
+            for child in children:
+                ctag = etree.QName(child).localname
+                ckids = [k for k in child if isinstance(k.tag, str)]
+                if ctag == "piece" and len(ckids) == 2:
+                    v_txt = convert(ckids[0], depth + 1)
+                    c_txt = convert(ckids[1], depth + 1)
+                    rows.append(f"{v_txt} & \\text{{if ${c_txt}$}}")
+                elif ctag == "otherwise" and len(ckids) == 1:
+                    rows.append(f"{convert(ckids[0], depth + 1)} & \\text{{otherwise}}")
+                else:
+                    raise FormulaParseError(
+                        "UNSUPPORTED_MATHML",
+                        f"Unsupported <piecewise> child <{ctag}>.",
+                    )
+            return "\\begin{cases} " + " \\\\ ".join(rows) + " \\end{cases}"
         if tag in {"mi", "mn"}:
             value = "".join(element.itertext()).strip()
             if not value:
@@ -1597,10 +1788,13 @@ def _base_symbol_for_matrix_op(node: AstNode) -> str | None:
         return node.value
     if node.kind == "style" and len(node.children) == 1:
         return _base_symbol_for_matrix_op(node.children[0])
-    if node.kind == "subscript" and node.children:
+    if node.kind in {"subscript", "power", "negate"} and node.children:
         return _base_symbol_for_matrix_op(node.children[0])
-    if node.kind == "power" and node.children:
-        return _base_symbol_for_matrix_op(node.children[0])
+    if node.kind in {"multiply", "add", "divide"}:
+        for child in node.children:
+            found = _base_symbol_for_matrix_op(child)
+            if found is not None:
+                return found
     return None
 
 
@@ -1747,6 +1941,9 @@ def ast_to_sympy(
             "ln": sympy.ln,
             "sqrt": sympy.sqrt,
             "abs": sympy.Abs,
+            "floor": sympy.floor,
+            "ceil": sympy.ceiling,
+            "round": sympy.Function("round"),
             "det": sympy.Function("det"),
             "tr": sympy.Function("tr"),
         }

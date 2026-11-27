@@ -52,9 +52,22 @@ type LeanExport = {
   error_message?: string | null;
 };
 
+type InferredAssumption = {
+  symbol: string;
+  category: string;
+  domain: string;
+  shape?: (string | number)[] | null;
+  constraints?: string[];
+  source: string;
+  evidence_span?: string | null;
+};
+
 type Verdict = {
   outcome: string;
   scope?: string;
+  epistemic_track?: 'human_certified' | 'auto_inferred_exploratory';
+  inferred_assumptions?: InferredAssumption[];
+  persisted?: boolean;
   error_code?: string | null;
   reason_code?: string | null;
   missing_symbols?: string[];
@@ -71,6 +84,7 @@ type Verdict = {
 
 export default function QuickVerifyPanel({ equation, onReview }: { equation: string; onReview: () => void }) {
   const [mode, setMode] = useState<'single' | 'chain'>('single');
+  const [track, setTrack] = useState<'certified' | 'auto_inferred'>('certified');
   const [formula, setFormula] = useState('');
   const [chainSteps, setChainSteps] = useState<string[]>(['', '']);
   const [includeLean, setIncludeLean] = useState(false);
@@ -90,7 +104,9 @@ export default function QuickVerifyPanel({ equation, onReview }: { equation: str
       const requestBody: Record<string, unknown> = mode === 'single'
         ? { target_uuid: equation, formula_b: formula }
         : { target_uuid: equation, steps: trimmedSteps };
-      if (includeLean) {
+      if (track === 'auto_inferred') {
+        requestBody.allow_auto_inferred = true;
+      } else if (includeLean) {
         requestBody.include_lean_export = true;
       }
       const response = await fetch('/api/checks/symbolic', {
@@ -146,6 +162,27 @@ export default function QuickVerifyPanel({ equation, onReview }: { equation: str
     <section className="inspector-section inspector-contracts">
       <h3>Quick Verify</h3>
       <small>ad-hoc check · not frozen campaign</small>
+
+      <div className="quick-verify-mode-bar">
+        <button
+          type="button"
+          aria-pressed={track === 'certified'}
+          className={track === 'certified' ? 'is-active' : undefined}
+          disabled={busy}
+          onClick={() => { setTrack('certified'); setResult(null); retryKey.current = ''; }}
+        >
+          Certified (Reviewed)
+        </button>
+        <button
+          type="button"
+          aria-pressed={track === 'auto_inferred'}
+          className={track === 'auto_inferred' ? 'is-active' : undefined}
+          disabled={busy}
+          onClick={() => { setTrack('auto_inferred'); setIncludeLean(false); setResult(null); retryKey.current = ''; }}
+        >
+          Auto-Check (Context-Inferred)
+        </button>
+      </div>
 
       <div className="quick-verify-mode-bar">
         <button
@@ -227,10 +264,14 @@ export default function QuickVerifyPanel({ equation, onReview }: { equation: str
         <input
           type="checkbox"
           checked={includeLean}
-          disabled={busy}
+          disabled={busy || track === 'auto_inferred'}
           onChange={e => { setIncludeLean(e.target.checked); setResult(null); retryKey.current = ''; }}
         />
-        <span>Export audited Lean 4 statement</span>
+        <span>
+          {track === 'auto_inferred'
+            ? 'Lean 4 export requires Human-Certified contracts'
+            : 'Export audited Lean 4 statement'}
+        </span>
       </label>
 
       <button type="button" disabled={busy || !canRun} onClick={() => void verify()}>
@@ -241,11 +282,32 @@ export default function QuickVerifyPanel({ equation, onReview }: { equation: str
         <div aria-live="polite">
           <div>
             <strong>{result.outcome}</strong>
+            {result.epistemic_track === 'auto_inferred_exploratory' && (
+              <span className="quick-verify-pill is-unresolved"> · AUTO-INFERRED CONTEXT · UNREVIEWED</span>
+            )}
+            {result.epistemic_track === 'human_certified' && result.outcome === 'supported' && (
+              <span className="quick-verify-pill is-discharged"> · HUMAN-CERTIFIED</span>
+            )}
             {result.duration_ms !== undefined && <span> · {result.duration_ms} ms</span>}
             {result.failed_step_index != null && (
               <span> · failed at step {result.failed_step_index}</span>
             )}
           </div>
+          {result.epistemic_track === 'auto_inferred_exploratory' && (
+            <div className="quick-verify-exploratory-banner">
+              <small>Exploratory only · not persisted as certified CheckResult · review symbols to lock</small>
+              {result.inferred_assumptions && result.inferred_assumptions.length > 0 && (
+                <div className="quick-verify-pills">
+                  {result.inferred_assumptions.map(item => (
+                    <span key={item.symbol} className="quick-verify-pill is-conditional">
+                      {item.symbol}: {item.category}/{item.domain} ({item.source})
+                    </span>
+                  ))}
+                </div>
+              )}
+              <button type="button" onClick={onReview}>Review &amp; Lock in Batch Review</button>
+            </div>
+          )}
           {reason && <p>{reason} {result.missing_symbols?.join(', ')}</p>}
 
           {result.applied_assumptions && result.applied_assumptions.length > 0 && (

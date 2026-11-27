@@ -5,12 +5,17 @@ from __future__ import annotations
 import json
 import sys
 
-import sympy
-
-from app.formula_ast import FormulaParseError, ast_to_sympy, parse_formula
+from app.egraph_engine import egraph_check_equivalence
+from app.formula_ast import AstNode, FormulaParseError, ast_to_sympy, parse_formula
 
 _ALLOWED_CATEGORIES = {
-    "scalar", "vector", "matrix", "tensor", "function", "distribution", "index",
+    "scalar",
+    "vector",
+    "matrix",
+    "tensor",
+    "function",
+    "distribution",
+    "index",
 }
 _ALLOWED_DOMAINS = {"real", "positive", "non_negative", "complex", "integer"}
 
@@ -42,19 +47,38 @@ def _validate_assumptions(raw: object) -> dict[str, dict[str, object]] | None:
     return validated
 
 
+def _has_matrix_or_transpose(
+    node: AstNode,
+    assumptions: dict[str, dict[str, object]] | None,
+) -> bool:
+    if assumptions and any(
+        spec.get("category") in {"matrix", "vector", "tensor"} for spec in assumptions.values()
+    ):
+        return True
+    if node.kind == "power" and node.attribute("operation") == "transpose":
+        return True
+    return any(_has_matrix_or_transpose(child, None) for child in node.children)
+
+
 def _simplify_difference(expr, *, use_domain_rules: bool):  # noqa: ANN001, ANN202
     """Simplify symbolically without force=True so branch cuts remain sound."""
+    import sympy
+
     if expr.has(sympy.Piecewise):
         expr = sympy.piecewise_fold(expr)
     diff = sympy.simplify(expr)
     if diff == 0 or not use_domain_rules:
         return diff
-    for transform in (
-        lambda e: sympy.simplify(sympy.expand_log(e, force=False)),
-        lambda e: sympy.simplify(sympy.powdenest(e, force=False)),
-        lambda e: sympy.simplify(sympy.trigsimp(e)),
-        lambda e: sympy.simplify(sympy.cancel(sympy.together(e))),
-    ):
+    transforms = []
+    if diff.has(sympy.log):
+        transforms.append(lambda e: sympy.simplify(sympy.expand_log(e, force=False)))
+    if diff.has(sympy.Pow):
+        transforms.append(lambda e: sympy.simplify(sympy.powdenest(e, force=False)))
+    if diff.has(sympy.sin, sympy.cos, sympy.tan):
+        transforms.append(lambda e: sympy.simplify(sympy.trigsimp(e)))
+    if diff.has(sympy.Add) or diff.has(sympy.Mul):
+        transforms.append(lambda e: sympy.cancel(sympy.together(e)))
+    for transform in transforms:
         try:
             candidate = transform(diff)
             if candidate == 0:
@@ -65,10 +89,12 @@ def _simplify_difference(expr, *, use_domain_rules: bool):  # noqa: ANN001, ANN2
 
 
 def _compare_expressions(left, right, *, use_domain_rules: bool) -> dict[str, object]:  # noqa: ANN001
+    import sympy
+
     method = "sympy_assumptions_simplify" if use_domain_rules else "sympy_simplify"
     if isinstance(left, sympy.Eq) and isinstance(right, sympy.Eq):
-        lhs_diff = _simplify_difference(left.lhs - right.lhs, use_domain_rules=use_domain_rules)
-        rhs_diff = _simplify_difference(left.rhs - right.rhs, use_domain_rules=use_domain_rules)
+        lhs_diff = sympy.simplify(left.lhs - right.lhs)
+        rhs_diff = sympy.simplify(left.rhs - right.rhs)
         if lhs_diff == 0 and rhs_diff == 0:
             return {"outcome": "supported", "witness": {"method": method, "difference": "0"}}
         if lhs_diff == 0 and bool(rhs_diff.is_number) and bool(rhs_diff.is_finite):
@@ -110,6 +136,23 @@ def _compare_expressions(left, right, *, use_domain_rules: bool) -> dict[str, ob
     }
 
 
+def _should_prefer_egraph(
+    left: AstNode,
+    right: AstNode,
+    assumptions: dict[str, dict[str, object]] | None,
+) -> bool:
+    """Use E-Graph equality saturation first on equations and non-commutative matrix/transpose ASTs.
+
+    Plain algebraic expressions defer to SymPy first (preserving exact ``sympy_simplify``
+    witnesses) and escalate to E-Graph when SymPy returns ``unknown`` or ``SYMPY_UNSUPPORTED``.
+    """
+    if left.kind == "equals" and right.kind == "equals":
+        return True
+    return _has_matrix_or_transpose(left, assumptions) or _has_matrix_or_transpose(
+        right, assumptions
+    )
+
+
 def main() -> int:
     try:
         raw = sys.stdin.buffer.read(192 * 1024 + 1)
@@ -128,15 +171,39 @@ def main() -> int:
         if payload["format"] not in {"latex", "mathml"}:
             raise ValueError("invalid format")
         assumptions = _validate_assumptions(payload.get("symbol_assumptions"))
-        left = ast_to_sympy(
-            parse_formula(payload["formula_a"], payload["format"]).root,
-            symbol_assumptions=assumptions,
-        )
-        right = ast_to_sympy(
-            parse_formula(payload["formula_b"], payload["format"]).root,
-            symbol_assumptions=assumptions,
-        )
-        result = _compare_expressions(left, right, use_domain_rules=bool(assumptions))
+        parsed_a = parse_formula(payload["formula_a"], payload["format"])
+        parsed_b = parse_formula(payload["formula_b"], payload["format"])
+
+        result: dict[str, object] | None = None
+        if _should_prefer_egraph(parsed_a.root, parsed_b.root, assumptions):
+            eg_result = egraph_check_equivalence(
+                parsed_a.root,
+                parsed_b.root,
+                symbol_assumptions=assumptions,
+            )
+            if eg_result is not None and eg_result.get("outcome") == "supported":
+                result = eg_result
+
+        if result is None:
+            sympy_error: FormulaParseError | None = None
+            try:
+                left = ast_to_sympy(parsed_a.root, symbol_assumptions=assumptions)
+                right = ast_to_sympy(parsed_b.root, symbol_assumptions=assumptions)
+                result = _compare_expressions(left, right, use_domain_rules=bool(assumptions))
+            except FormulaParseError as exc:
+                sympy_error = exc
+                result = {"outcome": "unknown", "witness": {"method": "sympy_inconclusive"}}
+
+            if result.get("outcome") not in {"supported", "refuted"}:
+                eg_result = egraph_check_equivalence(
+                    parsed_a.root,
+                    parsed_b.root,
+                    symbol_assumptions=assumptions,
+                )
+                if eg_result is not None and eg_result.get("outcome") == "supported":
+                    result = eg_result
+                elif sympy_error is not None:
+                    raise sympy_error
     except FormulaParseError as exc:
         result = {"outcome": "unsupported", "error_code": exc.code}
     except Exception:

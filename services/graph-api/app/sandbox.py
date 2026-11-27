@@ -256,6 +256,31 @@ def validate_worker_result(output: bytes) -> dict[str, object]:
         return result
     if not isinstance(result, dict):
         return invalid
+    if (
+        set(result) == {"outcome", "witness"}
+        and result.get("outcome") == "supported"
+        and isinstance(result.get("witness"), dict)
+    ):
+        witness = result["witness"]
+        if (
+            set(witness)
+            == {"method", "difference", "iterations", "eclasses", "enodes", "rules_applied"}
+            and witness.get("method") == "egraph_equality_saturation"
+            and witness.get("difference") == "0"
+            and type(witness.get("iterations")) is int
+            and 0 <= witness["iterations"] <= 64
+            and type(witness.get("eclasses")) is int
+            and 1 <= witness["eclasses"] <= 10_000
+            and type(witness.get("enodes")) is int
+            and 1 <= witness["enodes"] <= 20_000
+            and isinstance(witness.get("rules_applied"), list)
+            and len(witness["rules_applied"]) <= 64
+            and all(
+                isinstance(rule, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,47}", rule)
+                for rule in witness["rules_applied"]
+            )
+        ):
+            return result
     if set(result) == {"outcome", "counterexample"} and result["outcome"] == "refuted":
         example = result["counterexample"]
         if (isinstance(example, dict) and set(example) == {"method", "difference"}

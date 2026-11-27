@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
 from contextlib import suppress
@@ -22,6 +23,7 @@ _MONTHS = {month: index for index, month in enumerate(
 )}
 _HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 _DISPLAY_CLASSES = {"ltx_equation", "ltx_equationgroup", "ltx_display_math"}
+MAX_MATHML_CHARS = 65_536
 
 
 class PaperExtractionError(ValueError):
@@ -117,6 +119,86 @@ def _latex_from_math(element: etree._Element) -> tuple[str | None, str, float]:
     # Exclude annotations so a semantic fallback isn't repeated in presentation text.
     fallback = "".join(element.xpath(".//text()[not(ancestor::annotation)]")).strip()
     return fallback or None, "mathml_text", 0.6
+
+
+def _extract_mathml_pair(math_elements: list[etree._Element]) -> tuple[str | None, str | None]:
+    """Extract bounded LaTeXML Presentation MathML and Content MathML annotations."""
+    presentation_parts: list[etree._Element] = []
+    content_parts: list[etree._Element] = []
+
+    for element in math_elements:
+        element_children = [child for child in element if isinstance(child.tag, str)]
+        if not element_children:
+            continue
+
+        cloned = copy.deepcopy(element)
+        for ann_xml in cloned.xpath(
+            ".//*[local-name()='annotation-xml' and translate(@encoding, "
+            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='mathml-content']"
+        ):
+            ann_children = [child for child in ann_xml if isinstance(child.tag, str)]
+            if ann_children:
+                content_parts.extend(copy.deepcopy(child) for child in ann_children)
+            elif ann_xml.text and ann_xml.text.strip():
+                content_parts.append(copy.deepcopy(ann_xml))
+
+        # Remove metadata/semantic annotations from the visual Presentation MathML tree.
+        for redundant in list(
+            cloned.xpath(".//*[local-name()='annotation' or local-name()='annotation-xml']")
+        ):
+            parent = redundant.getparent()
+            if parent is not None:
+                parent.remove(redundant)
+
+        # Unwrap <semantics> once its annotation-xml siblings are extracted.
+        for semantics in list(cloned.xpath(".//*[local-name()='semantics']")):
+            parent = semantics.getparent()
+            if parent is None:
+                continue
+            kept = [child for child in semantics if isinstance(child.tag, str)]
+            idx = list(parent).index(semantics)
+            for offset, child in enumerate(kept):
+                parent.insert(idx + offset, child)
+            parent.remove(semantics)
+
+        if any(isinstance(child.tag, str) for child in cloned):
+            presentation_parts.append(cloned)
+
+    presentation_mathml: str | None = None
+    if len(presentation_parts) == 1:
+        raw_pres = etree.tostring(presentation_parts[0], encoding="unicode")
+        if raw_pres and len(raw_pres) <= MAX_MATHML_CHARS:
+            presentation_mathml = raw_pres
+    elif len(presentation_parts) > 1:
+        wrapper = etree.Element("math")
+        mrow = etree.SubElement(wrapper, "mrow")
+        for part in presentation_parts:
+            sub_row = etree.SubElement(mrow, "mrow")
+            for child in part:
+                if isinstance(child.tag, str):
+                    sub_row.append(child)
+        raw_pres = etree.tostring(wrapper, encoding="unicode")
+        if raw_pres and len(raw_pres) <= MAX_MATHML_CHARS:
+            presentation_mathml = raw_pres
+        else:
+            primary_pres = etree.tostring(presentation_parts[0], encoding="unicode")
+            if primary_pres and len(primary_pres) <= MAX_MATHML_CHARS:
+                presentation_mathml = primary_pres
+
+    content_mathml: str | None = None
+    if len(content_parts) == 1:
+        raw_cont = etree.tostring(content_parts[0], encoding="unicode")
+        if raw_cont and len(raw_cont) <= MAX_MATHML_CHARS:
+            content_mathml = raw_cont
+    elif len(content_parts) > 1:
+        wrapper = etree.Element("mrow")
+        for part in content_parts:
+            wrapper.append(part)
+        raw_cont = etree.tostring(wrapper, encoding="unicode")
+        if raw_cont and len(raw_cont) <= MAX_MATHML_CHARS:
+            content_mathml = raw_cont
+
+    return presentation_mathml, content_mathml
 
 
 def _assemble_math(
@@ -258,6 +340,7 @@ def extract_paper(html_text: str, source_url: str) -> ExtractedPaper:
         if assembled is None:
             continue
         latex, fragments, method, confidence = assembled
+        presentation_mathml, content_mathml = _extract_mathml_pair(math_elements)
         anchor = container.get("id") or (
             math_elements[0].get("id") if len(math_elements) == 1 else None
         )
@@ -279,6 +362,8 @@ def extract_paper(html_text: str, source_url: str) -> ExtractedPaper:
                 f"{identity}:{anchor}:{latex}".encode()
             ).hexdigest()[:20],
             anchor=anchor, anchor_is_source=source_anchor, latex=latex,
+            presentation_mathml=presentation_mathml,
+            content_mathml=content_mathml,
             source_fragments=fragments,
             warnings=warnings,
             equation_number=_clean_text(container.xpath(

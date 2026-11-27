@@ -594,6 +594,9 @@ _SHAPE_PRESERVING_FUNCTIONS = frozenset(
         "cosh",
         "tanh",
         "abs",
+        "floor",
+        "ceil",
+        "round",
         "softmax",
     }
 )
@@ -1536,7 +1539,9 @@ def _ast_node_from_dict(data: Mapping[str, object]) -> AstNode:
     )
 
 
-_BUILTIN_MATH_FUNCTIONS = frozenset({"sqrt", "log", "ln", "exp", "sin", "cos", "tan", "abs"})
+_BUILTIN_MATH_FUNCTIONS = frozenset(
+    {"sqrt", "log", "ln", "exp", "sin", "cos", "tan", "abs", "floor", "ceil", "round"}
+)
 
 
 def _ast_symbol_names_with_subscripts(node: AstNode) -> set[str]:
@@ -1871,7 +1876,7 @@ def discharge_domain_obligations_from_reviews(
         and review.reviewed_contract is not None
         and (scope is None or review.scope == scope)
     ]
-    if not accepted or not obligations:
+    if not obligations:
         return []
 
     symbol_assumptions = build_symbol_assumptions(accepted, scope=scope)
@@ -1889,9 +1894,10 @@ def discharge_domain_obligations_from_reviews(
         resolved_ids, all_covered = _resolve_obligation_review_ids(
             expr_node, reviews_by_symbol, constants=_CONSTANTS,
         )
-        # Fail closed unless every free symbol in the obligation has an accepted human review.
-        # Constant unsupported expressions (e.g. 0^0, 2^65) have no free symbols and stay so.
-        if not resolved_ids or not all_covered:
+        has_math_constant = bool(_all_symbol_names(expr_node) & {"pi"})
+        # Fail closed unless every free symbol in the obligation has an accepted human review
+        # (or the expression consists purely of exact numbers and mathematical constants like pi).
+        if not all_covered or (not resolved_ids and not has_math_constant):
             continue
         # Direct constraint check for not_one on single symbol (SymPy assumptions lack != 1).
         if obligation.predicate == "not_one" and expr_node.kind == "symbol" and expr_node.value:
@@ -1924,7 +1930,10 @@ def discharge_domain_obligations_from_reviews(
             continue
 
         verdict = _sympy_check_predicate(obligation.predicate, sym_expr)
-        used_review_ids = sorted(resolved_ids)
+        used_review_ids = sorted(resolved_ids) if resolved_ids else ["constant:pi"]
+        evidence_refs = (
+            [f"review:{rid}" for rid in used_review_ids] if resolved_ids else ["constant:pi"]
+        )
         if verdict == "proved":
             digest = hashlib.sha256(
                 (
@@ -1944,7 +1953,7 @@ def discharge_domain_obligations_from_reviews(
                         acceptance="accepted",
                         evidence=[
                             f"sympy:{obligation.predicate}:{sym_expr}",
-                            *(f"review:{rid}" for rid in used_review_ids),
+                            *evidence_refs,
                         ],
                     )
                 )
@@ -1983,7 +1992,7 @@ def discharge_domain_obligations_from_reviews(
                         acceptance="accepted",
                         evidence=[
                             f"sympy:contradicted:{obligation.predicate}:{sym_expr}",
-                            *(f"review:{rid}" for rid in used_review_ids),
+                            *evidence_refs,
                         ],
                     )
                 )
