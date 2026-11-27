@@ -28,6 +28,8 @@ NodeKind = Literal[
     "integral",
     "sequence",
     "style",
+    "piecewise",
+    "case",
 ]
 
 MAX_FORMULA_CHARACTERS = 20_000
@@ -137,7 +139,21 @@ _SPACING_COMMANDS = {
     "Biggr",
 }
 _OPERATOR_COMMANDS = {"cdot": "*", "times": "times", "div": "/"}
-_RELATION_COMMANDS = {"coloneqq": "coloneqq", "in": "in", "sim": "sim"}
+_RELATION_COMMANDS = {
+    "coloneqq": "coloneqq",
+    "in": "in",
+    "sim": "sim",
+    "neq": "neq",
+    "ne": "neq",
+    "leq": "leq",
+    "le": "leq",
+    "geq": "geq",
+    "ge": "geq",
+    "cup": "cup",
+    "cap": "cap",
+    "lor": "or",
+    "land": "and",
+}
 _FUNCTION_COMMANDS = {
     "sin",
     "cos",
@@ -154,6 +170,9 @@ _FUNCTION_COMMANDS = {
     "det",
     "tr",
 }
+_UNARY_ARG_FUNCTIONS = frozenset(
+    {"sin", "cos", "tan", "sinh", "cosh", "tanh", "exp", "log", "ln"}
+)
 _STRUCTURAL_COMMANDS = {
     "frac",
     "sqrt",
@@ -165,6 +184,7 @@ _STRUCTURAL_COMMANDS = {
     "text",
     "mathbf",
     "boldsymbol",
+    "bm",
     "vec",
     "mathcal",
     "mathbb",
@@ -172,6 +192,9 @@ _STRUCTURAL_COMMANDS = {
 }
 _UNSUPPORTED_ACCENTS = {"widetilde", "overline", "underline", "check", "breve"}
 _TEXT_IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}\Z")
+_INLINE_CASE_CONDITION_RE = re.compile(r"^\s*(if|for|when)\s+\$([^$]+)\$\s*\Z")
+_CASE_LEADING_KEYWORDS = frozenset({"if", "for", "when"})
+_CASE_DEFAULT_KEYWORDS = frozenset({"else", "otherwise"})
 _DOMAIN_SPACE_NAMES = frozenset({"R", "Z", "C", "N"})
 _CONSTANTS = {"pi", "infty", "infinity"}
 
@@ -233,8 +256,19 @@ def _tokenize_latex(source: str) -> list[_Token]:
                 index += 1
             if command in _SPACING_COMMANDS:
                 continue
+            if command == "\\":
+                tokens.append(_Token("row_sep", "\\\\", start))
+                continue
             if command == "|":
                 tokens.append(_Token("delimiter", "\\|", start))
+                continue
+            if command == "text":
+                inline = _try_consume_inline_case_text(text, index, start)
+                if inline is not None:
+                    inline_tokens, index = inline
+                    tokens.extend(inline_tokens)
+                    continue
+                tokens.append(_Token("command", command, start))
                 continue
             if command in _OPERATOR_COMMANDS:
                 tokens.append(_Token("operator", _OPERATOR_COMMANDS[command], start))
@@ -257,6 +291,17 @@ def _tokenize_latex(source: str) -> list[_Token]:
                     start,
                 )
             elif command in {"begin", "end"}:
+                env = _try_consume_cases_env(text, index)
+                if env is not None:
+                    tokens.append(
+                        _Token(
+                            "begin_cases" if command == "begin" else "end_cases",
+                            "cases",
+                            start,
+                        )
+                    )
+                    index = env
+                    continue
                 raise FormulaParseError(
                     "UNSUPPORTED_ENVIRONMENT",
                     "LaTeX environments are outside the supported formula subset.",
@@ -296,8 +341,12 @@ def _tokenize_latex(source: str) -> list[_Token]:
                 tokens.append(_Token("identifier", identifier, index))
             index = end
             continue
-        if character in "{}()[]_^+-*/=,;:|<":
-            kind = "operator" if character in "^_+-*/=,;:|<" else "delimiter"
+        if character == "&":
+            tokens.append(_Token("col_sep", "&", index))
+            index += 1
+            continue
+        if character in "{}()[]_^+-*/=,;:|<>":
+            kind = "operator" if character in "^_+-*/=,;:|<>" else "delimiter"
             tokens.append(_Token(kind, character, index))
             index += 1
             continue
@@ -310,12 +359,56 @@ def _tokenize_latex(source: str) -> list[_Token]:
     return tokens
 
 
+def _try_consume_cases_env(text: str, index: int) -> int | None:
+    """Match ``{cases}`` immediately following ``\\begin`` or ``\\end``."""
+    pos = index
+    while pos < len(text) and text[pos].isspace():
+        pos += 1
+    if text.startswith("{cases}", pos):
+        return pos + len("{cases}")
+    return None
+
+
+def _try_consume_inline_case_text(
+    text: str,
+    index: int,
+    start: int,
+) -> tuple[list[_Token], int] | None:
+    """Allow ``\\text{if $<math>$}`` condition wrappers without allowing general prose."""
+    pos = index
+    while pos < len(text) and text[pos].isspace():
+        pos += 1
+    if pos >= len(text) or text[pos] != "{":
+        return None
+    depth = 1
+    scan = pos + 1
+    while scan < len(text) and depth > 0:
+        if text[scan] == "\\" and scan + 1 < len(text):
+            scan += 2
+            continue
+        if text[scan] == "{":
+            depth += 1
+        elif text[scan] == "}":
+            depth -= 1
+        scan += 1
+    if depth != 0:
+        return None
+    inner = text[pos + 1 : scan - 1]
+    match = _INLINE_CASE_CONDITION_RE.fullmatch(inner)
+    if match is None:
+        return None
+    keyword, math_body = match.group(1), match.group(2)
+    inner_tokens = _tokenize_latex(math_body)[:-1]
+    return ([_Token("condition_kw", keyword, start), *inner_tokens], scan)
+
+
 class _FormulaParser:
     def __init__(self, tokens: list[_Token]):
         self.tokens = tokens
         self.index = 0
         self.node_count = 0
         self.depth = 0
+        self._in_case_condition = False
 
     @property
     def current(self) -> _Token:
@@ -356,7 +449,10 @@ class _FormulaParser:
             raise FormulaParseError("AST_TOO_DEEP", "The formula nesting limit was exceeded.")
         try:
             left = self._prefix()
-            while self.current.value not in stops and self.current.kind != "eof":
+            while (
+                self.current.value not in stops
+                and self.current.kind not in {"eof", "row_sep", "col_sep", "end_cases"}
+            ):
                 if self.current.value in {"_", "^"}:
                     operator = self._advance().value
                     right = self._script_argument()
@@ -398,13 +494,42 @@ class _FormulaParser:
                 }:
                     left = self._call(left)
                     continue
+                if (
+                    left.kind == "symbol"
+                    and left.attribute("role") == "function"
+                    and left.value in _UNARY_ARG_FUNCTIONS
+                    and self.current.kind == "command"
+                    and self.current.value in {"frac", "sqrt"}
+                ):
+                    arg = self._prefix()
+                    left = self._node("call", children=(left, arg))
+                    continue
+                if self._in_case_condition:
+                    logic_op = self._peek_text_logic_op()
+                    if logic_op is not None:
+                        left_binding, right_binding = (0, 1) if logic_op == "or" else (1, 2)
+                        if left_binding < minimum_binding:
+                            break
+                        self._consume_text_logic_op()
+                        right = self._expression(right_binding, stops)
+                        left = self._infix(logic_op, left, right)
+                        continue
                 explicit = self.current.value
                 if explicit in {
+                    "or",
+                    "and",
                     "=",
                     "coloneqq",
                     "in",
                     "sim",
+                    "neq",
+                    "leq",
+                    "geq",
+                    "<",
+                    ">",
                     "|",
+                    "cup",
+                    "cap",
                     ":",
                     "+",
                     "-",
@@ -413,11 +538,20 @@ class _FormulaParser:
                     "/",
                 }:
                     left_binding, right_binding = {
+                        "or": (0, 1),
+                        "and": (1, 2),
                         "in": (2, 3),
                         "sim": (2, 3),
                         "=": (3, 4),
                         "coloneqq": (3, 4),
+                        "neq": (3, 4),
+                        "leq": (3, 4),
+                        "geq": (3, 4),
+                        "<": (3, 4),
+                        ">": (3, 4),
                         "|": (4, 5),
+                        "cup": (10, 11),
+                        "cap": (10, 11),
                         "+": (10, 11),
                         "-": (10, 11),
                         ":": (15, 16),
@@ -466,11 +600,98 @@ class _FormulaParser:
             self._expect("|")
             fn = self._node("symbol", "abs", attributes=(("role", "function"),))
             return self._node("call", children=(fn, inner))
+        if token.kind == "begin_cases":
+            return self._parse_cases(token.position)
         if token.kind == "command":
             return self._command(token)
         raise FormulaParseError(
             "EXPECTED_EXPRESSION", "Expected a formula expression.", token.position
         )
+
+    def _peek_text_word(self) -> str | None:
+        if (
+            self.index + 3 < len(self.tokens)
+            and self.tokens[self.index].kind == "command"
+            and self.tokens[self.index].value == "text"
+            and self.tokens[self.index + 1].value == "{"
+            and self.tokens[self.index + 2].kind in {"identifier", "function"}
+            and self.tokens[self.index + 3].value == "}"
+        ):
+            return self.tokens[self.index + 2].value.lower()
+        return None
+
+    def _peek_text_logic_op(self) -> str | None:
+        word = self._peek_text_word()
+        return word if word in {"or", "and"} else None
+
+    def _consume_text_logic_op(self) -> None:
+        self.index += 4
+
+    def _parse_cases(self, position: int) -> AstNode:
+        branches: list[AstNode] = []
+        while self.current.kind != "end_cases":
+            if self.current.kind == "eof":
+                raise FormulaParseError(
+                    "UNCLOSED_ENVIRONMENT",
+                    "Expected \\end{cases} to close \\begin{cases}.",
+                    position,
+                )
+            value = self._expression(0, frozenset())
+            condition: AstNode
+            if self.current.kind == "col_sep":
+                self._advance()
+                condition = self._parse_case_condition()
+            else:
+                condition = self._node(
+                    "symbol", "otherwise", attributes=(("role", "condition"),),
+                )
+            branches.append(self._node("case", children=(value, condition)))
+            if self.current.kind == "row_sep":
+                self._advance()
+                if self.current.kind == "end_cases":
+                    break
+                continue
+            if self.current.kind != "end_cases":
+                raise FormulaParseError(
+                    "EXPECTED_EXPRESSION",
+                    "Expected row separator or \\end{cases} inside cases environment.",
+                    self.current.position,
+                )
+        if not branches:
+            raise FormulaParseError(
+                "EMPTY_GROUP",
+                "Empty cases environments are not supported.",
+                position,
+            )
+        self._advance()  # consume end_cases
+        return self._node("piecewise", children=tuple(branches))
+
+    def _parse_case_condition(self) -> AstNode:
+        if self.current.kind == "condition_kw":
+            self._advance()
+        else:
+            word = self._peek_text_word()
+            if word in _CASE_DEFAULT_KEYWORDS:
+                self.index += 4
+                return self._node(
+                    "symbol", "otherwise", attributes=(("role", "condition"),),
+                )
+            if word in _CASE_LEADING_KEYWORDS:
+                self.index += 4
+        if (
+            self.current.kind == "identifier"
+            and self.current.value.lower() in _CASE_DEFAULT_KEYWORDS
+        ):
+            self._advance()
+            return self._node(
+                "symbol", "otherwise", attributes=(("role", "condition"),),
+            )
+        prev_flag = self._in_case_condition
+        self._in_case_condition = True
+        try:
+            return self._expression(0, frozenset())
+        finally:
+            self._in_case_condition = prev_flag
 
     def _command(self, token: _Token) -> AstNode:
         command = token.value
@@ -499,11 +720,12 @@ class _FormulaParser:
         if command == "widehat":
             child = self._required_group()
             return self._node("accent", value="widehat", children=(child,))
-        if command in {"mathbf", "boldsymbol", "vec", "mathcal", "mathbb"}:
+        if command in {"mathbf", "boldsymbol", "bm", "vec", "mathcal", "mathbb"}:
             child = self._required_group()
             style = {
                 "mathbf": "bold",
                 "boldsymbol": "bold",
+                "bm": "bold",
                 "vec": "vector",
                 "mathcal": "calligraphy",
                 "mathbb": "blackboard",
@@ -665,8 +887,12 @@ class _FormulaParser:
             return self._node("multiply", value="times", children=tuple(children))
         if operator == "/":
             return self._node("divide", children=(left, right))
-        if operator in {"coloneqq", "in", "sim"}:
+        if operator in {"coloneqq", "in", "sim", "neq", "leq", "geq", "cup", "cap", "or", "and"}:
             return self._node("relation", value=operator, children=(left, right))
+        if operator == "<":
+            return self._node("relation", value="lt", children=(left, right))
+        if operator == ">":
+            return self._node("relation", value="gt", children=(left, right))
         if operator == "|":
             return self._node("relation", value="conditional", children=(left, right))
         if operator == ":":
@@ -699,7 +925,13 @@ class _FormulaParser:
 
     @staticmethod
     def _starts_atom(token: _Token) -> bool:
-        return token.kind in {"number", "identifier", "function", "command"} or token.value in {
+        return token.kind in {
+            "number",
+            "identifier",
+            "function",
+            "command",
+            "begin_cases",
+        } or token.value in {
             "(",
             "{",
             "[",
@@ -710,6 +942,8 @@ class _FormulaParser:
 def _bound_name(lower: AstNode | None) -> str | None:
     if lower is None:
         return None
+    if lower.kind == "sequence" and lower.children:
+        return _bound_name(lower.children[0])
     if lower.children and (
         lower.kind == "equals"
         or (lower.kind == "relation" and lower.value in {"in", "sim"})
@@ -761,9 +995,32 @@ def _analyze_symbols(
                 collect(ParsedSymbol(binder, "index"))
             for index, child in enumerate(node.children[:-1]):
                 if index == 0 and binder:
-                    if child.kind == "equals" and len(child.children) == 2:
+                    if (
+                        (
+                            child.kind == "equals"
+                            or (child.kind == "relation" and child.value in {"in", "sim"})
+                        )
+                        and len(child.children) == 2
+                    ):
                         visit(child.children[0], local_scope, "bound")
                         visit(child.children[1], scope)
+                    elif child.kind == "sequence" and child.children:
+                        first = child.children[0]
+                        if (
+                            (
+                                first.kind == "equals"
+                                or (first.kind == "relation" and first.value in {"in", "sim"})
+                            )
+                            and len(first.children) == 2
+                        ):
+                            visit(first.children[0], local_scope, "bound")
+                            visit(first.children[1], scope)
+                        elif _is_binder_declaration(first, binder):
+                            visit(first, local_scope, "bound")
+                        else:
+                            visit(first, scope)
+                        for extra in child.children[1:]:
+                            visit(extra, local_scope)
                     elif _is_binder_declaration(child, binder):
                         visit(child, local_scope, "bound")
                     else:
@@ -847,7 +1104,7 @@ def _analyze_symbols(
                 visit(node.children[0], scope, context)
             return
         if node.kind == "symbol" and node.value:
-            if node.value in _CONSTANTS:
+            if node.value in _CONSTANTS or node.attribute("role") == "condition":
                 return
             if context == "function":
                 collect(ParsedSymbol(node.value, "function", style=node.attribute("style")))
@@ -1059,7 +1316,13 @@ def _canonicalize_node(
                     child, local_renames, binder_depth + 1, used_names,
                 )
             elif index == 0 and binder:
-                if child.kind == "equals" and len(child.children) == 2:
+                if (
+                    (
+                        child.kind == "equals"
+                        or (child.kind == "relation" and child.value in {"in", "sim"})
+                    )
+                    and len(child.children) == 2
+                ):
                     declaration = _canonicalize_node(
                         child.children[0], local_renames, binder_depth + 1, used_names,
                     )
@@ -1067,6 +1330,39 @@ def _canonicalize_node(
                         child.children[1], renames, binder_depth, used_names,
                     )
                     normalized = replace(child, children=(declaration, lower_value))
+                elif child.kind == "sequence" and child.children:
+                    first = child.children[0]
+                    if (
+                        (
+                            first.kind == "equals"
+                            or (first.kind == "relation" and first.value in {"in", "sim"})
+                        )
+                        and len(first.children) == 2
+                    ):
+                        first_norm = replace(
+                            first,
+                            children=(
+                                _canonicalize_node(
+                                    first.children[0], local_renames, binder_depth + 1, used_names,
+                                ),
+                                _canonicalize_node(
+                                    first.children[1], renames, binder_depth, used_names,
+                                ),
+                            ),
+                        )
+                    elif _is_binder_declaration(first, binder):
+                        first_norm = _canonicalize_node(
+                            first, local_renames, binder_depth + 1, used_names,
+                        )
+                    else:
+                        first_norm = _canonicalize_node(
+                            first, renames, binder_depth, used_names,
+                        )
+                    rest_norm = tuple(
+                        _canonicalize_node(extra, local_renames, binder_depth + 1, used_names)
+                        for extra in child.children[1:]
+                    )
+                    normalized = replace(child, children=(first_norm, *rest_norm))
                 elif _is_binder_declaration(child, binder):
                     normalized = _canonicalize_node(
                         child, local_renames, binder_depth + 1, used_names,
@@ -1123,9 +1419,32 @@ def _free_symbol_names(root: AstNode) -> set[str]:
                 if index == len(node.children) - 1:
                     visit(child, local)
                 elif index == 0:
-                    if child.kind == "equals" and len(child.children) == 2:
+                    if (
+                        (
+                            child.kind == "equals"
+                            or (child.kind == "relation" and child.value in {"in", "sim"})
+                        )
+                        and len(child.children) == 2
+                    ):
                         visit(child.children[0], local)
                         visit(child.children[1], scope)
+                    elif child.kind == "sequence" and child.children:
+                        first = child.children[0]
+                        if (
+                            (
+                                first.kind == "equals"
+                                or (first.kind == "relation" and first.value in {"in", "sim"})
+                            )
+                            and len(first.children) == 2
+                        ):
+                            visit(first.children[0], local)
+                            visit(first.children[1], scope)
+                        elif _is_binder_declaration(first, binder):
+                            visit(first, local)
+                        else:
+                            visit(first, scope)
+                        for extra in child.children[1:]:
+                            visit(extra, local)
                     elif _is_binder_declaration(child, binder):
                         visit(child, local)
                     else:
@@ -1208,6 +1527,8 @@ def _sympy_symbol_for(
     domain = spec.get("domain")
     nonzero = bool(spec.get("nonzero", False))
     negative = bool(spec.get("negative", False))
+    positive = bool(spec.get("positive", False))
+    nonnegative = bool(spec.get("nonnegative", False))
     if category in {"vector", "matrix", "tensor"}:
         return sympy.Symbol(name, commutative=False)
     if category not in {"scalar", "index"}:
@@ -1224,10 +1545,16 @@ def _sympy_symbol_for(
     elif domain == "integer":
         kwargs["integer"] = True
         kwargs["real"] = True
-        if nonzero:
-            kwargs["nonzero"] = True
-        if negative:
+        if positive:
+            kwargs["positive"] = True
+        elif nonnegative:
+            kwargs["nonnegative"] = True
+            if nonzero:
+                kwargs["positive"] = True
+        elif negative:
             kwargs["negative"] = True
+        elif nonzero:
+            kwargs["nonzero"] = True
     elif domain == "real":
         kwargs["real"] = True
         if negative:
@@ -1239,6 +1566,65 @@ def _sympy_symbol_for(
         if nonzero:
             kwargs["nonzero"] = True
     return sympy.Symbol(name, **kwargs)
+
+
+_NC_FUNCTION_CACHE: dict[str, type] = {}
+
+
+def _noncommutative_function(name: str):  # noqa: ANN202
+    """Return a cached SymPy Function subclass that preserves non-commutativity."""
+    import sympy
+
+    cached = _NC_FUNCTION_CACHE.get(name)
+    if cached is not None:
+        return cached
+    cls = type(f"fgl_nc_{name}", (sympy.Function,), {"is_commutative": False})
+    _NC_FUNCTION_CACHE[name] = cls
+    return cls
+
+
+def _is_matrix_like_contract(
+    name: str | None,
+    symbol_assumptions: dict[str, dict[str, object]] | None,
+) -> bool:
+    if not name or not symbol_assumptions or name not in symbol_assumptions:
+        return False
+    return symbol_assumptions[name].get("category") in {"matrix", "vector", "tensor"}
+
+
+def _base_symbol_for_matrix_op(node: AstNode) -> str | None:
+    if node.kind == "symbol":
+        return node.value
+    if node.kind == "style" and len(node.children) == 1:
+        return _base_symbol_for_matrix_op(node.children[0])
+    if node.kind == "subscript" and node.children:
+        return _base_symbol_for_matrix_op(node.children[0])
+    if node.kind == "power" and node.children:
+        return _base_symbol_for_matrix_op(node.children[0])
+    return None
+
+
+def _matrix_superscript_tag(
+    base: AstNode,
+    exp: AstNode,
+    symbol_assumptions: dict[str, dict[str, object]] | None,
+) -> str | None:
+    """Return a matrix superscript tag (e.g. ``W^Q``) when contracts rule out scalar power."""
+    if not symbol_assumptions:
+        return None
+    base_name = _base_symbol_for_matrix_op(base)
+    if not _is_matrix_like_contract(base_name, symbol_assumptions):
+        return None
+    if exp.kind != "symbol" or not exp.value or exp.value in {"T", "top"}:
+        return None
+    exp_spec = symbol_assumptions.get(exp.value)
+    if exp_spec is not None and exp_spec.get("category") in {"scalar", "index"}:
+        return None
+    if exp_spec is not None and exp_spec.get("category") in {"matrix", "vector", "tensor"}:
+        return exp.value
+    if len(exp.value) == 1 and exp.value.isupper():
+        return exp.value
+    return None
 
 
 def ast_to_sympy(
@@ -1255,6 +1641,32 @@ def ast_to_sympy(
 
     def conv(child: AstNode):  # noqa: ANN202
         return ast_to_sympy(child, symbol_assumptions=symbol_assumptions)
+
+    def cond_to_sympy(cond: AstNode):  # noqa: ANN202
+        if cond.kind == "symbol" and cond.attribute("role") == "condition":
+            return sympy.S.true
+        if cond.kind == "equals" and len(cond.children) == 2:
+            return sympy.Eq(conv(cond.children[0]), conv(cond.children[1]))
+        if cond.kind == "relation" and len(cond.children) == 2:
+            left_c, right_c = cond.children
+            if cond.value == "and":
+                return sympy.And(cond_to_sympy(left_c), cond_to_sympy(right_c))
+            if cond.value == "or":
+                return sympy.Or(cond_to_sympy(left_c), cond_to_sympy(right_c))
+            rel_map = {
+                "neq": sympy.Ne,
+                "lt": sympy.Lt,
+                "leq": sympy.Le,
+                "gt": sympy.Gt,
+                "geq": sympy.Ge,
+            }
+            rel_cls = rel_map.get(cond.value or "")
+            if rel_cls is not None:
+                return rel_cls(conv(left_c), conv(right_c))
+        raise FormulaParseError(
+            "SYMPY_UNSUPPORTED",
+            f"Unsupported piecewise condition kind {cond.kind!r} ({cond.value!r}).",
+        )
 
     if node.kind == "number":
         return sympy.Number(node.value)
@@ -1283,12 +1695,32 @@ def ast_to_sympy(
     if node.kind == "power":
         if len(node.children) != 2:
             raise FormulaParseError("SYMPY_UNSUPPORTED", "Power requires two operands.")
+        base_node, exp_node = node.children
         if node.attribute("operation") == "transpose":
+            base_name = _base_symbol_for_matrix_op(base_node)
+            if _is_matrix_like_contract(base_name, symbol_assumptions):
+                return _noncommutative_function("transpose")(conv(base_node))
             raise FormulaParseError(
                 "SYMPY_UNSUPPORTED",
                 "Symbolic transpose requires confirmed matrix contracts.",
             )
-        return sympy.Pow(conv(node.children[0]), conv(node.children[1]))
+        tag = _matrix_superscript_tag(base_node, exp_node, symbol_assumptions)
+        if tag is not None:
+            inner = base_node
+            while inner.kind == "style" and len(inner.children) == 1:
+                inner = inner.children[0]
+            if inner.kind == "subscript" and len(inner.children) == 2:
+                sub_base = inner.children[0]
+                while sub_base.kind == "style" and len(sub_base.children) == 1:
+                    sub_base = sub_base.children[0]
+                bname = sub_base.value or "M"
+                idx_parts: list[str] = []
+                _collect_index_names(inner.children[1], idx_parts)
+                suffix = f"__sub_{'_'.join(idx_parts)}" if idx_parts else ""
+                return sympy.Symbol(f"{bname}__sup_{tag}{suffix}", commutative=False)
+            bname = inner.value or _base_symbol_for_matrix_op(inner) or "M"
+            return sympy.Symbol(f"{bname}__sup_{tag}", commutative=False)
+        return sympy.Pow(conv(base_node), conv(exp_node))
 
     if node.kind == "negate":
         return -conv(node.children[0])
@@ -1323,6 +1755,8 @@ def ast_to_sympy(
             if callable(fn) and not isinstance(fn, sympy.Function):
                 return fn(*args)
             return fn(*args)
+        if any(getattr(arg, "is_commutative", True) is False for arg in args):
+            return _noncommutative_function(name)(*args)
         return sympy.Function(name)(*args)
 
     if node.kind == "sum":
@@ -1357,10 +1791,27 @@ def ast_to_sympy(
     if node.kind == "subscript":
         # Represent subscripted symbols as indexed SymPy Symbols.
         base = node.children[0] if node.children else node
-        name = base.value or "x"
+        while base.kind == "style" and len(base.children) == 1:
+            base = base.children[0]
         idx_parts: list[str] = []
         if len(node.children) >= 2:
             _collect_index_names(node.children[1], idx_parts)
+        if base.kind == "power" and len(base.children) == 2:
+            tag = _matrix_superscript_tag(base.children[0], base.children[1], symbol_assumptions)
+            if tag is not None:
+                bname = _base_symbol_for_matrix_op(base.children[0]) or "M"
+                suffix = f"__sub_{'_'.join(idx_parts)}" if idx_parts else ""
+                return sympy.Symbol(f"{bname}__sup_{tag}{suffix}", commutative=False)
+            raise FormulaParseError(
+                "SYMPY_UNSUPPORTED",
+                "Subscripted power requires a confirmed matrix superscript tag.",
+            )
+        if base.kind != "symbol" or not base.value:
+            raise FormulaParseError(
+                "SYMPY_UNSUPPORTED",
+                "Complex subscript base cannot be converted to SymPy.",
+            )
+        name = base.value
         indexed_name = f"{name}_{'_'.join(idx_parts)}" if idx_parts else name
         if symbol_assumptions:
             if indexed_name in symbol_assumptions:
@@ -1369,15 +1820,27 @@ def ast_to_sympy(
                     default_commutative=True,
                     symbol_assumptions=symbol_assumptions,
                 )
-            if name in symbol_assumptions and symbol_assumptions[name].get("category") in {
-                "scalar", "index",
-            }:
-                return _sympy_symbol_for(
-                    name,
-                    default_commutative=True,
-                    symbol_assumptions={indexed_name: symbol_assumptions[name]},
-                )
+            if name in symbol_assumptions:
+                category = symbol_assumptions[name].get("category")
+                if category in {"vector", "matrix", "tensor"}:
+                    return sympy.Symbol(indexed_name, commutative=False)
+                if category in {"scalar", "index"}:
+                    return _sympy_symbol_for(
+                        indexed_name,
+                        default_commutative=True,
+                        symbol_assumptions={indexed_name: symbol_assumptions[name]},
+                    )
         return sympy.Symbol(indexed_name)
+
+    if node.kind == "piecewise":
+        if not node.children:
+            raise FormulaParseError("SYMPY_UNSUPPORTED", "Empty piecewise expression.")
+        branches = []
+        for branch in node.children:
+            if branch.kind != "case" or len(branch.children) != 2:
+                raise FormulaParseError("SYMPY_UNSUPPORTED", "Malformed piecewise branch.")
+            branches.append((conv(branch.children[0]), cond_to_sympy(branch.children[1])))
+        return sympy.Piecewise(*branches)
 
     if node.kind == "sequence":
         # Return a tuple of converted children.

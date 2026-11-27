@@ -581,6 +581,47 @@ def infer_expression_shape(
     return shape, errors
 
 
+_SHAPE_PRESERVING_FUNCTIONS = frozenset(
+    {
+        "sqrt",
+        "exp",
+        "log",
+        "ln",
+        "sin",
+        "cos",
+        "tan",
+        "sinh",
+        "cosh",
+        "tanh",
+        "abs",
+        "softmax",
+    }
+)
+
+
+def _is_zero_literal(node: AstNode) -> bool:
+    if node.kind == "style" and len(node.children) == 1:
+        return _is_zero_literal(node.children[0])
+    if node.kind == "negate" and len(node.children) == 1:
+        return _is_zero_literal(node.children[0])
+    if node.kind == "number" and node.value is not None:
+        try:
+            return Fraction(node.value) == 0
+        except (ValueError, ZeroDivisionError):
+            return False
+    return False
+
+
+def _root_symbol_name(node: AstNode) -> str | None:
+    if node.kind == "symbol":
+        return node.value
+    if node.kind == "style" and len(node.children) == 1:
+        return _root_symbol_name(node.children[0])
+    if node.kind in {"power", "subscript"} and node.children:
+        return _root_symbol_name(node.children[0])
+    return None
+
+
 def _infer_node_shape(
     node: AstNode,
     contracts: dict[str, SymbolContract],
@@ -594,15 +635,45 @@ def _infer_node_shape(
         return ()
     if node.kind == "subscript" and node.children:
         base = node.children[0]
-        c = contracts.get(base.value) if base.kind == "symbol" and base.value else None
-        if c is None or c.shape is None:
+        while base.kind == "style" and len(base.children) == 1:
+            base = base.children[0]
+        if base.kind == "power":
+            base_shape = _infer_node_shape(base, contracts, errors, f"{path}.base")
+            base_name = _root_symbol_name(base)
+            c = contracts.get(base_name) if base_name else None
+        else:
+            c = contracts.get(base.value) if base.kind == "symbol" and base.value else None
+            base_shape = c.shape if c else None
+        if base_shape is None:
             return None
         index_count = _index_count(node.children[1]) if len(node.children) > 1 else 0
-        return c.shape[:-index_count] if index_count and len(c.shape) >= index_count else c.shape
+        # ponytail: 1-indexed matrix preserves (rows, cols) family/head shape (e.g. Q_j, W_j^Q),
+        # ceiling: row-slice notation A_i on 2D matrices needs explicit rank-1 annotation,
+        # upgrade: explicit slice-mode annotation in ContractReview.
+        if c is not None and c.category == "matrix" and index_count == 1:
+            return base_shape
+        return (
+            base_shape[:-index_count]
+            if index_count and len(base_shape) >= index_count
+            else base_shape
+        )
     if node.kind == "style" and node.children:
         return _infer_node_shape(node.children[0], contracts, errors, f"{path}.style")
     if node.kind == "negate" and node.children:
         return _infer_node_shape(node.children[0], contracts, errors, f"{path}.negate")
+    if node.kind == "call" and node.children:
+        fn = node.children[0]
+        arg_shapes = [
+            _infer_node_shape(arg, contracts, errors, f"{path}.call[{index}]")
+            for index, arg in enumerate(node.children[1:], start=1)
+        ]
+        if (
+            fn.kind == "symbol"
+            and fn.value in _SHAPE_PRESERVING_FUNCTIONS
+            and arg_shapes
+        ):
+            return arg_shapes[0]
+        return None
     if node.kind == "multiply":
         child_shapes = [
             _infer_node_shape(child, contracts, errors, f"{path}.multiply[{index}]")
@@ -667,6 +738,10 @@ def _infer_node_shape(
         left = _infer_node_shape(node.children[0], contracts, errors, f"{path}.left")
         right = _infer_node_shape(node.children[1], contracts, errors, f"{path}.right")
         if left is not None and right is not None and not _shapes_compatible(left, right):
+            if _is_zero_literal(node.children[1]):
+                return left
+            if _is_zero_literal(node.children[0]):
+                return right
             errors.append(
                 ShapeError(
                     message=f"Equality shape mismatch: {left} vs {right}",
@@ -675,6 +750,39 @@ def _infer_node_shape(
                 )
             )
         return left
+
+    if node.kind == "piecewise":
+        branch_shapes: list[tuple[int, tuple[int | str, ...]]] = []
+        for index, branch in enumerate(node.children):
+            if branch.kind != "case" or len(branch.children) != 2:
+                continue
+            val_shape = _infer_node_shape(
+                branch.children[0], contracts, errors, f"{path}.case[{index}].value",
+            )
+            _infer_node_shape(
+                branch.children[1], contracts, errors, f"{path}.case[{index}].condition",
+            )
+            if val_shape is not None:
+                branch_shapes.append((index, val_shape))
+        if branch_shapes:
+            base_index, base_shape = branch_shapes[0]
+            for other_index, other_shape in branch_shapes[1:]:
+                if _shapes_compatible(base_shape, other_shape):
+                    continue
+                errors.append(
+                    ShapeError(
+                        message=(
+                            f"Piecewise branch shape mismatch: {base_shape} vs {other_shape}"
+                        ),
+                        node_path=f"{path}.case[{base_index}:{other_index}]",
+                        symbols=_child_symbol_names(
+                            node.children[base_index].children[0],
+                            node.children[other_index].children[0],
+                        ),
+                    )
+                )
+            return base_shape
+        return None
 
     for index, child in enumerate(node.children):
         _infer_node_shape(child, contracts, errors, f"{path}[{index}]")
@@ -1379,6 +1487,10 @@ def build_symbol_assumptions(
             entry["nonzero"] = True
         if "negative" in flags and domain in {"real", "integer"}:
             entry["negative"] = True
+        if "positive" in flags and domain == "integer":
+            entry["positive"] = True
+        elif "non_negative" in flags and domain == "integer":
+            entry["nonnegative"] = True
         assumptions[review.symbol_name] = entry
     return assumptions
 
@@ -1392,6 +1504,10 @@ def format_reviewed_assumptions(
     formatted: list[str] = []
     for name, spec in sorted(build_symbol_assumptions(reviews, scope=scope).items()):
         parts = [f"{name}:{spec['category']}:{spec['domain']}"]
+        if spec.get("positive"):
+            parts.append("positive")
+        if spec.get("nonnegative"):
+            parts.append("non_negative")
         if spec.get("nonzero"):
             parts.append("nonzero")
         if spec.get("negative"):
@@ -1446,6 +1562,100 @@ def _ast_symbol_names_with_subscripts(node: AstNode) -> set[str]:
     return names
 
 
+def _resolve_obligation_review_ids(
+    node: AstNode,
+    reviews_by_symbol: Mapping[str, ContractReview],
+    *,
+    constants: frozenset[str] | set[str],
+    bound: frozenset[str] = frozenset(),
+) -> tuple[set[str], bool]:
+    """Resolve accepted human review IDs covering every free symbol in an obligation AST.
+
+    Supports both direct subscript reviews (e.g. ``d_k``) and base+index reviews
+    (e.g. ``d`` + ``k``), and excludes bound summation/product indices.
+    """
+    from app.formula_ast import _is_binder_declaration
+
+    if node.kind == "number":
+        return set(), True
+    if node.kind == "symbol" and node.value:
+        if node.value in constants or node.attribute("role") == "condition" or node.value in bound:
+            return set(), True
+        rev = reviews_by_symbol.get(node.value)
+        if rev is None:
+            return set(), False
+        return {rev.review_id}, True
+    if node.kind == "call" and node.children:
+        fn_node = node.children[0]
+        children = (
+            node.children[1:]
+            if fn_node.kind == "symbol" and fn_node.value in _BUILTIN_MATH_FUNCTIONS
+            else node.children
+        )
+        ids: set[str] = set()
+        for child in children:
+            c_ids, ok = _resolve_obligation_review_ids(
+                child, reviews_by_symbol, constants=constants, bound=bound,
+            )
+            if not ok:
+                return set(), False
+            ids.update(c_ids)
+        return ids, True
+    if node.kind == "subscript" and len(node.children) == 2 and node.children[0].kind == "symbol":
+        base = node.children[0].value
+        idx = node.children[1]
+        if base and idx.kind in {"symbol", "number"} and idx.value:
+            joined = f"{base}_{idx.value}"
+            if joined in reviews_by_symbol:
+                return {reviews_by_symbol[joined].review_id}, True
+        ids = set()
+        for child in node.children:
+            c_ids, ok = _resolve_obligation_review_ids(
+                child, reviews_by_symbol, constants=constants, bound=bound,
+            )
+            if not ok:
+                return set(), False
+            ids.update(c_ids)
+        return ids, True
+    if node.kind in {"sum", "product", "integral"} and node.children:
+        binder = node.attribute("binder")
+        local_bound = bound | ({binder} if binder else set())
+        ids = set()
+        for index, child in enumerate(node.children):
+            if index == len(node.children) - 1:
+                c_ids, ok = _resolve_obligation_review_ids(
+                    child, reviews_by_symbol, constants=constants, bound=local_bound,
+                )
+            elif index == 0 and binder:
+                if child.kind == "equals" and len(child.children) == 2:
+                    c_ids, ok = _resolve_obligation_review_ids(
+                        child.children[1], reviews_by_symbol, constants=constants, bound=bound,
+                    )
+                elif _is_binder_declaration(child, binder):
+                    c_ids, ok = set(), True
+                else:
+                    c_ids, ok = _resolve_obligation_review_ids(
+                        child, reviews_by_symbol, constants=constants, bound=local_bound,
+                    )
+            else:
+                c_ids, ok = _resolve_obligation_review_ids(
+                    child, reviews_by_symbol, constants=constants, bound=bound,
+                )
+            if not ok:
+                return set(), False
+            ids.update(c_ids)
+        return ids, True
+    ids = set()
+    for child in node.children:
+        c_ids, ok = _resolve_obligation_review_ids(
+            child, reviews_by_symbol, constants=constants, bound=bound,
+        )
+        if not ok:
+            return set(), False
+        ids.update(c_ids)
+    return ids, True
+
+
 def _sympy_check_predicate(
     predicate: DomainPredicateKind,
     expr,  # noqa: ANN001 — sympy.Expr
@@ -1453,21 +1663,117 @@ def _sympy_check_predicate(
     """Decide whether a domain predicate is strictly proved or contradicted by SymPy assumptions.
 
     Never uses ``force=True`` or numerical sampling; ``None`` always returns ``unknown``.
+    Evaluates O(1) old-assumptions properties first and skips slow SAT ``ask()`` queries on
+    transcendental subtrees to keep request latency bounded.
     """
     import sympy
     from sympy.assumptions import Q, ask
 
-    candidates = [expr]
-    try:
-        simplified = sympy.simplify(expr)
-        if simplified != expr:
-            candidates.append(simplified)
-    except Exception:
-        pass
+    allow_sat_ask = not expr.has(sympy.exp, sympy.log, sympy.Sum)
 
-    def truthy(prop: str, target=None) -> bool:
-        obj_list = [target] if target is not None else candidates
-        return any(getattr(item, prop, None) is True for item in obj_list)
+    def _check_fast(item) -> Literal["proved", "contradicted", "unknown"]:  # noqa: ANN001
+        if predicate == "positive":
+            if getattr(item, "is_positive", None) is True:
+                return "proved"
+            if (
+                getattr(item, "is_nonpositive", None) is True
+                or getattr(item, "is_negative", None) is True
+                or getattr(item, "is_zero", None) is True
+            ):
+                return "contradicted"
+            return "unknown"
+        if predicate == "non_negative":
+            if (
+                getattr(item, "is_nonnegative", None) is True
+                or getattr(item, "is_positive", None) is True
+                or getattr(item, "is_zero", None) is True
+            ):
+                return "proved"
+            if getattr(item, "is_negative", None) is True:
+                return "contradicted"
+            return "unknown"
+        if predicate == "nonzero":
+            if (
+                getattr(item, "is_nonzero", None) is True
+                or getattr(item, "is_positive", None) is True
+                or getattr(item, "is_negative", None) is True
+            ):
+                return "proved"
+            if getattr(item, "is_zero", None) is True:
+                return "contradicted"
+            return "unknown"
+        if predicate == "negative":
+            if getattr(item, "is_negative", None) is True:
+                return "proved"
+            if (
+                getattr(item, "is_nonnegative", None) is True
+                or getattr(item, "is_positive", None) is True
+                or getattr(item, "is_zero", None) is True
+            ):
+                return "contradicted"
+            return "unknown"
+        if predicate == "non_positive":
+            if (
+                getattr(item, "is_nonpositive", None) is True
+                or getattr(item, "is_negative", None) is True
+                or getattr(item, "is_zero", None) is True
+            ):
+                return "proved"
+            if getattr(item, "is_positive", None) is True:
+                return "contradicted"
+            return "unknown"
+        if predicate == "zero":
+            if getattr(item, "is_zero", None) is True:
+                return "proved"
+            if (
+                getattr(item, "is_nonzero", None) is True
+                or getattr(item, "is_positive", None) is True
+                or getattr(item, "is_negative", None) is True
+            ):
+                return "contradicted"
+            return "unknown"
+        if predicate == "not_one":
+            shifted = sympy.simplify(item - 1)
+            if (
+                getattr(shifted, "is_nonzero", None) is True
+                or getattr(shifted, "is_positive", None) is True
+                or getattr(shifted, "is_negative", None) is True
+            ):
+                return "proved"
+            if getattr(shifted, "is_zero", None) is True:
+                return "contradicted"
+            return "unknown"
+        return "unknown"
+
+    # Sound finite non-empty sum rule: sum_{k=a}^{b} f(k) > 0 when f(k) > 0 and b >= a.
+    if isinstance(expr, sympy.Sum) and len(expr.limits) == 1:
+        _var, lower, upper = expr.limits[0]
+        span = sympy.simplify(upper - lower)
+        body_pos = getattr(expr.function, "is_positive", None) is True
+        span_nonneg = getattr(span, "is_nonnegative", None) is True
+        if body_pos and span_nonneg:
+            if predicate in {"positive", "non_negative", "nonzero"}:
+                return "proved"
+            if predicate in {"negative", "non_positive", "zero"}:
+                return "contradicted"
+
+    fast = _check_fast(expr)
+    if fast != "unknown":
+        return fast
+
+    candidates = [expr]
+    if allow_sat_ask:
+        try:
+            simplified = sympy.simplify(expr)
+            if simplified != expr:
+                fast_s = _check_fast(simplified)
+                if fast_s != "unknown":
+                    return fast_s
+                candidates.append(simplified)
+        except Exception:
+            pass
+    else:
+        return "unknown"
 
     def ask_true(pred_fn, target=None) -> bool:
         obj_list = [target] if target is not None else candidates
@@ -1480,90 +1786,52 @@ def _sympy_check_predicate(
         return False
 
     if predicate == "positive":
-        if truthy("is_positive") or ask_true(Q.positive):
+        if ask_true(Q.positive):
             return "proved"
-        if (
-            truthy("is_nonpositive")
-            or truthy("is_negative")
-            or truthy("is_zero")
-            or ask_true(Q.nonpositive)
-        ):
+        if ask_true(Q.nonpositive):
             return "contradicted"
         return "unknown"
 
     if predicate == "non_negative":
-        if (
-            truthy("is_nonnegative")
-            or truthy("is_positive")
-            or truthy("is_zero")
-            or ask_true(Q.nonnegative)
-            or ask_true(Q.positive)
-        ):
+        if ask_true(Q.nonnegative) or ask_true(Q.positive):
             return "proved"
-        if truthy("is_negative") or ask_true(Q.negative):
+        if ask_true(Q.negative):
             return "contradicted"
         return "unknown"
 
     if predicate == "nonzero":
-        if (
-            truthy("is_nonzero")
-            or truthy("is_positive")
-            or truthy("is_negative")
-            or ask_true(Q.nonzero)
-            or ask_true(Q.positive)
-            or ask_true(Q.negative)
-        ):
+        if ask_true(Q.nonzero) or ask_true(Q.positive) or ask_true(Q.negative):
             return "proved"
-        if truthy("is_zero") or ask_true(Q.zero):
+        if ask_true(Q.zero):
             return "contradicted"
         return "unknown"
 
     if predicate == "negative":
-        if truthy("is_negative") or ask_true(Q.negative):
+        if ask_true(Q.negative):
             return "proved"
-        if (
-            truthy("is_nonnegative")
-            or truthy("is_positive")
-            or truthy("is_zero")
-            or ask_true(Q.nonnegative)
-        ):
+        if ask_true(Q.nonnegative):
             return "contradicted"
         return "unknown"
 
     if predicate == "non_positive":
-        if (
-            truthy("is_nonpositive")
-            or truthy("is_negative")
-            or truthy("is_zero")
-            or ask_true(Q.nonpositive)
-        ):
+        if ask_true(Q.nonpositive):
             return "proved"
-        if truthy("is_positive") or ask_true(Q.positive):
+        if ask_true(Q.positive):
             return "contradicted"
         return "unknown"
 
     if predicate == "zero":
-        if truthy("is_zero") or ask_true(Q.zero):
+        if ask_true(Q.zero):
             return "proved"
-        if (
-            truthy("is_nonzero")
-            or truthy("is_positive")
-            or truthy("is_negative")
-            or ask_true(Q.nonzero)
-        ):
+        if ask_true(Q.nonzero):
             return "contradicted"
         return "unknown"
 
     if predicate == "not_one":
         shifted = sympy.simplify(expr - 1)
-        if (
-            getattr(shifted, "is_nonzero", None) is True
-            or getattr(shifted, "is_positive", None) is True
-            or getattr(shifted, "is_negative", None) is True
-            or ask_true(Q.nonzero, shifted)
-        ):
+        if ask_true(Q.nonzero, shifted):
             return "proved"
-        if getattr(shifted, "is_zero", None) is True or ask_true(Q.zero, shifted):
+        if ask_true(Q.zero, shifted):
             return "contradicted"
         return "unknown"
 
@@ -1612,23 +1880,22 @@ def discharge_domain_obligations_from_reviews(
     seen_ids: set[str] = set()
 
     for obligation in obligations:
-        if obligation.status in {"discharged", "unsupported"}:
+        if obligation.status == "discharged":
             continue
         try:
             expr_node = _ast_node_from_dict(obligation.expression)
         except (KeyError, TypeError, ValueError):
             continue
-        expr_symbols = _ast_symbol_names_with_subscripts(expr_node) - _CONSTANTS
+        resolved_ids, all_covered = _resolve_obligation_review_ids(
+            expr_node, reviews_by_symbol, constants=_CONSTANTS,
+        )
         # Fail closed unless every free symbol in the obligation has an accepted human review.
-        if not expr_symbols or not expr_symbols.issubset(reviews_by_symbol):
+        # Constant unsupported expressions (e.g. 0^0, 2^65) have no free symbols and stay so.
+        if not resolved_ids or not all_covered:
             continue
         # Direct constraint check for not_one on single symbol (SymPy assumptions lack != 1).
-        if (
-            obligation.predicate == "not_one"
-            and len(expr_symbols) == 1
-            and expr_node.kind == "symbol"
-        ):
-            sym_name = next(iter(expr_symbols))
+        if obligation.predicate == "not_one" and expr_node.kind == "symbol" and expr_node.value:
+            sym_name = expr_node.value
             rev = reviews_by_symbol[sym_name]
             if rev.reviewed_contract and "not_one" in _parse_constraint_flags(
                 sym_name, rev.reviewed_contract.constraints,
@@ -1657,7 +1924,7 @@ def discharge_domain_obligations_from_reviews(
             continue
 
         verdict = _sympy_check_predicate(obligation.predicate, sym_expr)
-        used_review_ids = sorted(reviews_by_symbol[s].review_id for s in expr_symbols)
+        used_review_ids = sorted(resolved_ids)
         if verdict == "proved":
             digest = hashlib.sha256(
                 (

@@ -24,14 +24,16 @@ def _validate_assumptions(raw: object) -> dict[str, dict[str, object]] | None:
     for name, spec in raw.items():
         if not isinstance(name, str) or not name or len(name) > 64 or not isinstance(spec, dict):
             raise ValueError("invalid assumption entry")
-        if not set(spec).issubset({"category", "domain", "nonzero", "negative"}):
+        if not set(spec).issubset(
+            {"category", "domain", "nonzero", "negative", "positive", "nonnegative"}
+        ):
             raise ValueError("unexpected assumption keys")
         category = spec.get("category")
         domain = spec.get("domain")
         if category not in _ALLOWED_CATEGORIES or domain not in _ALLOWED_DOMAINS:
             raise ValueError("invalid assumption category or domain")
         entry: dict[str, object] = {"category": category, "domain": domain}
-        for flag in ("nonzero", "negative"):
+        for flag in ("nonzero", "negative", "positive", "nonnegative"):
             if flag in spec:
                 if type(spec[flag]) is not bool:
                     raise ValueError("invalid assumption boolean")
@@ -42,6 +44,8 @@ def _validate_assumptions(raw: object) -> dict[str, dict[str, object]] | None:
 
 def _simplify_difference(expr, *, use_domain_rules: bool):  # noqa: ANN001, ANN202
     """Simplify symbolically without force=True so branch cuts remain sound."""
+    if expr.has(sympy.Piecewise):
+        expr = sympy.piecewise_fold(expr)
     diff = sympy.simplify(expr)
     if diff == 0 or not use_domain_rules:
         return diff
@@ -75,12 +79,12 @@ def _compare_expressions(left, right, *, use_domain_rules: bool) -> dict[str, ob
                     "difference": str(rhs_diff),
                 },
             }
-        rearranged = _simplify_difference(
-            (left.lhs - left.rhs) - (right.lhs - right.rhs),
-            use_domain_rules=use_domain_rules,
-        )
-        if rearranged == 0:
-            return {"outcome": "supported", "witness": {"method": method, "difference": "0"}}
+        left_res = left.lhs - left.rhs
+        right_res = right.lhs - right.rhs
+        for combined in (left_res - right_res, left_res + right_res):
+            rearranged = _simplify_difference(combined, use_domain_rules=use_domain_rules)
+            if rearranged == 0:
+                return {"outcome": "supported", "witness": {"method": method, "difference": "0"}}
         return {"outcome": "unknown", "witness": {"method": "sympy_inconclusive"}}
 
     if isinstance(left, sympy.Eq) or isinstance(right, sympy.Eq):

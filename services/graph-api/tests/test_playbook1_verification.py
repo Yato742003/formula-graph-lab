@@ -513,3 +513,244 @@ def test_lean4_export_fails_closed_for_unsupported_matrix_carrier() -> None:
     assert export.status == "unsupported"
     assert export.error_code == "LEAN_UNSUPPORTED_CARRIER"
     assert export.lean_code is None
+
+
+# ── 4. CiPR real-paper verifier upgrades (ML notation, exp/Sum, cases) ─────
+
+
+def test_cipr_eq11_matrix_projection_tag_and_noncommutative_guards() -> None:
+    """CiPR #A8.E11: Q_j = X W_j^Q supports valid rearrangements and blocks illegal swaps."""
+    eq11 = r"\displaystyle\mathbf{Q}_{j} \displaystyle=\mathbf{X}\mathbf{W}^{Q}_{j}"
+    reviews = [
+        _review("Q", category="matrix", shape=("N", "d_k"), domain="real"),
+        _review("W", category="matrix", shape=("d", "d_k"), domain="real"),
+        _review("X", category="matrix", shape=("N", "d"), domain="real"),
+        _review("j", category="index", shape=(), domain="integer"),
+    ]
+    rearranged = run_symbolic_check(
+        eq11,
+        r"\mathbf{Q}_j - \mathbf{X}\mathbf{W}_j^Q = 0",
+        timeout_ms=CHECK_TIMEOUT_MS,
+        contract_reviews=reviews,
+        contract_review_scope="eq-1",
+    )
+    assert rearranged.outcome == "supported"
+    assert rearranged.vector.type == "well_typed"
+    assert rearranged.vector.domain == "discharged"
+
+    swapped_sides = run_symbolic_check(
+        eq11,
+        r"\mathbf{X}\mathbf{W}_j^Q = \mathbf{Q}_j",
+        timeout_ms=CHECK_TIMEOUT_MS,
+        contract_reviews=reviews,
+        contract_review_scope="eq-1",
+    )
+    assert swapped_sides.outcome == "supported"
+
+    illegal_commute = run_symbolic_check(
+        eq11,
+        r"\mathbf{Q}_j = \mathbf{W}_j^Q \mathbf{X}",
+        timeout_ms=CHECK_TIMEOUT_MS,
+        contract_reviews=reviews,
+        contract_review_scope="eq-1",
+    )
+    assert illegal_commute.outcome == "unsupported"
+    assert illegal_commute.vector.type == "ill_typed"
+    assert illegal_commute.error_code == "ILL_TYPED"
+
+    # Even for square matrices with matching shapes, subscripted matrix products MUST NOT commute.
+    sq_reviews = [
+        _review("Q", category="matrix", shape=("d", "d"), domain="real"),
+        _review("W", category="matrix", shape=("d", "d"), domain="real"),
+        _review("X", category="matrix", shape=("d", "d"), domain="real"),
+        _review("j", category="index", shape=(), domain="integer"),
+    ]
+    sq_commute = run_symbolic_check(
+        eq11,
+        r"\mathbf{Q}_j = \mathbf{W}_j^Q \mathbf{X}",
+        timeout_ms=CHECK_TIMEOUT_MS,
+        contract_reviews=sq_reviews,
+        contract_review_scope="eq-1",
+    )
+    assert sq_commute.vector.type == "well_typed"
+    assert sq_commute.outcome == "unknown"
+
+
+def test_cipr_eq10_scaled_attention_discharges_sqrt_dk_and_guards_transpose() -> None:
+    """CiPR #A8.E10: head_j = softmax(Q_j K_j^T / sqrt(d_k)) V_j discharges d_k > 0."""
+    eq10 = (
+        r"\displaystyle head_{j} \displaystyle="
+        r"softmax(\frac{\mathbf{Q}_{j}\mathbf{K}_{j}^{T}}{\sqrt{d_{k}}})\mathbf{V}_{j}"
+    )
+    reviews = [
+        _review("Q", category="matrix", shape=("n", "d"), domain="real"),
+        _review("K", category="matrix", shape=("n", "d"), domain="real"),
+        _review("V", category="matrix", shape=("n", "d"), domain="real"),
+        _review("head", category="matrix", shape=("n", "d"), domain="real"),
+        _review("d", category="scalar", shape=(), domain="positive"),
+        _review("j", category="index", shape=(), domain="integer"),
+        _review("k", category="index", shape=(), domain="integer"),
+        _review("softmax", category="function", shape=None, domain="real"),
+    ]
+    supported = run_symbolic_check(
+        eq10,
+        r"head_{j} - softmax(\frac{\mathbf{Q}_{j}\mathbf{K}_{j}^{T}}{\sqrt{d_{k}}})"
+        r"\mathbf{V}_{j} = 0",
+        timeout_ms=CHECK_TIMEOUT_MS,
+        contract_reviews=reviews,
+        contract_review_scope="eq-1",
+    )
+    assert supported.outcome == "supported"
+    assert supported.vector.type == "well_typed"
+    assert supported.vector.domain == "discharged"
+
+    # Dropping the transpose breaks inner contraction (n, d) * (n, d) -> ILL_TYPED.
+    dropped_transpose = run_symbolic_check(
+        eq10,
+        r"head_{j} = softmax(\frac{\mathbf{Q}_{j}\mathbf{K}_{j}}{\sqrt{d_{k}}})\mathbf{V}_{j}",
+        timeout_ms=CHECK_TIMEOUT_MS,
+        contract_reviews=reviews,
+        contract_review_scope="eq-1",
+    )
+    assert dropped_transpose.outcome == "unsupported"
+    assert dropped_transpose.error_code == "ILL_TYPED"
+
+    # Square attention matrices: softmax(...) * V_j MUST NOT commute with V_j * softmax(...).
+    sq_reviews = [
+        _review("Q", category="matrix", shape=("n", "n"), domain="real"),
+        _review("K", category="matrix", shape=("n", "n"), domain="real"),
+        _review("V", category="matrix", shape=("n", "n"), domain="real"),
+        _review("head", category="matrix", shape=("n", "n"), domain="real"),
+        _review("d", category="scalar", shape=(), domain="positive"),
+        _review("j", category="index", shape=(), domain="integer"),
+        _review("k", category="index", shape=(), domain="integer"),
+        _review("softmax", category="function", shape=None, domain="real"),
+    ]
+    commuted = run_symbolic_check(
+        eq10,
+        r"head_{j} = \mathbf{V}_{j} softmax(\frac{\mathbf{Q}_{j}\mathbf{K}_{j}^{T}}{\sqrt{d_{k}}})",
+        timeout_ms=CHECK_TIMEOUT_MS,
+        contract_reviews=sq_reviews,
+        contract_review_scope="eq-1",
+    )
+    assert commuted.vector.type == "well_typed"
+    assert commuted.outcome == "unknown"
+
+    # Without positive domain on d, sqrt(d_k) must stay fail-closed (never discharged).
+    real_d_reviews = [
+        r if r.symbol_name != "d" else _review("d", category="scalar", shape=(), domain="real")
+        for r in reviews
+    ]
+    unresolved_d = run_symbolic_check(
+        eq10,
+        eq10,
+        timeout_ms=CHECK_TIMEOUT_MS,
+        contract_reviews=real_d_reviews,
+        contract_review_scope="eq-1",
+    )
+    assert unresolved_d.outcome == "unsupported"
+    assert unresolved_d.vector.domain == "unsupported"
+
+
+def test_cipr_infonce_exp_and_finite_positive_sum_discharge_fail_closed() -> None:
+    """CiPR #S3.E2 InfoNCE: exp/non-empty Sum(exp) discharge; empty-capable fails closed."""
+    src = r"-\log\frac{\exp(s_q / \tau)}{\sum_{n=1}^{N}\exp(s_n / \tau)}"
+    dst = r"\log\left(\sum_{n=1}^{N}\exp(s_n / \tau)\right) - \frac{s_q}{\tau}"
+    good_reviews = [
+        _review("s", category="scalar", shape=(), domain="real"),
+        _review("q", category="index", shape=(), domain="integer"),
+        _review("tau", category="scalar", shape=(), domain="positive"),
+        _review("N", category="scalar", shape=(), domain="integer", constraints=["positive"]),
+    ]
+    ok = run_symbolic_check(
+        src,
+        dst,
+        timeout_ms=CHECK_TIMEOUT_MS,
+        contract_reviews=good_reviews,
+        contract_review_scope="eq-1",
+    )
+    assert ok.outcome == "supported"
+    assert ok.vector.domain == "discharged"
+
+    # Unconstrained integer N could be 0 (empty sum = 0 in log/denominator) -> MUST fail closed.
+    zero_capable_reviews = [
+        _review("s", category="scalar", shape=(), domain="real"),
+        _review("q", category="index", shape=(), domain="integer"),
+        _review("tau", category="scalar", shape=(), domain="positive"),
+        _review("N", category="scalar", shape=(), domain="integer"),
+    ]
+    unsafe = run_symbolic_check(
+        src,
+        dst,
+        timeout_ms=CHECK_TIMEOUT_MS,
+        contract_reviews=zero_capable_reviews,
+        contract_review_scope="eq-1",
+    )
+    assert unsafe.outcome != "supported"
+    assert unsafe.vector.domain != "discharged"
+
+
+def test_cipr_piecewise_cases_parse_shape_and_verify_while_rejecting_other_envs() -> None:
+    """CiPR Eq (4) & #A2.E8 cases environments parse cleanly while \\begin{matrix} stays blocked."""
+    import pytest
+
+    from app.formula_ast import FormulaParseError, parse_formula
+    from app.symbol_contracts import SymbolContract, check_shape_compatibility
+
+    eq4 = parse_formula(
+        r"A(i,j)=\begin{cases}1&\text{if}\ j=\kappa_{i}\ \text{or}\ "
+        r"\kappa_{j}=i\ \text{or}\ \kappa_{i}=\kappa_{j}\\ 0&\text{else}\end{cases},"
+    )
+    assert eq4.root.kind == "equals"
+    assert eq4.root.children[1].kind == "piecewise"
+    assert len(eq4.root.children[1].children) == 2
+    assert set(eq4.free_variables) == {"i", "j", "kappa"}
+
+    eq8 = parse_formula(
+        r"\displaystyle\mathcal{R_{B}}(i) \displaystyle=\begin{cases}"
+        r"\mathcal{G_{B}}(i)\cup(\mathcal{P_{B}}(i)\cap\mathcal{I_{U}})\quad&"
+        r"\text{if $i\in\mathcal{I_{L}}$}\\ "
+        r"\mathcal{P_{B}}(i)\quad&\text{if $i\in\mathcal{I_{U}}$}\end{cases},"
+    )
+    assert eq8.root.kind == "equals"
+    assert eq8.root.children[1].kind == "piecewise"
+    assert "if" not in eq8.free_variables
+    assert "else" not in eq8.free_variables
+
+    # CiPR Eq (2) parses \bm, \log\frac, \neq with bound q & n (no phantom bm/neq/log/q/n in free).
+    eq2 = parse_formula(
+        r"\mathcal{L}_{i}^{a}=-\frac{1}{|\mathcal{P_{B}}(i)|}\sum_{q\in\mathcal{P_{B}}(i)}"
+        r"\log\frac{\exp(\bm{z}_{i}\cdot\bm{z}_{q}/\tau_{a})}"
+        r"{\sum_{n\in\mathcal{B},n\neq i}\exp(\bm{z}_{i}\cdot\bm{z}_{n}/\tau_{a})}"
+    )
+    assert {"bm", "neq", "log", "q", "n"}.isdisjoint(eq2.free_variables)
+    assert {"q", "n"}.issubset(eq2.bound_variables)
+
+    # Piecewise branch shape mismatch MUST fail closed.
+    bad_pw = parse_formula(r"\begin{cases} M & x > 0 \\ 1 & \text{else} \end{cases}")
+    errs = check_shape_compatibility(
+        [
+            SymbolContract(name="M", category="matrix", shape=(2, 2)),
+            SymbolContract(name="x", category="scalar", shape=()),
+        ],
+        bad_pw,
+    )
+    assert len(errs) == 1
+    assert "mismatch" in errs[0].message.lower()
+
+    # Scalar piecewise algebraic equivalence passes in worker; non-cases env stays rejected.
+    pw_ok = run_symbolic_check(
+        r"f(x) = \begin{cases} x + x & \text{if } x > 0 \\ 0 & \text{else} \end{cases}",
+        r"f(x) = \begin{cases} 2x & x > 0 \\ 0 & \text{otherwise} \end{cases}",
+        timeout_ms=CHECK_TIMEOUT_MS,
+        contract_reviews=[
+            _review("f", category="function", shape=None, domain="real"),
+            _review("x", category="scalar", shape=(), domain="real"),
+        ],
+        contract_review_scope="eq-1",
+    )
+    assert pw_ok.outcome == "supported"
+
+    with pytest.raises(FormulaParseError) as env_err:
+        parse_formula(r"\begin{matrix} 1 & 0 \\ 0 & 1 \end{matrix}")
+    assert env_err.value.code == "UNSUPPORTED_ENVIRONMENT"

@@ -468,3 +468,61 @@ def test_pbt_lean4_five_bin_audit_and_excess_binder_rejection(
     assert tampered_audit.declaration_fidelity == "FAIL"
     assert tampered_audit.bin_counts["EXCESS"] >= 1
     assert tampered_audit.proof_status == "AUDIT_FAILED"
+
+
+# ── 5. CiPR Piecewise & Transcendental Domain PBT Invariants ───
+
+
+@settings(max_examples=60, deadline=None)
+@given(
+    var=st.sampled_from(["a", "b", "x", "y", "z"]),
+    c1=st.integers(min_value=1, max_value=9),
+    c2=st.integers(min_value=1, max_value=9),
+    op=st.sampled_from([">", "<", r"\geq", r"\leq", r"\neq"]),
+    default_kw=st.sampled_from([r"\text{else}", r"\text{otherwise}"]),
+)
+def test_pbt_piecewise_cases_canonicalization_idempotence(
+    var: str,
+    c1: int,
+    c2: int,
+    op: str,
+    default_kw: str,
+) -> None:
+    expr = (
+        rf"f({var}) = \begin{{cases}} {c1} \cdot {var} & \text{{if }} {var} {op} 0 \\ "
+        rf"{c2} & {default_kw} \end{{cases}}"
+    )
+    parsed = parse_formula(expr)
+    canon_once = canonicalize(parsed.root)
+    canon_twice = canonicalize(canon_once)
+    assert canon_twice == canon_once
+    assert compute_canonical_hash(canon_once) == parsed.syntax_hash
+    assert parsed.root.children[1].kind == "piecewise"
+    assert {"if", "else", "otherwise"}.isdisjoint(parsed.free_variables)
+
+
+@settings(max_examples=50, deadline=None)
+@given(
+    vars_list=st.lists(
+        st.sampled_from(["a", "b", "c", "s", "x"]),
+        min_size=1,
+        max_size=3,
+        unique=True,
+    ),
+)
+def test_pbt_exp_sum_domain_discharge_soundness(vars_list: list[str]) -> None:
+    exp_sum = " + ".join(rf"\exp({v} / \tau)" for v in vars_list)
+    parsed = parse_formula(rf"\log\frac{{\exp({vars_list[0]} / \tau)}}{{{exp_sum}}}")
+    reviews = [_review(v, domain="real") for v in vars_list] + [_review("tau", domain="positive")]
+    contracts = [_contract(v, domain="real") for v in vars_list] + [
+        _contract("tau", domain="positive")
+    ]
+    obligations = infer_domain_obligations(contracts, parsed)
+    assert obligations
+    derived = discharge_domain_obligations_from_reviews(obligations, reviews, scope="E1")
+    assert assess_domain_obligations(obligations, derived).status == "discharged"
+
+    # Without positive tau, division by tau cannot be discharged (fail-closed).
+    weak_reviews = [_review(v, domain="real") for v in vars_list] + [_review("tau", domain="real")]
+    weak_derived = discharge_domain_obligations_from_reviews(obligations, weak_reviews, scope="E1")
+    assert assess_domain_obligations(obligations, weak_derived).status != "discharged"
